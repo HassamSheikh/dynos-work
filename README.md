@@ -57,7 +57,7 @@ Requires [Superpowers](https://github.com/obra/superpowers) to be installed firs
 **Claude Code:**
 ```bash
 /plugin install superpowers
-/plugin install dynos-audit@claude-plugins-official
+/plugin install github:HassamSheikh/dynos-audit
 ```
 
 **Cursor:** Search for `dynos-audit` in the plugin marketplace.
