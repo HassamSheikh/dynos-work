@@ -6,13 +6,13 @@ Spec-driven audit enforcement for AI coding agents. Forces every phase of develo
 
 LLMs lie about being done.
 
-They skip requirements, mark tasks complete without evidence, and present milestones as finished while gaps remain. Ask an AI agent to build a feature from a spec and it will confidently say "done" — while missing edge cases, skipping error states, and leaving requirements unimplemented.
+They skip requirements, mark tasks complete without evidence, and present milestones as finished while gaps remain. Ask an AI agent to build a feature from a spec and it will confidently say "done" while missing edge cases, skipping error states, and leaving requirements unimplemented.
 
 The bigger the spec, the worse it gets. Without enforcement, no phase is ever truly complete.
 
 ## What dynos-audit Does
 
-`dynos-audit` installs alongside [Superpowers](https://github.com/obra/superpowers) — a workflow plugin for AI coding agents — and intercepts every phase transition with a mandatory audit loop.
+`dynos-audit` installs alongside [Superpowers](https://github.com/obra/superpowers) (a workflow plugin for AI coding agents) and intercepts every phase transition with a mandatory audit loop.
 
 At every checkpoint, it builds a requirement ledger from your spec, audits the current artifact against it, identifies gaps, delegates fixes, and re-audits. It loops until every requirement is provably done with evidence. It never stops at "I found issues." It never says "mostly complete."
 
@@ -35,7 +35,7 @@ each implementation    → audit-router
 task                     Inspects files touched, dispatches correct auditors
         ↓
 finishing the branch   → spec-auditor
-                         Final gate — blocks merge until passing
+                         Final gate, blocks merge until passing
 ```
 
 The `audit-router` looks at what files actually changed via `git diff --name-only` and routes to the right auditors:
