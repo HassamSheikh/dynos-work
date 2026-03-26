@@ -1,0 +1,16 @@
+{
+  "name": "dynos-audit",
+  "displayName": "Dynos Audit",
+  "description": "Spec-driven audit enforcement. Requires Superpowers.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Hassam",
+    "email": ""
+  },
+  "homepage": "https://github.com/hassam/dynos-audit",
+  "repository": "https://github.com/hassam/dynos-audit",
+  "license": "MIT",
+  "keywords": ["audit", "spec", "completion", "enforcement"],
+  "skills": "./skills/",
+  "hooks": "./hooks-cursor.json"
+}
