@@ -1,89 +1,117 @@
-<a href="https://dynos.fit"><img src="dynos-logo-dark.svg" alt="dynos.fit" width="200"/></a>
+# dynos-work
 
-Built by the team at [**dynos.fit**](https://dynos.fit)
+**Audit-governed autonomous engineering system.**
 
-# dynos-audit
+Give it a task. It plans, executes, audits, repairs, and only marks complete when independent evidence proves every requirement is done.
 
-Spec-driven audit enforcement for AI coding agents. Forces every phase of development to prove completion against your spec before moving on.
+No dependencies. No superpowers required.
 
-## The Problem
+---
 
-LLMs lie about being done.
+## The problem
 
-They skip requirements, mark tasks complete without evidence, and present milestones as finished while gaps remain. Ask an AI agent to build a feature from a spec and it will confidently say "done" while missing edge cases, skipping error states, and leaving requirements unimplemented.
+AI agents claim work is complete when it isn't.
 
-The bigger the spec, the worse it gets. Without enforcement, no phase is ever truly complete.
+They write code that mostly works, skip edge cases, leave stubs, miss requirements, and declare done. Standard audit tools just report findings — they don't close the loop.
 
-## What dynos-audit Does
+## The solution
 
-`dynos-audit` installs alongside [Superpowers](https://github.com/obra/superpowers) (a workflow plugin for AI coding agents) and intercepts every phase transition with a mandatory audit loop.
+dynos-work owns the full lifecycle:
 
-At every checkpoint, it builds a requirement ledger from your spec, audits the current artifact against it, identifies gaps, delegates fixes, and re-audits. It loops until every requirement is provably done with evidence. It never stops at "I found issues." It never says "mostly complete."
+1. **Intake** — understands your task, extracts acceptance criteria
+2. **Plan** — generates implementation plan with dependency graph
+3. **Execute** — dispatches specialized executor subagents in parallel
+4. **Audit** — five independent auditors run simultaneously
+5. **Repair** — converts findings to precise fixes, loops back to audit
+6. **Gate** — only marks DONE when all auditors pass with evidence
 
-No phase advances until the auditor passes.
+Agent self-reports are untrusted. Completion requires independent proof.
 
-## How It Works
+---
 
-When you give an agent a spec and ask it to build something, `dynos-audit` fires automatically at four points:
+## Usage
+
+### Start any task
 
 ```
-You provide spec
-        ↓
-brainstorming          → spec-auditor
-                         Did the brainstorm cover the full spec?
-        ↓
-writing-plans          → spec-auditor
-                         Does the plan map to every requirement?
-        ↓
-each implementation    → audit-router
-task                     Inspects files touched, dispatches correct auditors
-        ↓
-finishing the branch   → spec-auditor
-                         Final gate, blocks merge until passing
+/dynos-work:start Add JWT authentication to the /api/users endpoint. Use RS256.
+Store the public key in env. Protect all /api/users/* routes. Return 401 with
+a structured error body on invalid token.
 ```
 
-The `audit-router` looks at what files actually changed via `git diff --name-only` and routes to the right auditors:
+That's it. dynos-work handles the rest.
 
-| Files changed | Auditors dispatched |
-|---|---|
-| UI only (`.tsx`, `.jsx`, `.css`, `.html`, `.vue`, `.svelte`) | `spec-auditor` + `ui-auditor` |
-| Code only (`.ts`, `.js`, `.py`, `.go`, `.rs`, `.java`, etc.) | `spec-auditor` + `code-quality-auditor` |
-| Both | All three |
+### Power-user commands
+
+```
+/dynos-work:audit    # Audit current work
+/dynos-work:status   # Show task progress and open findings
+/dynos-work:repair   # Manually trigger repair on a finding
+/dynos-work:resume   # Resume an interrupted task
+```
+
+---
+
+## What runs under the hood
+
+**Executor specialists (run your code):**
+- UI executor — components, pages, interactions, styling
+- Backend executor — APIs, services, auth, business logic
+- ML executor — models, pipelines, inference
+- DB executor — schema, migrations, indexes, queries
+- Refactor executor — structural cleanup
+- Testing executor — unit, integration, e2e tests
+- Integration executor — wiring, plumbing, external APIs
+
+**Auditors (verify independently, read-only):**
+- Spec-completion — did every acceptance criterion get implemented?
+- Security — injection, auth gaps, secrets, data exposure
+- UI — states, interactions, accessibility, responsive behavior
+- Code quality — structure, correctness, tests, maintainability
+- DB schema — design, migration safety, indexes, integrity
+
+Spec-completion and security run on every task. Others activate based on what was touched.
+
+---
+
+## State persistence
+
+All task state is stored in `.dynos/task-{id}/` (gitignored). Tasks survive session restarts. Use `/dynos-work:resume` to continue interrupted work.
+
+---
 
 ## Installation
 
-Requires [Superpowers](https://github.com/obra/superpowers) to be installed first.
+### Claude Code
 
-**Claude Code:**
-```bash
-/plugin install superpowers
-/plugin install github:HassamSheikh/dynos-audit
+```
+/plugin install github:HassamSheikh/dynos-work
 ```
 
-**Cursor:** Search for `dynos-audit` in the plugin marketplace.
+### Cursor
 
-**Gemini CLI:**
+Search "dynos-work" in the Cursor plugin marketplace.
+
+### Gemini CLI
+
 ```bash
-gemini extensions install https://github.com/hassam/dynos-audit
+gemini extensions install https://github.com/HassamSheikh/dynos-work
 ```
 
-**OpenCode:** See [`.opencode/`](.opencode/) for plugin setup.
+### OpenCode
 
-**Codex:** See [`.codex/INSTALL.md`](.codex/INSTALL.md) for manual install instructions.
+Register `.opencode/plugins/dynos-work.js` in your OpenCode config.
 
-## Skills
+### Codex
 
-| Skill | When it runs | What it checks |
-|---|---|---|
-| `audit-router` | After each implementation task | Inspects git diff, classifies changed files as UI/Code/Full, dispatches the right auditors |
-| `spec-auditor` | Every phase (brainstorm, plan, code) | Builds a requirement ledger from your spec, audits the artifact, delegates fixes, re-audits until everything is done with evidence |
-| `code-quality-auditor` | When logic files change (`.ts`, `.js`, `.py`, etc.) | Spec coverage, correctness, edge cases, error handling, tests, structure, cleanup |
-| `ui-auditor` | When UI files change (`.tsx`, `.jsx`, `.css`, etc.) | States (loading/empty/error/success), spec coverage, interactions, accessibility, responsive behavior |
+See `.codex/INSTALL.md` for manual setup instructions.
 
-## Supported Platforms
-
-Claude Code, Cursor, Gemini CLI, OpenCode, Codex
+---
 
 ## Philosophy
 
-Never trust claims. Audit against evidence at every phase.
+> Completion is determined only by independent audit backed by evidence.
+
+The Lifecycle Controller is the only entity that can write `DONE`. It only does so after every applicable auditor passes, every acceptance criterion has a file+line evidence reference, and the repair loop has converged to zero blocking findings.
+
+There is no shortcut.
