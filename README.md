@@ -1,3 +1,5 @@
+[![dynos.fit](dynos-logo-dark.svg)](https://dynos.fit)
+
 # dynos-work
 
 **Audit-governed autonomous engineering system.**
@@ -116,6 +118,4 @@ The Lifecycle Controller is the only entity that can write `DONE`. It only does 
 
 There is no shortcut.
 
----
 
-[![dynos.fit](dynos-logo-dark.svg)](https://dynos.fit)
