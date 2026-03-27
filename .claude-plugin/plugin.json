@@ -1,14 +1,14 @@
 {
-  "name": "dynos-audit",
-  "description": "Spec-driven audit enforcement that forces AI agents to prove completion before advancing phases.",
-  "version": "1.0.0",
+  "name": "dynos-work",
+  "description": "Audit-governed autonomous engineering system. Full lifecycle from intake to evidence-backed completion.",
+  "version": "2.0.0",
   "author": {
     "name": "Hassam Sheikh",
     "url": "https://dynos.fit"
   },
-  "homepage": "https://github.com/HassamSheikh/dynos-audit",
+  "homepage": "https://github.com/HassamSheikh/dynos-work",
   "license": "MIT",
-  "keywords": ["audit", "spec", "enforcement", "quality", "testing", "superpowers", "tdd"],
+  "keywords": ["audit", "spec", "enforcement", "quality", "lifecycle", "autonomous", "orchestration"],
   "category": "code-quality",
   "skills": "./skills/",
   "hooks": "./hooks.json"

@@ -1,6 +1,6 @@
 {
-  "name": "dynos-audit",
-  "version": "1.0.0",
-  "description": "Spec-driven audit enforcement for Claude Code. Requires Superpowers.",
+  "name": "dynos-work",
+  "version": "2.0.0",
+  "description": "Audit-governed autonomous engineering system. Standalone — no dependencies required.",
   "license": "MIT"
 }
