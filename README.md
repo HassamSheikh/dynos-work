@@ -1,4 +1,10 @@
-[![dynos.fit](dynos-logo-dark.svg)](https://dynos.fit)
+<p align="center">
+  <a href="https://dynos.fit">
+    <img src="dynos-logo-dark.svg" alt="dynos.fit" />
+  </a>
+  <br />
+  <sub>Built by <a href="https://dynos.fit">dynos.fit</a></sub>
+</p>
 
 # dynos-work
 
