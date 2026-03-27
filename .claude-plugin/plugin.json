@@ -1,12 +1,14 @@
 {
   "name": "dynos-work",
-  "version": "1.0.0",
   "description": "Audit-governed autonomous engineering system. Plans, executes, audits, repairs, and only marks complete when independent evidence proves every requirement is done.",
+  "version": "1.0.0",
   "author": {
     "name": "dynos.fit",
     "url": "https://dynos.fit"
   },
   "homepage": "https://github.com/HassamSheikh/dynos-work",
-  "repository": "https://github.com/HassamSheikh/dynos-work",
-  "keywords": ["audit", "autonomous", "engineering", "agents"]
+  "license": "MIT",
+  "keywords": ["audit", "autonomous", "engineering", "agents", "planning", "repair"],
+  "skills": "./skills/",
+  "hooks": "./hooks.json"
 }
