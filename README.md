@@ -42,9 +42,8 @@ Agent self-reports are untrusted. Completion requires independent proof.
 ### Start any task
 
 ```
-/dynos-work:start Add JWT authentication to the /api/users endpoint. Use RS256.
-Store the public key in env. Protect all /api/users/* routes. Return 401 with
-a structured error body on invalid token.
+/dynos-work:start add a stripe checkout flow, products page, and success/cancel pages.
+use the test keys from env. make it look clean.
 ```
 
 That's it. dynos-work handles the rest.
