@@ -115,3 +115,7 @@ See `.codex/INSTALL.md` for manual setup instructions.
 The Lifecycle Controller is the only entity that can write `DONE`. It only does so after every applicable auditor passes, every acceptance criterion has a file+line evidence reference, and the repair loop has converged to zero blocking findings.
 
 There is no shortcut.
+
+---
+
+[![dynos.fit](dynos-logo-dark.svg)](https://dynos.fit)
