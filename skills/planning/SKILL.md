@@ -112,5 +112,7 @@ Write to `.dynos/task-{id}/plan.md`:
 - Do not invent requirements — only normalize what was given
 - Every acceptance criterion must be independently verifiable
 - Write files exactly where the Lifecycle Controller instructed
+- Do not write the `stage` field to manifest.json — that is the Lifecycle Controller's exclusive domain
+- During TASK_CLASSIFICATION you may only write the `classification` key to manifest.json
 - Do not advance lifecycle stages — that is the Lifecycle Controller's job
 - Do not spawn other subagents

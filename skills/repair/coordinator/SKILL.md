@@ -26,15 +26,15 @@ You are the Repair Coordinator. You receive audit findings and produce a precise
 
 ## Executor assignment rules
 
-- UI file findings → `execution/ui-executor`
-- Backend/API/service findings → `execution/backend-executor`
-- Auth/authz findings → `execution/backend-executor`
-- Schema/migration findings → `execution/db-executor`
-- Query optimization findings → `execution/db-executor`
-- Config/secrets findings → `execution/integration-executor`
-- Test coverage findings → `execution/testing-executor`
-- Structural/refactor findings → `execution/refactor-executor`
-- ML/model findings → `execution/ml-executor`
+- UI file findings → `dynos-work:execution/ui-executor`
+- Backend/API/service findings → `dynos-work:execution/backend-executor`
+- Auth/authz findings → `dynos-work:execution/backend-executor`
+- Schema/migration findings → `dynos-work:execution/db-executor`
+- Query optimization findings → `dynos-work:execution/db-executor`
+- Config/secrets findings → `dynos-work:execution/integration-executor`
+- Test coverage findings → `dynos-work:execution/testing-executor`
+- Structural/refactor findings → `dynos-work:execution/refactor-executor`
+- ML/model findings → `dynos-work:execution/ml-executor`
 
 ## Instruction quality rules
 
@@ -59,7 +59,7 @@ Every instruction must be specific enough that an executor with no additional co
           "auditor": "security-auditor",
           "severity": "critical",
           "description": "JWT secret hardcoded in auth.ts:47",
-          "assigned_executor": "execution/backend-executor",
+          "assigned_executor": "dynos-work:execution/backend-executor",
           "instruction": "Move JWT secret to process.env.JWT_SECRET...",
           "affected_files": ["src/api/auth.ts"],
           "retry_count": 0,

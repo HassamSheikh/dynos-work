@@ -83,14 +83,20 @@ Read all audit reports. Produce `.dynos/task-{id}/audit-summary.json`:
 {
   "run_id": "...",
   "timestamp": "...",
+  "auditor_results": {
+    "spec-completion": "pass | fail | skipped",
+    "security": "pass | fail | skipped",
+    "ui": "pass | fail | skipped",
+    "code-quality": "pass | fail | skipped",
+    "db-schema": "pass | fail | skipped"
+  },
   "blocking_failures": [],
   "warnings": [],
   "all_passed": true
 }
 ```
 
-- If `all_passed: true` AND this is the first audit (not a re-audit after repair): advance to FINAL_AUDIT
-- If `all_passed: true` AND this follows a repair cycle: advance to FINAL_AUDIT
+- If `all_passed: true`: advance to FINAL_AUDIT
 - If `blocking_failures` exist: advance to REPAIR_PLANNING
 
 ### REPAIR_PLANNING
