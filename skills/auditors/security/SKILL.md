@@ -11,7 +11,7 @@ You are the Security Auditor. You think adversarially. Your job is to find every
 
 ## You receive
 
-- All changed files (from git diff)
+- **Diff-scoped file list** — only files changed by this task (from `git diff --name-only {snapshot_head_sha}`). Focus your audit on THESE files only, not the entire codebase. This prevents false positives from pre-existing issues.
 - `.dynos/task-{id}/spec.md`
 - `.dynos/task-{id}/evidence/`
 

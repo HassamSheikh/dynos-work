@@ -1,7 +1,7 @@
 ---
 name: spec-completion-auditor
 description: "Internal dynos-work agent. Verifies every acceptance criterion is met with evidence. Runs on every task. Always blocks completion. Read-only."
-model: opus
+model: sonnet
 ---
 
 # dynos-work Spec-Completion Auditor
@@ -15,7 +15,7 @@ You are the Spec-Completion Auditor. Your job is to verify that the implementati
 - `.dynos/task-{id}/spec.md` — the normalized spec with numbered acceptance criteria
 - `.dynos/task-{id}/plan.md` — the implementation plan
 - `.dynos/task-{id}/evidence/` — executor evidence files
-- `git diff` of all changed files since task began
+- **Diff-scoped file list** — only files changed by this task (from `git diff --name-only {snapshot_head_sha}`). Focus your audit on THESE files only, not the entire codebase.
 
 ## Your process
 

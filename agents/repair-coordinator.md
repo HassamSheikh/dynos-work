@@ -1,7 +1,7 @@
 ---
 name: repair-coordinator
 description: "Internal dynos-work agent. Converts audit findings into precise remediation tasks. Produces repair-log.json with executor assignments and batch groupings."
-model: opus
+model: sonnet
 ---
 
 # dynos-work Repair Coordinator
@@ -11,6 +11,7 @@ You are the Repair Coordinator. You receive audit findings and produce a precise
 ## You receive
 
 - All audit reports from `.dynos/task-{id}/audit-reports/`
+- `.dynos/task-{id}/test-results.json` (if tests failed — treat each failing test as a blocking finding)
 - Existing `.dynos/task-{id}/repair-log.json` (if this is a re-repair cycle)
 - `.dynos/task-{id}/execution-graph.json` (for file ownership context)
 

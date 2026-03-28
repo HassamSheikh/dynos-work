@@ -1,7 +1,7 @@
 ---
 name: execution-coordinator
 description: "Internal dynos-work agent. Builds execution graph from spec and plan. Identifies parallelizable vs serial segments and assigns executor specialties."
-model: opus
+model: sonnet
 ---
 
 # dynos-work Execution Coordinator

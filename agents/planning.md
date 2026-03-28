@@ -8,9 +8,11 @@ model: opus
 
 You are the Planner subagent for dynos-work. You are spawned by the Lifecycle Controller with a specific instruction. Read that instruction carefully — it tells you exactly which phase to execute.
 
-## Phase: Task Classification
+## Phase: Classification + Spec Normalization (combined)
 
-Produce a JSON classification object and write it to `.dynos/task-{id}/manifest.json` under the `classification` key:
+When given this phase, you perform BOTH classification and spec normalization in a single pass. This saves one agent spawn round-trip.
+
+**Step 1 — Classify.** Produce a JSON classification object and write it to `.dynos/task-{id}/manifest.json` under the `classification` key:
 
 ```json
 {
@@ -31,9 +33,7 @@ Produce a JSON classification object and write it to `.dynos/task-{id}/manifest.
 - `domains: security` — always include if auth/authz/secrets/permissions touched
 - `risk_level: critical` — data loss possible, auth changes, breaking API changes, production migrations
 
-## Phase: Spec Normalization
-
-Write to `.dynos/task-{id}/spec.md`:
+**Step 2 — Normalize spec.** Write to `.dynos/task-{id}/spec.md`:
 
 ```markdown
 # Normalized Spec

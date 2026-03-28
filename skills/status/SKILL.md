@@ -11,7 +11,7 @@ Show the current state of the active dynos-work task.
 
 1. Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED)
 2. If no active task, report "No active dynos-work task found. Start one with /dynos-work:start"
-3. Read: manifest.json, spec.md, execution-graph.json, latest audit-reports, repair-log.json
+3. Read: manifest.json, spec.md, execution-graph.json, latest audit-reports, repair-log.json, test-results.json
 4. Print a human-readable status report
 
 ## Output format
@@ -23,29 +23,39 @@ Task: task-20260327-001
 Title: [First 80 chars of task]
 Stage: CHECKPOINT_AUDIT
 Risk: medium
+Snapshot: dynos/task-20260327-001-snapshot
 
 Lifecycle Progress:
   ✓ INTAKE
-  ✓ TASK_CLASSIFICATION
-  ✓ SPEC_NORMALIZATION
+  ✓ CLASSIFY_AND_SPEC
   ✓ PLANNING
+  ✓ PLAN_REVIEW (auto-approved | user-approved)
   ✓ EXECUTION_GRAPH_BUILD
+  ✓ PRE_EXECUTION_SNAPSHOT
   ✓ EXECUTION (3/3 segments complete)
+  ✓ TEST_EXECUTION (all tests passed)
   → CHECKPOINT_AUDIT (in progress)
   ○ FINAL_AUDIT
   ○ COMPLETION_REVIEW
+
+Execution Progress:
+  Segments: [N]/[total] complete
+  Current batch: [seg-003-ui, seg-004-tests]
+  Completed: [seg-001-db, seg-002-backend]
 
 Acceptance Criteria: [N]/[total] covered
 
 Latest Audit Results:
   spec-completion: PASS | FAIL | not yet run
   security: PASS | FAIL | not yet run
-  ui: PASS | FAIL | SKIPPED | not yet run
-  code-quality: PASS | FAIL | SKIPPED | not yet run
-  db-schema: PASS | FAIL | SKIPPED | not yet run
+  ui: PASS | FAIL | SKIPPED | REUSED | not yet run
+  code-quality: PASS | FAIL | SKIPPED | REUSED | not yet run
+  db-schema: PASS | FAIL | SKIPPED | REUSED | not yet run
 
 Open Blocking Findings:
   [finding-id] [auditor]: [description] ([file:line])
+
+Test Results: PASS | FAIL ([N] failing tests) | not yet run
 
 Repair Cycle: [N] ([N] findings resolved, [N] remaining)
 

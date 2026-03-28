@@ -10,19 +10,35 @@ Trigger a standalone audit on the current state of the codebase.
 ## What you do
 
 1. Check if there is an active task in `.dynos/` (look for the most recent `manifest.json` with stage not DONE/FAILED)
-2. If active task found: spawn all applicable auditors for that task using the Agent tool, wait for all to complete, then report results
-3. If no active task: create a minimal task record in `.dynos/`, run all five auditors on the current git diff, report results
+2. If active task found: use its classification for risk-based auditor selection, and diff-scope to task changes
+3. If no active task: create a minimal task record in `.dynos/`, run auditors on the current git diff
 
-## Auditor selection
+## Diff-scoped auditing
 
-Always run (in parallel):
-- `dynos-work:auditors/spec-completion`
-- `dynos-work:auditors/security`
+Before spawning auditors, determine the scope of changed files:
+- If active task with `snapshot.head_sha`: `git diff --name-only {snapshot_head_sha}`
+- If no active task: `git diff --name-only HEAD`
 
-Also spawn based on changed files (from `git diff --name-only`):
-- Any `.tsx .jsx .css .html .vue .svelte .scss .less` files changed → `dynos-work:auditors/ui`
-- Any `.ts .js .py .go .rs .java .rb .cpp .cs` files changed → `dynos-work:auditors/code-quality`
-- Any schema/migration/ORM files changed → `dynos-work:auditors/db-schema`
+Pass this file list to each auditor. Auditors should only inspect these files, not the entire codebase.
+
+## Risk-based auditor selection
+
+If the task has a classification with `risk_level`:
+
+| Risk Level | Auditors Spawned |
+|---|---|
+| `low` | spec-completion + security |
+| `medium` | spec-completion + security + domain-relevant (see below) |
+| `high` / `critical` | ALL 5 auditors |
+
+If no classification exists (standalone audit), use `high` risk level (run all).
+
+Domain-relevant auditors (for `medium` risk):
+- Any `.tsx .jsx .css .html .vue .svelte .scss .less .dart` widget files changed → `ui-auditor` agent
+- Any `.ts .js .py .go .rs .java .rb .cpp .cs .dart` logic files changed → `code-quality-auditor` agent
+- Any schema/migration/ORM files changed → `db-schema-auditor` agent
+
+Spawn selected auditors in parallel via the Agent tool.
 
 ## Output
 
@@ -32,6 +48,8 @@ After all auditors complete, print a summary:
 dynos-work Audit Report
 =======================
 Task: [task-id or "standalone audit"]
+Risk level: [low | medium | high | critical]
+Files scoped: [N] files
 Auditors run: [list]
 
 Results:

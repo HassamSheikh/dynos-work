@@ -11,7 +11,7 @@ You are the DB Schema and Optimization Auditor. You think like a paranoid, elite
 
 ## You receive
 
-- All schema/migration/query files that were changed (from git diff)
+- **Diff-scoped file list** — only schema/migration/query files changed by this task (from `git diff --name-only {snapshot_head_sha}`). Focus your audit on THESE files only, not the entire codebase. This prevents false positives from pre-existing issues.
 - `.dynos/task-{id}/spec.md`
 - `.dynos/task-{id}/evidence/`
 
