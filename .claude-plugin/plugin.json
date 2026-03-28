@@ -10,6 +10,5 @@
   "license": "MIT",
   "keywords": ["audit", "autonomous", "engineering", "agents", "planning", "repair"],
   "skills": "./skills/",
-  "agents": "./agents/",
   "hooks": "./hooks.json"
 }
