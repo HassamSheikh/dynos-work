@@ -38,7 +38,9 @@ Domain-relevant auditors (for `medium` risk):
 - Any `.ts .js .py .go .rs .java .rb .cpp .cs .dart` logic files changed → `code-quality-auditor` agent
 - Any schema/migration/ORM files changed → `db-schema-auditor` agent
 
-Spawn selected auditors in parallel via the Agent tool.
+**Dead code auditor:** Always include `dead-code-auditor` in standalone `/dynos-work:audit` runs (regardless of risk level). It checks for unused imports, dead functions, unused exports, unreferenced files, unused variables, and commented-out code.
+
+Spawn all selected auditors in parallel via the Agent tool.
 
 ## Output
 
@@ -58,6 +60,7 @@ Results:
   ui: PASS | FAIL | SKIPPED
   code-quality: PASS | FAIL | SKIPPED
   db-schema: PASS | FAIL | SKIPPED
+  dead-code: PASS | FAIL ([N] findings)
 
 Blocking findings:
   [List each with finding ID, auditor, severity, description, file:line]
