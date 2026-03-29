@@ -266,8 +266,8 @@ Read all audit reports. Produce `.dynos/task-{id}/audit-summary.json`:
 }
 ```
 
-- If `all_passed: true`: advance to FINAL_AUDIT
-- If `blocking_failures` exist: advance to REPAIR_PLANNING
+- If `all_passed: true`: **immediately advance to FINAL_AUDIT — do NOT stop or wait for user input**
+- If `blocking_failures` exist: **immediately advance to REPAIR_PLANNING — do NOT stop or wait for user input**
 
 ### REPAIR_PLANNING
 Spawn Repair Coordinator (dynos-work:repair/coordinator) with all audit reports, `repair-log.json` (if exists), and `test-results.json` (if exists). It produces updated `repair-log.json` with precise remediation tasks, assigned executors, and batch groupings (parallel-safe vs must-serialize).
@@ -285,7 +285,9 @@ Read `repair-log.json`. Execute repair batches:
 Each repair executor receives: original spec, the specific finding, affected files, the precise instruction from `repair-log.json`. Update `repair-log.json` status as tasks complete.
 
 - Exit criteria: All repair tasks status = resolved
-- Advance to: TEST_EXECUTION (re-run tests after repair, then back to CHECKPOINT_AUDIT)
+- Advance to: TEST_EXECUTION
+
+**This is a mandatory loop-back. After repair you MUST re-run tests and re-audit. Do NOT stop, do NOT wait for user input, do NOT declare done. Immediately advance to TEST_EXECUTION. The lifecycle only exits the repair loop via CHECKPOINT_AUDIT → FINAL_AUDIT → COMPLETION_REVIEW → DONE.**
 
 ### FINAL_AUDIT
 Same as CHECKPOINT_AUDIT but:
