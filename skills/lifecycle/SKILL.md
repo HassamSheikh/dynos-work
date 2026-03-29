@@ -25,6 +25,7 @@ You are the Lifecycle Controller for dynos-work. You own the state machine for t
 ```
 PLANNING              ← your entry point
   → PLAN_REVIEW       ← auto-approve if low risk, else human approval required
+  → PLAN_AUDIT        ← spec-completion check on plan before any code
   → EXECUTION_GRAPH_BUILD
   → PRE_EXECUTION_SNAPSHOT
   → EXECUTION
@@ -48,13 +49,23 @@ Spawn Planner subagent with instruction: "Generate the implementation plan. Read
 ### PLAN_REVIEW
 **Human-in-the-loop gate.** Read `manifest.json` classification `risk_level`.
 
-- If `risk_level` is `low`: auto-approve — print a brief summary of spec.md and plan.md, then advance immediately to EXECUTION_GRAPH_BUILD
+- If `risk_level` is `low`: auto-approve — print a brief summary of spec.md and plan.md, then advance immediately to PLAN_AUDIT
 - If `risk_level` is `medium`, `high`, or `critical`: pause and present spec.md + plan.md to the user for review. Ask: "Approve this plan? (yes/no/adjust)" using the AskUserQuestion tool.
-  - If approved: advance to EXECUTION_GRAPH_BUILD
+  - If approved: advance to PLAN_AUDIT
   - If adjustments requested: spawn Planner subagent again with user feedback, then re-present for review
   - If rejected: set stage to FAILED with reason "Plan rejected by user"
 
 Update `manifest.json` stage before advancing.
+
+### PLAN_AUDIT
+**Pre-execution spec coverage check.** Spawn the `spec-completion-auditor` agent with instruction: "Audit the plan against the spec BEFORE execution begins. Read `spec.md` and `plan.md`. Verify that every acceptance criterion in `spec.md` is explicitly addressed somewhere in `plan.md`. Flag any criteria that have no corresponding component, module, or task in the plan. Write your report to `.dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json`."
+
+Wait for the auditor to complete.
+
+- If all acceptance criteria are covered: advance to EXECUTION_GRAPH_BUILD
+- If any criteria are uncovered: spawn Planner subagent with instruction: "The plan is missing coverage for these acceptance criteria: [{list of uncovered criteria}]. Update `plan.md` to address them." Then re-run PLAN_AUDIT.
+
+This gate catches plan gaps before a single line of code is written.
 
 ### EXECUTION_GRAPH_BUILD
 Spawn Execution Coordinator subagent (dynos-work:execution/coordinator) with instruction: "Read `spec.md` and `plan.md`. Build the execution graph. Write to `.dynos/task-{id}/execution-graph.json`. Each segment must declare: id, executor, description, files_expected, depends_on, parallelizable."
