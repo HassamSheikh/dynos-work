@@ -1,11 +1,11 @@
 ---
 name: execute
-description: "Power user: Build execution graph, snapshot, and run all executor segments. Runs EXECUTION_GRAPH_BUILD → PRE_EXECUTION_SNAPSHOT → EXECUTION. Use after /dynos-work:plan."
+description: "Power user: Build execution graph, snapshot, run all executor segments, then run the test suite. Runs EXECUTION_GRAPH_BUILD → PRE_EXECUTION_SNAPSHOT → EXECUTION → TEST_EXECUTION. Use after /dynos-work:start."
 ---
 
 # dynos-work: Execute
 
-Builds the execution graph, creates a git snapshot, then runs all executor segments in dependency order. When done, run `/dynos-work:test`.
+Builds the execution graph, creates a git snapshot, runs all executor segments in dependency order, then runs the test suite. When done, run `/dynos-work:audit` (pass) or `/dynos-work:repair` (fail).
 
 ## What you do
 
@@ -73,16 +73,79 @@ After each batch completes:
 
 Repeat until all segments have evidence files.
 
-### Step 5 — Done
-
-Update `manifest.json` stage to `TEST_EXECUTION`. Append to log:
+Append to log:
 ```
 {timestamp} [ADVANCE] EXECUTION → TEST_EXECUTION
 ```
 
-Print:
+### Step 5 — Run tests
+
+Update `manifest.json` stage to `TEST_EXECUTION`. Append to log:
+```
+{timestamp} [STAGE] → TEST_EXECUTION
+```
+
+Detect the test command:
+- `pubspec.yaml` → `flutter test`
+- `package.json` with `scripts.test` → `npm test`
+- `Cargo.toml` → `cargo test`
+- `go.mod` → `go test ./...`
+- `pytest.ini` / `pyproject.toml` / `setup.py` → `pytest`
+- `Makefile` with `test` target → `make test`
+- None found → skip, advance to CHECKPOINT_AUDIT
+
+Run the test command via Bash. Capture output. Append to log:
+```
+{timestamp} [TEST] {command} — running
+```
+
+### Step 6 — Gate on result
+
+**If all tests pass:**
+```
+{timestamp} [TEST] {command} — passed ({N} tests)
+{timestamp} [ADVANCE] TEST_EXECUTION → CHECKPOINT_AUDIT
+```
+Update stage to `CHECKPOINT_AUDIT`. Print:
+```
+Execution complete. {N}/{N} segments done. All tests passed.
+
+Next: /dynos-work:audit
+```
+
+**If tests fail:**
+Write `.dynos/task-{id}/test-results.json`:
+```json
+{
+  "run_at": "ISO timestamp",
+  "command": "...",
+  "passed": false,
+  "output_summary": "...",
+  "failing_tests": ["..."]
+}
+```
+Append to log:
+```
+{timestamp} [TEST] {command} — FAILED ({N} failing)
+{timestamp} [ADVANCE] TEST_EXECUTION → REPAIR_PLANNING
+```
+Update stage to `REPAIR_PLANNING`. Print:
 ```
 Execution complete. {N}/{N} segments done.
+Tests failed: [list of failing tests]
 
-Next: /dynos-work:test
+Next: /dynos-work:repair
+```
+
+**If no test framework found:**
+Append to log:
+```
+{timestamp} [TEST] no test framework detected — skipping
+{timestamp} [ADVANCE] TEST_EXECUTION → CHECKPOINT_AUDIT
+```
+Update stage to `CHECKPOINT_AUDIT`. Print:
+```
+Execution complete. {N}/{N} segments done. No test framework detected — skipping tests.
+
+Next: /dynos-work:audit
 ```

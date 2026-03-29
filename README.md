@@ -29,15 +29,16 @@ dynos-work owns the full lifecycle:
 1. **Discover** — asks up to 5 targeted questions to surface gaps, trade-offs, and unstated constraints before any spec is written
 2. **Design** — identifies critical and high-complexity subtasks, proposes 2-3 options each with pros and cons, and asks for your choice. Easy and medium subtasks are decided autonomously.
 3. **Classify & Spec** — understands your task, classifies risk, extracts acceptance criteria using all context from discovery and design
-4. **Plan** — generates implementation plan with dependency graph, bound by your design choices
-5. **Spec Review** — always pauses for your explicit sign-off on the normalized spec before any code is written. No auto-approval path.
-6. **Plan Review** — for medium and higher risk tasks, pauses for your approval of the implementation plan
-7. **Snapshot** — creates a git branch safety net before writing any code
-8. **Execute** — dispatches specialized executor subagents in parallel, with live progress tracking
-9. **Test** — runs the project's test suite and gates on pass/fail before auditing
-10. **Audit** — independent auditors run simultaneously, scoped to only the files you changed
-11. **Repair** — converts findings to precise fixes, loops back through tests and audit
-12. **Gate** — only marks DONE when all auditors pass with evidence
+4. **Spec Review** — always pauses for your explicit sign-off on the normalized spec before any code is written. No auto-approval path.
+5. **Plan** — generates implementation plan with dependency graph, bound by your design choices
+6. **Plan Review** — pauses for your approval of the implementation plan
+7. **Plan Audit** — spec-completion auditor verifies every acceptance criterion is addressed in the plan before any code is written
+8. **Snapshot** — creates a git branch safety net before writing any code
+9. **Execute** — dispatches specialized executor subagents in parallel, with live progress tracking
+10. **Test** — runs the project's test suite and gates on pass/fail before auditing
+11. **Audit** — independent auditors run simultaneously, scoped to only the files you changed
+12. **Repair** — converts findings to precise fixes, loops back through tests and audit
+13. **Gate** — only marks DONE when all auditors pass with evidence
 
 Agent self-reports are untrusted. Completion requires independent proof.
 
@@ -45,22 +46,21 @@ Agent self-reports are untrusted. Completion requires independent proof.
 
 ## Usage
 
-### Start any task
+### Three commands to ship
 
 ```
-/dynos-work:start add a stripe checkout flow, products page, and success/cancel pages.
-use the test keys from env. make it look clean.
+/dynos-work:start [task]   discovery → spec → plan → your approval
+/dynos-work:execute        build → run code → tests (fully automated)
+/dynos-work:audit          checkpoint → repair loop → final gate → DONE
 ```
 
-That's it. dynos-work handles the rest.
-
-### Power-user commands
+### When you need to intervene
 
 ```
-/dynos-work:audit    # Audit current work (risk-based scoping)
-/dynos-work:status   # Show task progress, execution segments, and open findings
-/dynos-work:repair   # Manually trigger repair on a finding
-/dynos-work:resume   # Resume an interrupted task
+/dynos-work:status    show current stage, audit results, open findings
+/dynos-work:resume    resume an interrupted task
+/dynos-work:plan      replan after scope changes or manual spec edits
+/dynos-work:repair    fix a specific finding manually
 ```
 
 ---

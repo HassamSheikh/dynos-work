@@ -1,11 +1,16 @@
 ---
 name: plan
-description: "Power user: Generate implementation plan, review with human, audit spec coverage. Runs PLANNING → PLAN_REVIEW → PLAN_AUDIT in one shot. Use after /dynos-work:start approves the spec."
+description: "Power user: Re-run planning on an existing task. Use when you need to regenerate the plan after spec changes, or if the task was started externally. Runs PLANNING → PLAN_REVIEW → PLAN_AUDIT."
 ---
 
 # dynos-work: Plan
 
-Generates the implementation plan, presents it for your approval, then audits it for spec coverage — all in one command. When done, the task is ready for `/dynos-work:execute`.
+Re-runs the planning phase on an existing task. Use this when:
+- You need to regenerate the plan after manual spec changes
+- The task was initialized externally and skipped planning
+- You want to replan after a major scope change
+
+When done, the task is ready for `/dynos-work:execute`.
 
 ## What you do
 
@@ -14,6 +19,8 @@ Generates the implementation plan, presents it for your approval, then audits it
 Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED). If none, print "No active task. Start one with /dynos-work:start" and stop.
 
 Read `manifest.json`, `spec.md`, and `design-decisions.md` (if it exists).
+
+Verify `spec.md` exists. If not, print "No spec found. Run /dynos-work:start to generate one." and stop.
 
 ### Step 2 — Generate plan (PLANNING)
 
@@ -28,17 +35,15 @@ Spawn the `planning` agent with instruction: "Generate the implementation plan. 
 Wait for completion. Append to log:
 ```
 {timestamp} [DONE] planning — plan.md written
+{timestamp} [STAGE] → PLAN_REVIEW
 ```
+
+Update `manifest.json` stage to `PLAN_REVIEW`.
 
 ### Step 3 — Human review (PLAN_REVIEW)
 
-Update `manifest.json` stage to `PLAN_REVIEW`. Append to log:
-```
-{timestamp} [STAGE] → PLAN_REVIEW
-{timestamp} [GATE] PLAN_REVIEW — waiting for human approval
-```
+Read `plan.md`. Present to the user using **AskUserQuestion**:
 
-Present to the user:
 ```
 === Plan Review ===
 
@@ -47,8 +52,6 @@ Present to the user:
 ---
 Approve this plan? (yes / no + what to change)
 ```
-
-Use AskUserQuestion to collect response.
 
 - If **approved**: append `{timestamp} [HUMAN] PLAN_REVIEW — approved` to log. Proceed to Step 4.
 - If **changes requested**: append `{timestamp} [HUMAN] PLAN_REVIEW — changes requested: {summary}` to log. Spawn planning agent again with the feedback. Re-present the updated plan. Repeat until approved.

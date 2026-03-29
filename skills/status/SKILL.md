@@ -74,17 +74,17 @@ Always end the status report with a "Next:" line based on current stage:
 
 | Stage | Next command |
 |---|---|
-| PLANNING | `/dynos-work:plan` |
+| PLANNING | `/dynos-work:plan` (or `/dynos-work:start` for new tasks) |
 | PLAN_REVIEW | `/dynos-work:plan` |
 | PLAN_AUDIT | `/dynos-work:plan` |
 | EXECUTION_GRAPH_BUILD | `/dynos-work:execute` |
 | PRE_EXECUTION_SNAPSHOT | `/dynos-work:execute` |
 | EXECUTION | `/dynos-work:execute` |
-| TEST_EXECUTION | `/dynos-work:test` |
+| TEST_EXECUTION | `/dynos-work:execute` |
 | CHECKPOINT_AUDIT | `/dynos-work:audit` |
-| REPAIR_PLANNING | `/dynos-work:repair` |
-| REPAIR_EXECUTION | `/dynos-work:repair` |
-| FINAL_AUDIT | `/dynos-work:final-audit` |
-| COMPLETION_REVIEW | `/dynos-work:final-audit` |
+| REPAIR_PLANNING | `/dynos-work:audit` (or `/dynos-work:repair` for a specific finding) |
+| REPAIR_EXECUTION | `/dynos-work:audit` (or `/dynos-work:repair` for a specific finding) |
+| FINAL_AUDIT | `/dynos-work:audit` |
+| COMPLETION_REVIEW | `/dynos-work:audit` |
 | DONE | Task complete |
 | FAILED | Review failure report, consider `/dynos-work:repair` or rollback |
