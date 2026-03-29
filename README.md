@@ -61,6 +61,7 @@ Agent self-reports are untrusted. Completion requires independent proof.
 /dynos-work:resume    resume an interrupted task
 /dynos-work:plan      replan after scope changes or manual spec edits
 /dynos-work:repair    fix a specific finding manually
+/dynos-work:debug     deep root cause analysis for any bug or error
 ```
 
 ---
