@@ -13,24 +13,29 @@ Resume a dynos-work task that was interrupted.
 2. If one active task: resume it automatically
 3. If multiple active tasks: show list and ask which to resume
 4. Read `manifest.json` to determine current stage
-5. Spawn the `lifecycle` agent via the Agent tool with the existing task ID and state
-6. The Lifecycle Controller picks up from the current stage
+5. Tell the user which command to run next based on the stage:
+
+| Stage | Run this |
+|---|---|
+| PLANNING, PLAN_REVIEW, PLAN_AUDIT | `/dynos-work:plan` |
+| EXECUTION_GRAPH_BUILD, PRE_EXECUTION_SNAPSHOT, EXECUTION, TEST_EXECUTION | `/dynos-work:execute` |
+| CHECKPOINT_AUDIT, REPAIR_PLANNING, REPAIR_EXECUTION, FINAL_AUDIT, COMPLETION_REVIEW | `/dynos-work:audit` |
 
 ## Output on resume
 
 ```
 dynos-work: Resuming task-20260327-001
 Title: [task title]
-Resuming from stage: CHECKPOINT_AUDIT
+Current stage: CHECKPOINT_AUDIT
 
-Starting lifecycle controller...
+Run: /dynos-work:audit
 ```
 
 ## Edge cases
 
-- If manifest.json is corrupt or unreadable: report the error and suggest starting fresh with `dynos-work:start`
-- If audit-reports exist from before interruption: the Lifecycle Controller will read them and determine if re-audit is needed
-- If execution-graph has segments with no evidence files: the Lifecycle Controller will re-run those segments
+- If manifest.json is corrupt or unreadable: report the error and suggest starting fresh with `/dynos-work:start`
+- If execution-graph has segments with no evidence files: `/dynos-work:execute` will re-run those segments
+- If audit-reports exist from before interruption: `/dynos-work:audit` will read them and determine if re-audit is needed
 
 ## When to use
 

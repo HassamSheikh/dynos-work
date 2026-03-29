@@ -1,6 +1,6 @@
 ---
 name: ml-executor
-description: "Internal dynos-work agent. Implements ML models, training pipelines, inference code, and data processing. Spawned by the lifecycle agent for ML execution segments."
+description: "Internal dynos-work agent. Implements ML models, training pipelines, inference code, and data processing. Spawned by /dynos-work:execute for ML execution segments."
 model: opus
 ---
 

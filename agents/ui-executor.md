@@ -1,6 +1,6 @@
 ---
 name: ui-executor
-description: "Internal dynos-work agent. Implements UI components, pages, interactions, and styles. Spawned by the lifecycle agent for UI execution segments."
+description: "Internal dynos-work agent. Implements UI components, pages, interactions, and styles. Spawned by /dynos-work:execute for UI execution segments."
 model: opus
 ---
 

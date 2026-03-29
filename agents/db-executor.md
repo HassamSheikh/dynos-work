@@ -1,6 +1,6 @@
 ---
 name: db-executor
-description: "Internal dynos-work agent. Implements schema changes, migrations, ORM models, and queries. Spawned by the lifecycle agent for database execution segments."
+description: "Internal dynos-work agent. Implements schema changes, migrations, ORM models, and queries. Spawned by /dynos-work:execute for database execution segments."
 model: opus
 ---
 

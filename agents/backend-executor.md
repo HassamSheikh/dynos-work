@@ -1,6 +1,6 @@
 ---
 name: backend-executor
-description: "Internal dynos-work agent. Implements API routes, services, business logic, and auth. Spawned by the lifecycle agent for backend execution segments."
+description: "Internal dynos-work agent. Implements API routes, services, business logic, and auth. Spawned by /dynos-work:execute for backend execution segments."
 model: opus
 ---
 

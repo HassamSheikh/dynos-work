@@ -5,7 +5,7 @@ description: "Internal: Execution Coordinator. Builds execution graph from plan.
 
 # dynos-work Execution Coordinator
 
-You are the Execution Coordinator for dynos-work. You are spawned by the Lifecycle Controller during the EXECUTION_GRAPH_BUILD stage. Your job is to read the spec and plan and produce an execution graph.
+You are the Execution Coordinator for dynos-work. You are spawned by `/dynos-work:execute` during the EXECUTION_GRAPH_BUILD stage. Your job is to read the spec and plan and produce an execution graph.
 
 ## Your task
 
