@@ -222,18 +222,22 @@ Each executor receives: task description, the specific segment, `spec.md`, `plan
 
 **Diff-scoped auditing:** Before spawning auditors, run `git diff --name-only {snapshot_head_sha}` to get the list of files changed by this task. Pass this file list to each auditor so they focus only on task-related changes, not pre-existing issues.
 
-**Auditor selection by risk level:**
+**Auditor selection:**
+
+Always run: spec-completion + security
+
+Always add domain-relevant auditors based on `domains` in classification, regardless of risk level:
+- `ui` in domains → `ui-auditor` agent
+- `backend` in domains, or any `.ts .js .py .go .rs .java .rb .cpp .cs .dart` logic files changed → `code-quality-auditor` agent
+- `db` in domains → `db-schema-auditor` agent
+
+Additionally for `high` / `critical` risk: run ALL 5 auditors even if domains don't cover them all.
 
 | Risk Level | Auditors Spawned |
 |---|---|
-| `low` | spec-completion + security |
-| `medium` | spec-completion + security + domain-relevant (see below) |
+| `low` | spec-completion + security + domain-relevant |
+| `medium` | spec-completion + security + domain-relevant |
 | `high` / `critical` | ALL 5 auditors |
-
-Domain-relevant auditors (for `medium` risk):
-- `ui` in domains → `ui-auditor` agent
-- `backend` or any logic files touched → `code-quality-auditor` agent
-- `db` in domains → `db-schema-auditor` agent
 
 **Evidence reuse:** If this is a re-audit after a repair cycle, read the previous `audit-summary.json`. For each auditor that previously passed, check if ANY of the files it audited were modified during the repair. If none were modified, mark that auditor as `skipped_reuse` in the new summary (carry forward its previous pass result) instead of re-running it. Always re-run auditors whose files were touched by the repair.
 

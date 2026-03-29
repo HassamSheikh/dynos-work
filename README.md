@@ -94,7 +94,7 @@ INTAKE → DISCOVERY (up to 5 questions) → DESIGN_OPTIONS (critical/hard subta
 
 - **Human-guided discovery** — before writing a single line of spec, dynos-work asks targeted questions and surfaces design trade-offs for the decisions that actually matter
 - **Mandatory spec sign-off** — you always review and approve the normalized spec before execution begins, regardless of risk level
-- **Risk-based auditing** — low-risk tasks get 2 auditors (spec + security), medium adds domain-relevant, high/critical runs all 5
+- **Risk-based auditing** — domain-relevant auditors (ui, code-quality, db-schema) always run when those domains are touched, regardless of risk level. high/critical runs all 5.
 - **Diff-scoped** — auditors only inspect files changed by the task, preventing false positives from pre-existing issues
 - **Evidence reuse** — on repair re-audit, auditors whose files weren't touched carry forward their previous pass
 - **Test gate** — test suite runs before audit to catch real failures before spending tokens on auditors
