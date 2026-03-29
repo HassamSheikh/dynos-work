@@ -11,7 +11,7 @@ Show the current state of the active dynos-work task.
 
 1. Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED)
 2. If no active task, report "No active dynos-work task found. Start one with /dynos-work:start"
-3. Read: manifest.json, spec.md, execution-graph.json, latest audit-reports, repair-log.json, test-results.json
+3. Read: manifest.json, spec.md, execution-graph.json, latest audit-reports, repair-log.json, test-results.json, execution-log.md
 4. Print a human-readable status report
 
 ## Output format
@@ -27,8 +27,11 @@ Snapshot: dynos/task-20260327-001-snapshot
 
 Lifecycle Progress:
   ✓ INTAKE
+  ✓ DISCOVERY
+  ✓ DESIGN_OPTIONS
   ✓ CLASSIFY_AND_SPEC
   ✓ PLANNING
+  ✓ SPEC_REVIEW (user-approved)
   ✓ PLAN_REVIEW (auto-approved | user-approved)
   ✓ EXECUTION_GRAPH_BUILD
   ✓ PRE_EXECUTION_SNAPSHOT
@@ -61,4 +64,7 @@ Repair Cycle: [N] ([N] findings resolved, [N] remaining)
 
 To repair: /dynos-work:repair
 To resume lifecycle: /dynos-work:resume
+
+Recent Activity (last 10 lines of execution-log.md):
+  [last 10 log entries, or "No execution log yet" if file doesn't exist]
 ```

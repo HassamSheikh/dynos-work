@@ -359,6 +359,59 @@ Terminal failure state. Print full failure report: which findings could not be r
 - Suggest: `git diff dynos/task-{id}-snapshot` to review all changes
 - Suggest: `git checkout dynos/task-{id}-snapshot -- .` to fully rollback if desired
 
+## Execution log
+
+**You MUST append an entry to `.dynos/task-{id}/execution-log.md` at every event listed below.** This log is append-only — never overwrite or truncate it. It is the single source of truth for what happened and when.
+
+### When to log
+
+Log an entry for every one of these events:
+
+| Event | What to write |
+|---|---|
+| Stage entered | `[STAGE] → {STAGE_NAME}` |
+| Subagent spawned | `[SPAWN] {agent-name} — {reason}` |
+| Subagent completed | `[DONE] {agent-name} — pass/fail/result in one line` |
+| Human gate reached | `[GATE] {gate-name} — waiting for user input` |
+| Human responded | `[HUMAN] {gate-name} — {summary of response}` |
+| Decision made | `[DECISION] {what was decided and why}` |
+| Stage exited | `[ADVANCE] {FROM_STAGE} → {TO_STAGE}` |
+| Test run | `[TEST] {command} — passed/failed ({N} tests)` |
+| Repair triggered | `[REPAIR] {N} findings — {list of finding IDs}` |
+| Error or blocker | `[ERROR] {what went wrong}` |
+| Task complete | `[DONE] Task completed successfully` |
+| Task failed | `[FAILED] {reason}` |
+
+### Log format
+
+Each entry is a single line:
+
+```
+{ISO timestamp} {EVENT_TYPE} {message}
+```
+
+Example:
+```
+2026-03-28T22:15:01Z [STAGE] → DISCOVERY
+2026-03-28T22:15:02Z [SPAWN] dynos-work:planning — generate discovery questions
+2026-03-28T22:15:44Z [DONE] dynos-work:planning — returned 4 questions
+2026-03-28T22:15:44Z [GATE] DISCOVERY — waiting for user input
+2026-03-28T22:16:10Z [HUMAN] DISCOVERY — user answered all 4 questions
+2026-03-28T22:16:10Z [ADVANCE] DISCOVERY → DESIGN_OPTIONS
+2026-03-28T22:16:11Z [STAGE] → DESIGN_OPTIONS
+2026-03-28T22:16:11Z [SPAWN] dynos-work:planning — identify critical/hard subtasks
+2026-03-28T22:16:55Z [DONE] dynos-work:planning — 0 critical/hard subtasks, no gates needed
+2026-03-28T22:16:55Z [DECISION] No subtasks required human design input — advancing automatically
+2026-03-28T22:16:55Z [ADVANCE] DESIGN_OPTIONS → CLASSIFY_AND_SPEC
+```
+
+Create the file with a header on first write:
+```
+# Execution Log — task-{id}
+# Started: {ISO timestamp}
+
+```
+
 ## Hard rules
 
 - You are the ONLY entity that writes `stage` to `manifest.json`
@@ -369,3 +422,4 @@ Terminal failure state. Print full failure report: which findings could not be r
 - You wait for ALL parallel subagents to complete before reading their results
 - You do not trust executor self-reports — you only trust audit reports
 - Every stage transition must be written to `manifest.json` before proceeding
+- Every event must be appended to `execution-log.md` — no exceptions
