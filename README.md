@@ -117,21 +117,19 @@ DISCOVERY (up to 5 questions) → DESIGN_OPTIONS (critical/hard subtasks only)
 
 ### Model tiering
 
-Not every agent needs the most capable model. Orchestration and checklist agents use a fast model; code-writing and adversarial agents use the most capable model available on your platform.
+Not every agent needs the most expensive model. Orchestration and checklist agents use Sonnet; code-writing and adversarial agents use Opus.
 
-| Role | Tier | Why |
+| Role | Model | Why |
 |---|---|---|
-| Planning | high | Deep reasoning for spec and plan |
-| Execution coordinator | standard | Graph construction from spec |
-| Repair coordinator | standard | Mapping findings to executors |
-| All 7 executors | high | Writing production code |
-| Security auditor | high | Adversarial thinking |
-| DB schema auditor | high | Architectural judgment |
-| Spec-completion auditor | standard | Checklist verification |
-| Code quality auditor | standard | Pattern matching |
-| UI auditor | standard | Checklist verification |
-
-On Claude Code: `high` = Opus, `standard` = Sonnet. On other platforms, use the equivalent capability tier.
+| Planning | Opus | Deep reasoning for spec and plan |
+| Execution coordinator | Sonnet | Graph construction from spec |
+| Repair coordinator | Sonnet | Mapping findings to executors |
+| All 7 executors | Opus | Writing production code |
+| Security auditor | Opus | Adversarial thinking |
+| DB schema auditor | Opus | Architectural judgment |
+| Spec-completion auditor | Sonnet | Checklist verification |
+| Code quality auditor | Sonnet | Pattern matching |
+| UI auditor | Sonnet | Checklist verification |
 
 ### Executor specialists (run your code)
 
@@ -168,30 +166,10 @@ The execution log at `.dynos/task-{id}/execution-log.md` records every stage tra
 
 ## Installation
 
-### Claude Code
-
 ```
 /plugin marketplace add HassamSheikh/dynos-work
 /plugin install dynos-work
 ```
-
-### Cursor
-
-Search "dynos-work" in the Cursor plugin marketplace.
-
-### Gemini CLI
-
-```bash
-gemini extensions install https://github.com/HassamSheikh/dynos-work
-```
-
-### OpenCode
-
-Register `.opencode/plugins/dynos-work.js` in your OpenCode config.
-
-### Codex
-
-See `.codex/INSTALL.md` for manual setup instructions.
 
 ---
 
