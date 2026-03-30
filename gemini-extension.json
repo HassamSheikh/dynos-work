@@ -1,7 +1,0 @@
-{
-  "name": "dynos-work",
-  "version": "2.8.0",
-  "description": "Audit-governed autonomous engineering system. Standalone — no dependencies required.",
-  "skills": "./skills/",
-  "systemPrompt": "dynos-work active. Use /dynos-work:start for new tasks. Power-user: /dynos-work:audit, /dynos-work:status, /dynos-work:repair, /dynos-work:resume, /dynos-work:investigate."
-}
