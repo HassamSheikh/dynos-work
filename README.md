@@ -104,6 +104,10 @@ DISCOVERY + DESIGN + CLASSIFICATION (single planner pass)
 
 **Domain-aware repair:** on repair re-audit, only auditors whose domain was touched by the repair re-run, plus spec-completion and security always
 
+**Incremental re-audit:** re-audit after repair scopes file inspection to only repair-modified files, reducing re-audit context by up to 90%. Spec-completion auditor retains full scope since it checks overall requirement coverage.
+
+**Pre-flight validation:** every executor runs a "Validate Before Done" checklist before writing evidence, with static baseline checks tailored per executor type plus dynamic prevention rules from project memory
+
 **Test gate:** test suite runs before audit to catch real failures before spending tokens on auditors
 
 **Rollback on failure:** if a task hits max retries, provides the snapshot branch and rollback commands
@@ -160,11 +164,11 @@ dynos-work learns from its own performance. Each completed task generates struct
 
 ### How it works
 
-1. **Reflect:** when a task reaches DONE, the audit gate produces `task-retrospective.json` containing finding counts by auditor and category, executor repair frequency, spec review iterations, and repair cycle count.
+1. **Reflect:** when a task reaches DONE, the audit gate produces `task-retrospective.json` containing finding counts by auditor and category, executor repair frequency, spec review iterations, repair cycle count, subagent spawn count, wasted spawns, and zero-finding streaks.
 
-2. **Learn:** automatically aggregates all retrospectives in the current project after each completed task. Writes `dynos_patterns.md` to Claude Code's project memory, which is auto-loaded into every future conversation. Can also be run manually with `/dynos-work:learn`.
+2. **Learn:** automatically aggregates all retrospectives in the current project after each completed task. Writes `dynos_patterns.md` to Claude Code's project memory, which is auto-loaded into every future conversation. Synthesizes actionable prevention rules from recurring finding descriptions. Can also be run manually with `/dynos-work:learn`.
 
-3. **Inject:** the planner and executors receive a pointer directive to check `dynos_patterns.md` for relevant patterns. The planner uses it to proactively address recurring issues in the spec. Executors use it to avoid their most common repair triggers.
+3. **Prevent:** the execute skill reads prevention rules from `dynos_patterns.md`, filters by executor type, and injects matching rules into each executor's spawn instructions. Executors treat injected rules as mandatory pre-evidence checks alongside their static baseline checklist. This closes the loop: findings become rules, rules prevent findings.
 
 ### What it tracks
 
@@ -173,8 +177,10 @@ dynos-work learns from its own performance. Each completed task generates struct
 | Top finding categories | Audit reports | Planner (spec normalization) |
 | Executor repair frequency | Repair logs | Executors (self-checking) |
 | Avg repair cycles by task type | Execution logs | Planner (risk assessment) |
+| Prevention rules | Finding descriptions | Executors (pre-flight validation) |
+| Spawn efficiency | Execution logs | Learn loop (waste tracking) |
 
-Patterns are per-project and update automatically after each completed task. Run `/dynos-work:learn` manually to force a refresh or after importing retrospective data.
+Patterns are per-project and update automatically after each completed task. The prevention rules compound over time: fewer findings lead to fewer repair cycles, fewer wasted spawns, and lower token costs. Run `/dynos-work:learn` manually to force a refresh or after importing retrospective data.
 
 ---
 

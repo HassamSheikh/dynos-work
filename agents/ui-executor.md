@@ -54,6 +54,18 @@ Before writing your evidence file, check every acceptance criterion against your
 
 If any answer is "sort of" or "implicitly" — it's not done.
 
+## Validate Before Done
+
+Before writing the evidence file, verify every item in this checklist. Do not skip any.
+
+- [ ] All states implemented: loading, empty, error, success
+- [ ] No hardcoded display strings in component logic
+- [ ] Accessibility labels on all interactive elements
+- [ ] Edge cases handled: long text, zero items, max items
+- [ ] No TODO/FIXME stubs remain
+
+Additionally, if prevention rules were provided in your spawn instructions, add them to this checklist and verify each one before writing evidence.
+
 ### Step 4 — Write the Evidence File
 
 Write to `.dynos/task-{id}/evidence/{segment-id}.md`. This is your proof of completeness — not a formality. Write it like a checklist that a reviewer can verify line-by-line.

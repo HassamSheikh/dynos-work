@@ -24,6 +24,18 @@ You are a specialized database implementation agent. You implement schema change
 5. Set nullable correctly — only nullable where semantically meaningful
 6. Write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
 
+## Validate Before Done
+
+Before writing the evidence file, verify every item in this checklist. Do not skip any.
+
+- [ ] Migrations are reversible
+- [ ] No raw string interpolation in queries
+- [ ] Indexes on all queried/filtered/sorted columns
+- [ ] NOT NULL columns have defaults or backfill plans
+- [ ] No TODO/FIXME stubs remain
+
+Additionally, if prevention rules were provided in your spawn instructions, add them to this checklist and verify each one before writing evidence.
+
 ## Evidence file format
 
 ```markdown

@@ -28,6 +28,8 @@ From all collected retrospectives, compute:
 1. **Top finding categories:** Sum `findings_by_category` across all retrospectives. Rank by count descending. Keep the top 5.
 2. **Executor reliability rankings:** Sum `executor_repair_frequency` across all retrospectives. Rank executors by total repair count ascending (lowest count = most reliable = listed first). Include all executors that appear.
 3. **Average repair cycles by task type:** Group retrospectives by `task_type`. For each type, compute the average of `repair_cycle_count`. Round to one decimal place.
+4. **Prevention rules:** For each finding category in the top 5, examine finding descriptions across all retrospectives (available in audit report JSON files at `.dynos/task-*/audit-reports/*.json` under `findings[].description`). Synthesize 1-3 short imperative prevention rules per category, each tagged with the executor type most likely to cause that finding and the finding category. Format: `[executor-type][category] Imperative sentence.` Cap at 15 rules total. Keep only the highest-frequency, most actionable findings. If no finding descriptions are available or no retrospectives exist, skip this aggregation.
+5. **Spawn efficiency:** From all retrospectives that contain `subagent_spawn_count`, compute: average `subagent_spawn_count` per task (round to 1 decimal), average `wasted_spawns` per task (round to 1 decimal), waste ratio (`total wasted_spawns / total subagent_spawn_count`, as percentage rounded to 0 decimals). If no retrospectives contain these fields (cold-start), skip this aggregation.
 
 ### Step 3 -- Determine project memory path
 
@@ -71,6 +73,29 @@ Ordered by repair frequency (most reliable first):
 |-----------|-------------------|-------|
 | {type}    | {avg}             | {n}   |
 | ...       | ...               | ...   |
+
+## Prevention Rules
+
+Rules derived from recurring findings. Executor spawn instructions include matching rules.
+
+| # | Rule | Executor | Category |
+|---|------|----------|----------|
+| 1 | {imperative sentence} | {executor-type} | {category} |
+| ... | ... | ... | ... |
+
+If no prevention rules were synthesized (cold-start or no finding descriptions), replace the table with:
+`No prevention rules yet -- insufficient finding data.`
+
+## Spawn Efficiency
+
+| Metric | Value |
+|--------|-------|
+| Avg spawns per task | {n} |
+| Avg wasted spawns per task | {n} |
+| Waste ratio | {n}% |
+
+If no spawn efficiency data was computed (cold-start), replace the table with:
+`No spawn efficiency data yet -- complete a task with the updated audit skill first.`
 ```
 
 If all retrospectives have zeroed-out data, still write the file (its existence signals the learn skill has been run). The tables will show zero values.

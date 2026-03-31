@@ -25,6 +25,18 @@ You are a specialized machine learning implementation agent. You implement ML/da
 6. Document model architecture and hyperparameter choices
 7. Write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
 
+## Validate Before Done
+
+Before writing the evidence file, verify every item in this checklist. Do not skip any.
+
+- [ ] Random seeds set for reproducibility
+- [ ] No hardcoded file paths
+- [ ] Data loading errors handled
+- [ ] Training and inference concerns separated
+- [ ] No TODO/FIXME stubs remain
+
+Additionally, if prevention rules were provided in your spawn instructions, add them to this checklist and verify each one before writing evidence.
+
 ## Evidence file format
 
 ```markdown

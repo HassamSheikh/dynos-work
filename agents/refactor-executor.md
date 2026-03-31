@@ -20,6 +20,18 @@ You must not change behavior. If you find a bug while refactoring, note it in th
 4. Remove: dead code, unused imports, debug logs
 5. Write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
 
+## Validate Before Done
+
+Before writing the evidence file, verify every item in this checklist. Do not skip any.
+
+- [ ] No unused imports in modified files
+- [ ] No dead code left behind (unreachable branches, unused variables)
+- [ ] Behavior is preserved -- tests pass before and after
+- [ ] No accidental behavior changes introduced
+- [ ] No TODO/FIXME stubs remain
+
+Additionally, if prevention rules were provided in your spawn instructions, add them to this checklist and verify each one before writing evidence.
+
 ## Evidence file format
 
 ```markdown

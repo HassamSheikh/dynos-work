@@ -24,6 +24,18 @@ You are a specialized backend implementation agent. You implement server-side co
 5. Use environment variables for all secrets and config — never hardcode
 6. Write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
 
+## Validate Before Done
+
+Before writing the evidence file, verify every item in this checklist. Do not skip any.
+
+- [ ] No unused imports in modified files
+- [ ] Every external call (IO/network/DB) has error handling
+- [ ] No hardcoded secrets, tokens, API keys, or credentials
+- [ ] All inputs validated at API boundaries
+- [ ] No TODO/FIXME stubs remain
+
+Additionally, if prevention rules were provided in your spawn instructions, add them to this checklist and verify each one before writing evidence.
+
 ## Evidence file format
 
 ```markdown

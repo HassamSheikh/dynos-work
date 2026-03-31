@@ -16,6 +16,18 @@ You are a specialized integration agent. You connect components, wire APIs, and 
 4. Configure environment variables and connection strings correctly
 5. Write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
 
+## Validate Before Done
+
+Before writing the evidence file, verify every item in this checklist. Do not skip any.
+
+- [ ] No hardcoded URLs or credentials
+- [ ] All integration failure paths handled (timeout, unavailable, bad response)
+- [ ] Environment variables documented for all config
+- [ ] Integration points verified end-to-end
+- [ ] No TODO/FIXME stubs remain
+
+Additionally, if prevention rules were provided in your spawn instructions, add them to this checklist and verify each one before writing evidence.
+
 ## Evidence file format
 
 ```markdown

@@ -87,10 +87,23 @@ After all repairs complete, append to log:
 {timestamp} [DONE] repair-execution — all fixes applied
 ```
 
-**Re-audit (domain-aware):** Determine which files were modified by the repair executors. Spawn only:
-- `spec-completion-auditor` (always)
-- `security-auditor` (always)
-- Any auditor that originally reported a repaired finding
+**Re-audit (domain-aware, incremental scope):**
+
+Before spawning re-audit auditors, determine which files were modified during repair:
+1. Read `repair-log.json` task entries to collect the list of files each executor was assigned to modify.
+2. Additionally run `git diff --name-only` against the pre-repair commit (the commit hash recorded before repair execution began) to catch any files modified that were not explicitly listed.
+3. Union these two sets into the **repair-modified file list**.
+
+Scope re-audit auditors to only the repair-modified file list -- NOT the full original diff scope from Step 2. This avoids redundantly re-auditing files that were already clean.
+
+**Exception:** `spec-completion-auditor` always receives the **original full diff scope** (from Step 2), since spec completion checks overall requirement coverage across the entire task, not file-level issues.
+
+All re-audit auditors still receive the previous audit reports for context (so they know what was originally found and what to verify as fixed).
+
+Spawn only:
+- `spec-completion-auditor` (always, full original diff scope)
+- `security-auditor` (always, repair-modified files only)
+- Any auditor that originally reported a repaired finding (repair-modified files only)
 - Skip auditors whose domain was not touched by the repair (e.g., if only backend files were repaired, skip `ui-auditor` even if it ran in the initial audit)
 
 Wait for results.
@@ -116,7 +129,12 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
    - If the file is missing or malformed, set executor repair frequency to `{}` and repair cycle count to `0`.
 4. Scan `.dynos/task-{id}/execution-log.md`. Count lines matching the pattern `[HUMAN] SPEC_REVIEW`. This is the **spec review iteration count**. If the file is missing, set to `0`.
 5. Read `manifest.json`. Flatten the `classification` object into scalar fields: `task_type` (string), `task_domains` (comma-separated string, e.g. "ui,backend"), `task_risk_level` (string). Set **task outcome** to `DONE` (this gate only runs for successful completion).
-6. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
+6. Compute spawn/waste tracking fields:
+   - `subagent_spawn_count`: Scan `.dynos/task-{id}/execution-log.md`. Count all lines containing `[SPAWN]`. If the file is missing, set to `0`.
+   - `wasted_spawns`: Count auditor runs that produced zero findings. For each parsed audit report from step 1, if the `findings` array is empty (length 0), increment this counter.
+   - `auditor_zero_finding_streak`: Sort audit reports by timestamp (from filename). Starting from the most recent, count consecutive reports with zero findings. Stop counting at the first report that has one or more findings.
+   - `executor_zero_repair_streak`: Read `repair-log.json`. Sort executor segments by execution order. Starting from the most recent, count consecutive executor segments that needed zero repairs (i.e., were not assigned any repair tasks). Stop counting at the first segment that had repairs. If `repair-log.json` is missing or malformed, set to `0`.
+7. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
 
 ```json
 {
@@ -129,7 +147,11 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
   "findings_by_category": { "sec": 2, "cq": 1 },
   "executor_repair_frequency": { "backend-executor": 2 },
   "spec_review_iterations": 1,
-  "repair_cycle_count": 0
+  "repair_cycle_count": 0,
+  "subagent_spawn_count": 12,
+  "wasted_spawns": 2,
+  "auditor_zero_finding_streak": 1,
+  "executor_zero_repair_streak": 3
 }
 ```
 
@@ -146,7 +168,11 @@ If no audit reports or repair logs exist, write the file with zeroed-out counts:
   "findings_by_category": {},
   "executor_repair_frequency": {},
   "spec_review_iterations": 0,
-  "repair_cycle_count": 0
+  "repair_cycle_count": 0,
+  "subagent_spawn_count": 0,
+  "wasted_spawns": 0,
+  "auditor_zero_finding_streak": 0,
+  "executor_zero_repair_streak": 0
 }
 ```
 
@@ -160,7 +186,7 @@ Append to log:
 After writing the retrospective, automatically aggregate all retrospectives in the project into the memory file. Follow the steps in `skills/learn/SKILL.md`:
 
 1. Scan all `.dynos/task-*/task-retrospective.json` files in the current working directory.
-2. Aggregate: top 5 finding categories, executor reliability rankings, average repair cycles by task type.
+2. Aggregate: top 5 finding categories, executor reliability rankings, average repair cycles by task type, prevention rules (from finding descriptions), and spawn efficiency metrics.
 3. Determine project memory path (`~/.claude/projects/<project>/memory/` where `<project>` is derived from the cwd by replacing `/` with `-`).
 4. Write (or overwrite) `dynos_patterns.md` to the project memory directory using the format defined in `skills/learn/SKILL.md`.
 
