@@ -808,12 +808,15 @@ def ensure_automation_queue(root: Path) -> dict:
     return data
 
 
-def benchmark_policy_config(root: Path) -> dict:
+def project_policy(root: Path) -> dict:
+    """Read project policy from persistent dir. Accepts all JSON value types."""
     path = _persistent_project_dir(root) / "policy.json"
     default = {
         "freshness_task_window": 5,
         "active_rebenchmark_task_window": 3,
         "shadow_rebenchmark_task_window": 2,
+        "token_budget_multiplier": 1.0,
+        "fast_track_skip_plan_audit": False,
     }
     if not path.exists() or not path.read_text().strip():
         write_json(path, default)
@@ -823,10 +826,13 @@ def benchmark_policy_config(root: Path) -> dict:
     except (json.JSONDecodeError, FileNotFoundError, OSError):
         write_json(path, default)
         return default
-    merged = {**default, **{k: v for k, v in data.items() if isinstance(v, int) and v >= 0}}
-    if merged != data:
-        write_json(path, merged)
+    merged = {**default, **data}
     return merged
+
+
+def benchmark_policy_config(root: Path) -> dict:
+    """Legacy alias. Returns project policy."""
+    return project_policy(root)
 
 
 def compute_benchmark_summary(benchmarks: list[dict]) -> dict:

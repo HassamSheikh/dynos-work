@@ -15,10 +15,11 @@ from dynoslib import (
     now_iso,
     write_json,
     _safe_float,
+    _persistent_project_dir,
+    project_policy,
     COMPOSITE_WEIGHTS,
 )
 from dynoglobal import project_dir
-from dynoslib import _persistent_project_dir
 
 
 # Token budgets by (risk_level, task_type)
@@ -41,8 +42,9 @@ def postmortems_dir(root: Path) -> Path:
     return project_dir(root) / "postmortems"
 
 
-def _expected_budget(risk_level: str, task_type: str) -> int:
-    return TOKEN_BUDGETS.get((risk_level, task_type), DEFAULT_BUDGET)
+def _expected_budget(risk_level: str, task_type: str, multiplier: float = 1.0) -> int:
+    base = TOKEN_BUDGETS.get((risk_level, task_type), DEFAULT_BUDGET)
+    return int(base * max(0.5, multiplier))
 
 
 def _read_execution_log(task_dir: Path) -> str:
@@ -91,13 +93,13 @@ def _find_similar_tasks(retro: dict, all_retros: list[dict], limit: int = 3) -> 
     return similar[:limit]
 
 
-def _detect_anomalies(retro: dict, similar_tasks: list[dict]) -> list[dict]:
+def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier: float = 1.0) -> list[dict]:
     """Detect anomalies by comparing to similar past tasks."""
     anomalies = []
     risk = retro.get("task_risk_level", "medium")
     task_type = retro.get("task_type", "feature")
     total_tokens = _safe_float(retro.get("total_token_usage"), 0)
-    budget = _expected_budget(risk, task_type)
+    budget = _expected_budget(risk, task_type, budget_multiplier)
 
     # Token overrun
     if total_tokens > budget * 1.5:
@@ -228,13 +230,15 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
     log_text = _read_execution_log(task_dir)
     audit_reports = _read_audit_reports(task_dir)
     all_retros = collect_retrospectives(root)
+    policy = project_policy(root)
+    budget_multiplier = float(policy.get("token_budget_multiplier", 1.0))
     similar = _find_similar_tasks(retro, all_retros)
-    anomalies = _detect_anomalies(retro, similar)
+    anomalies = _detect_anomalies(retro, similar, budget_multiplier)
     recurring = _detect_recurring_patterns(all_retros)
 
     risk = retro.get("task_risk_level", "medium")
     task_type = retro.get("task_type", "feature")
-    budget = _expected_budget(risk, task_type)
+    budget = _expected_budget(risk, task_type, budget_multiplier)
     total_tokens = _safe_float(retro.get("total_token_usage"), 0)
 
     # Cost summary
@@ -501,7 +505,7 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
     result = {"id": proposal["id"], "applied": False, "reason": ""}
 
     if action == "adjust_policy":
-        policy_path = root / ".dynos" / "policy.json"
+        policy_path = _persistent_project_dir(root) / "policy.json"
         policy = {}
         if policy_path.exists():
             try:

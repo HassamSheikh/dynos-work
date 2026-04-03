@@ -251,6 +251,10 @@ Present `plan.md` to the user and ask for approval.
 
 ## Step 7 — Plan Audit
 
+**Fast-track skip:** If `manifest.json` has `"fast_track": true`, check the project policy at `~/.dynos/projects/{slug}/policy.json` for `"fast_track_skip_plan_audit": true`. If both are true, skip the plan audit entirely and proceed to Step 8. Log: `{timestamp} [SKIP] plan audit — fast_track_skip_plan_audit policy`. This policy is set automatically by the improvement engine when low-risk tasks consistently pass without repair.
+
+**Normal path:**
+
 1. Spawn `spec-completion-auditor` to verify that `plan.md` and `execution-graph.json` cover all acceptance criteria in `spec.md`.
 2. If the auditor finds gaps, route back to planning, repair the gaps, and rerun both deterministic artifact validation and the plan audit.
 3. Create a git branch safety net: `dynos/task-{id}-snapshot`.
