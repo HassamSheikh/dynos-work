@@ -863,6 +863,29 @@ class LearningRuntimeTests(unittest.TestCase):
         graph = json.loads(lineage.stdout)
         self.assertTrue(any(node["kind"] == "component" for node in graph["nodes"]))
 
+    def test_patterns_generation_writes_policy_tables(self) -> None:
+        self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
+        self.run_py(
+            "dynoevolve.py",
+            "register-agent",
+            "backend-patterned",
+            "backend-executor",
+            "feature",
+            ".dynos/learned-agents/executors/backend-patterned.md",
+            "task-20260401-001",
+            "--root",
+            str(self.root),
+        )
+        patterns = self.run_py("dynopatterns.py", "--root", str(self.root))
+        self.assertEqual(patterns.returncode, 0, patterns.stdout + patterns.stderr)
+        payload = json.loads(patterns.stdout)
+        self.assertIn(str(self.root / ".dynos" / "dynos_patterns.md"), payload["written_paths"])
+        content = (self.root / ".dynos" / "dynos_patterns.md").read_text()
+        self.assertIn("## Model Policy", content)
+        self.assertIn("## Skip Policy", content)
+        self.assertIn("## Agent Routing", content)
+        self.assertIn("| backend-executor | feature |", content)
+
     def test_task_artifact_challenge_rollout_runs(self) -> None:
         self.run_py("dynoevolve.py", "init-registry", "--root", str(self.root))
         self.run_py(
@@ -1010,6 +1033,7 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertIn(agent["mode"], {"alongside", "replace"})
         self.assertTrue(agent["route_allowed"])
         self.assertTrue((self.root / ".dynos" / "dashboard.html").exists())
+        self.assertTrue((self.root / ".dynos" / "dynos_patterns.md").exists())
 
     def test_maintainer_invoke_alias_runs(self) -> None:
         invoke = self.run_py("dynomaintain.py", "invoke", "--root", str(self.root))

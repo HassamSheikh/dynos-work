@@ -6,6 +6,7 @@
   "task_type": "feature",
   "source_tasks": [
     "task-20260403-001",
+    "task-20260403-003",
     "task-20260330-002",
     "task-20260330-004",
     "task-20260402-002"
@@ -14,13 +15,14 @@
     "task-20260330-002",
     "task-20260330-004",
     "task-20260402-002",
-    "task-20260403-001"
+    "task-20260403-001",
+    "task-20260403-003"
   ],
   "synthesis": {
-    "synthesized_at": "2026-04-03T18:50:46Z",
+    "synthesized_at": "2026-04-03T21:27:21Z",
     "source_task": "task-20260403-001",
     "strategy": "task_retrospective_scores_vs_task_type_baseline",
-    "candidate_limit": 4
+    "candidate_limit": 5
   },
   "policy": {
     "min_samples": 3,
@@ -33,10 +35,10 @@
       "category": "backend",
       "source_task_id": "task-20260403-001",
       "baseline": {
-        "quality_score": 0.0,
-        "cost_score": 0.0,
-        "efficiency_score": 0.0,
-        "composite_score": 0.0
+        "quality_score": 0.18,
+        "cost_score": 0.034,
+        "efficiency_score": 0.2,
+        "composite_score": 0.1631
       },
       "candidate": {
         "quality_score": 0.0,
@@ -46,14 +48,31 @@
       }
     },
     {
+      "case_id": "task-20260403-003",
+      "category": "ui",
+      "source_task_id": "task-20260403-003",
+      "baseline": {
+        "quality_score": 0.18,
+        "cost_score": 0.034,
+        "efficiency_score": 0.2,
+        "composite_score": 0.1631
+      },
+      "candidate": {
+        "quality_score": 0.9,
+        "cost_score": 0.17,
+        "efficiency_score": 1.0,
+        "composite_score": 0.8155
+      }
+    },
+    {
       "case_id": "task-20260330-002",
       "category": "backend",
       "source_task_id": "task-20260330-002",
       "baseline": {
-        "quality_score": 0.0,
-        "cost_score": 0.0,
-        "efficiency_score": 0.0,
-        "composite_score": 0.0
+        "quality_score": 0.18,
+        "cost_score": 0.034,
+        "efficiency_score": 0.2,
+        "composite_score": 0.1631
       },
       "candidate": {
         "quality_score": 0.0,
@@ -67,10 +86,10 @@
       "category": "backend",
       "source_task_id": "task-20260330-004",
       "baseline": {
-        "quality_score": 0.0,
-        "cost_score": 0.0,
-        "efficiency_score": 0.0,
-        "composite_score": 0.0
+        "quality_score": 0.18,
+        "cost_score": 0.034,
+        "efficiency_score": 0.2,
+        "composite_score": 0.1631
       },
       "candidate": {
         "quality_score": 0.0,
@@ -84,10 +103,10 @@
       "category": "backend",
       "source_task_id": "task-20260402-002",
       "baseline": {
-        "quality_score": 0.0,
-        "cost_score": 0.0,
-        "efficiency_score": 0.0,
-        "composite_score": 0.0
+        "quality_score": 0.18,
+        "cost_score": 0.034,
+        "efficiency_score": 0.2,
+        "composite_score": 0.1631
       },
       "candidate": {
         "quality_score": 0.0,
