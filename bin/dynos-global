@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Thin wrapper for dynoglobal.py — works from any directory.
+# Usage: dynos-global start
+#        dynos-global stop
+#        dynos-global status
+HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
+PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" exec python3 "${HOOKS_DIR}/dynoglobal.py" "$@"

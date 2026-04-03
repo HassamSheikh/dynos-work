@@ -287,27 +287,35 @@ All cross-project state lives under `~/.dynos/`. This includes the project regis
 
 ### Registering a Project
 
-From any project root:
+From within Claude Code, use the skill command:
 
-```bash
-python3 hooks/dynoregistry.py register .
+```
+/dynos-work:register
 ```
 
-This adds the project to `~/.dynos/registry.json`. To list all registered projects:
+Or from any terminal (using the wrapper scripts in `bin/`):
 
 ```bash
-python3 hooks/dynoregistry.py list
+dynos-registry register /path/to/your/project
+dynos-registry list
+dynos-registry status
 ```
 
-Other registry commands: `unregister`, `status`, `pause`, `resume`, `set-active`. Run `python3 hooks/dynoregistry.py --help` for details.
+Add `bin/` to your PATH for convenience:
+
+```bash
+export PATH="/path/to/dynos-work/bin:$PATH"
+```
+
+Other registry commands: `unregister`, `pause`, `resume`, `set-active`. Run `dynos-registry --help` for details.
 
 ### Starting and Stopping the Global Daemon
 
 ```bash
-python3 hooks/dynoglobal.py start    # background daemon
-python3 hooks/dynoglobal.py stop     # stop the daemon
-python3 hooks/dynoglobal.py status   # check daemon health
-python3 hooks/dynoglobal.py run-once # single maintenance sweep
+dynos-global start      # background daemon
+dynos-global stop       # stop the daemon
+dynos-global status     # check daemon health
+dynos-global run-once   # single maintenance sweep
 ```
 
 The daemon loops over all registered projects, runs maintenance cycles, and then sleeps before repeating. Idle projects receive exponential backoff so active projects get priority.

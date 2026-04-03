@@ -1,41 +1,44 @@
 #!/usr/bin/env bash
 # Hook: TaskCompleted
 # Runs after every task completion.
-# Pipeline: learn → trajectory rebuild → evolve → patterns → auto-benchmark → dashboard → auto-commit
+# Pipeline: learn → trajectory → evolve → patterns → postmortem → improve → auto-benchmark → dashboard → register → auto-commit
 # Every fallible step uses "|| true" so failures never block the session.
 
 set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(pwd)"
 
 # --- Step 1: Learn — aggregate retrospectives into project memory ---
 claude -p "Run /dynos-work:learn for the most recently completed task" || true
 
 # --- Step 2: Rebuild trajectory store from all retrospectives ---
-python3 hooks/dynostrajectory.py rebuild --root . || true
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynostrajectory.py" rebuild --root "${PROJECT_ROOT}" || true
 
 # --- Step 3: Evolve — deterministic learned agent generation ---
-python3 hooks/dynoevolve.py auto --root . || true
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynoevolve.py" auto --root "${PROJECT_ROOT}" || true
 
 # --- Step 4: Refresh patterns file from live runtime state ---
-python3 hooks/dynopatterns.py --root . || true
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynopatterns.py" --root "${PROJECT_ROOT}" || true
 
 # --- Step 5: Generate automatic postmortem ---
-python3 hooks/dynopostmortem.py generate --root . || true
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynopostmortem.py" generate --root "${PROJECT_ROOT}" || true
 
 # --- Step 5b: Run improvement cycle (project-local only) ---
-python3 hooks/dynopostmortem.py improve --root . || true
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynopostmortem.py" improve --root "${PROJECT_ROOT}" || true
 
 # --- Step 6: Auto-benchmark shadow challengers ---
-python3 hooks/dynoauto.py run --root . || true
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynoauto.py" run --root "${PROJECT_ROOT}" || true
 
 # --- Step 7: Refresh live dashboard artifacts ---
-python3 hooks/dynodashboard.py generate --root . || true
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynodashboard.py" generate --root "${PROJECT_ROOT}" || true
 
 # --- Step 8: Mark project active in global registry ---
-python3 hooks/dynoregistry.py set-active "$(pwd)" || true
+PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 "${SCRIPT_DIR}/dynoregistry.py" set-active "${PROJECT_ROOT}" || true
 
 # --- Step 9: Conditional auto-commit ---
-PROJECT_DIR=$(pwd | sed 's|/|-|g')
+PROJECT_DIR=$(echo "${PROJECT_ROOT}" | sed 's|/|-|g')
 SETTINGS="$HOME/.claude/projects/$PROJECT_DIR/settings.json"
 if [ -f "$SETTINGS" ] && grep -q '"dynos_auto_commit".*true' "$SETTINGS" 2>/dev/null; then
-  git add .dynos/ benchmarks/ && git diff --cached --quiet || git commit -m "dynos-work: auto-commit after task completion" || true
+  cd "${PROJECT_ROOT}" && git add .dynos/ benchmarks/ && git diff --cached --quiet || git commit -m "dynos-work: auto-commit after task completion" || true
 fi

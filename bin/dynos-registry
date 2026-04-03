@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Thin wrapper for dynoregistry.py — works from any directory.
+# Usage: dynos-registry register /path/to/project
+#        dynos-registry list
+#        dynos-registry status
+HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
+PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" exec python3 "${HOOKS_DIR}/dynoregistry.py" "$@"
