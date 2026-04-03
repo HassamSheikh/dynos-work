@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
 # Hook: TaskCompleted
 # Runs after every task completion.
-#   1. Triggers the learn skill to aggregate retrospectives into project memory.
-#   2. Conditionally auto-commits if dynos_auto_commit is set.
+# Pipeline: learn → trajectory rebuild → evolve → patterns → auto-benchmark → dashboard → auto-commit
 # Every fallible step uses "|| true" so failures never block the session.
 
 set -u
 
-# --- Step 1: Learn trigger (always runs) ---
+# --- Step 1: Learn — aggregate retrospectives into project memory ---
 claude -p "Run /dynos-work:learn for the most recently completed task" || true
 
-# --- Step 1b: Refresh patterns file from live runtime state ---
+# --- Step 2: Rebuild trajectory store from all retrospectives ---
+python3 hooks/dynostrajectory.py rebuild --root . || true
+
+# --- Step 3: Evolve — generate/update learned agents from new data ---
+claude -p "Run /dynos-work:evolve for the most recently completed task" || true
+
+# --- Step 4: Refresh patterns file from live runtime state ---
 python3 hooks/dynopatterns.py --root . || true
 
-# --- Step 1c: Auto-benchmark shadow challengers ---
+# --- Step 5: Auto-benchmark shadow challengers ---
 python3 hooks/dynoauto.py run --root . || true
 
-# --- Step 1d: Refresh live dashboard artifacts ---
+# --- Step 6: Refresh live dashboard artifacts ---
 python3 hooks/dynodashboard.py generate --root . || true
 
-# --- Step 2: Conditional auto-commit ---
+# --- Step 7: Conditional auto-commit ---
 PROJECT_DIR=$(pwd | sed 's|/|-|g')
 SETTINGS="$HOME/.claude/projects/$PROJECT_DIR/settings.json"
 if [ -f "$SETTINGS" ] && grep -q '"dynos_auto_commit".*true' "$SETTINGS" 2>/dev/null; then

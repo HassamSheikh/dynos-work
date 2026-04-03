@@ -99,7 +99,34 @@ def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-def _build_model_policy(task_types: list[str], executor_roles: list[str], auditor_roles: list[str]) -> list[str]:
+def _build_model_policy(
+    task_types: list[str],
+    executor_roles: list[str],
+    auditor_roles: list[str],
+    retrospectives: list[dict],
+) -> list[str]:
+    # Build (role, task_type) -> list of (model, quality) from retrospective data
+    observations: dict[tuple[str, str], list[tuple[str, float]]] = {}
+    for retro in retrospectives:
+        task_type = retro.get("task_type")
+        quality = retro.get("quality_score")
+        models = retro.get("model_used_by_agent", {})
+        if not isinstance(task_type, str) or not isinstance(models, dict):
+            continue
+        if not isinstance(quality, (int, float)):
+            quality = 0.0
+        for role, model in models.items():
+            if isinstance(model, str) and model:
+                observations.setdefault((role, task_type), []).append((model, float(quality)))
+    # For each (role, task_type), pick the model with the highest average quality
+    best: dict[tuple[str, str], str] = {}
+    for key, obs_list in observations.items():
+        model_scores: dict[str, list[float]] = {}
+        for model, quality in obs_list:
+            model_scores.setdefault(model, []).append(quality)
+        ranked = sorted(model_scores.items(), key=lambda x: -_mean(x[1]))
+        if ranked and len(ranked[0][1]) >= 2:
+            best[key] = ranked[0][0]
     lines = [
         "## Model Policy",
         "",
@@ -108,7 +135,8 @@ def _build_model_policy(task_types: list[str], executor_roles: list[str], audito
     ]
     for role in sorted(set(executor_roles + auditor_roles)):
         for task_type in task_types:
-            lines.append(f"| {role} | {task_type} | default |")
+            model = best.get((role, task_type), "default")
+            lines.append(f"| {role} | {task_type} | {model} |")
     return lines
 
 
@@ -201,14 +229,17 @@ def build_patterns_markdown(root: Path) -> str:
         "| Task ID | Type | Why It Matters |",
         "|---------|------|----------------|",
     ]
+    scored_tasks = [
+        item
+        for item in retrospectives
+        if isinstance(item.get("task_id"), str)
+        and isinstance(item.get("task_type"), str)
+        and isinstance(item.get("quality_score"), (int, float))
+    ]
     top_tasks = sorted(
-        (
-            item
-            for item in retrospectives
-            if isinstance(item.get("task_id"), str) and isinstance(item.get("task_type"), str)
-        ),
+        scored_tasks,
         key=lambda item: (
-            -float(item.get("quality_score", 0.0) or 0.0),
+            -float(item.get("quality_score", 0.0)),
             -float(item.get("efficiency_score", 0.0) or 0.0),
             str(item.get("task_id")),
         ),
@@ -217,11 +248,11 @@ def build_patterns_markdown(root: Path) -> str:
         for item in top_tasks:
             task_id = str(item.get("task_id"))
             task_type = str(item.get("task_type"))
-            score = float(item.get("quality_score", 0.0) or 0.0)
+            score = float(item.get("quality_score", 0.0))
             lines.append(f"| {task_id} | {task_type} | High-quality completed task (quality {score:.2f}). |")
     else:
         lines.append("| none | n/a | No completed retrospectives available yet. |")
-    lines.extend([""] + _build_model_policy(task_types, executor_roles, auditor_roles))
+    lines.extend([""] + _build_model_policy(task_types, executor_roles, auditor_roles, retrospectives))
     lines.extend([""] + _build_skip_policy(retrospectives, auditor_roles))
     lines.extend([""] + _build_agent_routing(task_types, executor_roles, auditor_roles, registry))
     return "\n".join(lines) + "\n"

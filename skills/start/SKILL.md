@@ -104,6 +104,23 @@ python3 hooks/dynosctl.py transition .dynos/task-{id} SPEC_NORMALIZATION
 
 ---
 
+## Step 2b — Fast-Track Gate (conditional)
+
+After classification, check if the task qualifies for fast-track execution. A task is fast-tracked when ALL of:
+- `risk_level` is `"low"`
+- `domains` has exactly 1 entry
+- The discovery phase produced no hard/critical design options
+- The task description implies fewer than 5 acceptance criteria
+
+When fast-tracked, set `manifest.json` field `"fast_track": true` and apply these simplifications throughout the remaining steps:
+- **Spec (Step 3):** The planner should produce a concise spec. The `Implicit Requirements Surfaced` and `Risk Notes` sections can contain a single line each if no significant risks exist.
+- **Planning (Step 5):** The execution graph should contain a **single segment** (no multi-segment decomposition). A single executor handles the entire change.
+- **Audit (handled by audit skill):** When `fast_track: true` in the manifest, spawn only `spec-completion-auditor` and `security-auditor`. Skip all other auditors regardless of streak or domain.
+
+If any condition is not met, proceed normally (no fast-track). Do not ask the user — this is a deterministic gate.
+
+---
+
 ## Step 3 — Spec Normalization
 
 Spawn the Planner subagent with instruction:
@@ -111,6 +128,7 @@ Spawn the Planner subagent with instruction:
 ```text
 Phase: Spec Normalization.
 Read raw-input.md, discovery-notes.md, and design-decisions.md.
+Also read the actual implementation files referenced in the task (e.g., the files that will be modified). Verify runtime semantics directly from the code — do not assume template engines, escaping conventions, or generation mechanisms without reading the relevant functions. Include specific function signatures, data flow paths, and module boundaries in the spec.
 Write spec.md.
 ```
 

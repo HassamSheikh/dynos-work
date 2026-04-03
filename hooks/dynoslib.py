@@ -262,6 +262,22 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
         for heading in REQUIRED_PLAN_HEADINGS:
             if heading not in collect_headings(plan_text):
                 errors.append(f"plan missing heading: {heading}")
+        # Validate Reference Code paths exist in repo
+        in_ref_section = False
+        for line in plan_text.splitlines():
+            if line.startswith("## "):
+                in_ref_section = line.strip() == "## Reference Code"
+                continue
+            if not in_ref_section:
+                continue
+            # Look for file paths like `hooks/foo.py` or **`src/bar.ts`**
+            for match in re.finditer(r"`([^`]+\.[a-zA-Z]{1,5})`", line):
+                ref_path = match.group(1)
+                if "to-be-created" in line.lower():
+                    continue
+                full = task_dir.parent.parent / ref_path
+                if not full.exists():
+                    errors.append(f"plan Reference Code path does not exist: {ref_path}")
     elif strict:
         errors.append(f"missing required file: {plan_path}")
 

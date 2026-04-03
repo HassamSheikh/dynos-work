@@ -27,7 +27,11 @@ Update `manifest.json` stage to `CHECKPOINT_AUDIT`.
 
 **Determine which auditors to spawn:**
 
-Read `manifest.json` `classification` field and `execution-graph.json`.
+Read `manifest.json` `classification` field, `execution-graph.json`, and the `fast_track` field from `manifest.json`.
+
+**Fast-track mode:** If `manifest.json` contains `"fast_track": true`, spawn ONLY `spec-completion-auditor` and `security-auditor`. Skip all other auditors regardless of domain, streak, or policy. Append to log: `{timestamp} [FAST-TRACK] reduced audit set — spec-completion + security only`. Then skip the remaining auditor selection logic below and proceed directly to spawning.
+
+**Normal mode (fast_track is false or absent):**
 
 **Always spawn (universal, skip-exempt auditors):**
 - `spec-completion-auditor`
@@ -306,8 +310,8 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
    - `executor_zero_repair_streak`: Read `repair-log.json`. Sort executor segments by execution order. Starting from the most recent, count consecutive executor segments that needed zero repairs (i.e., were not assigned any repair tasks). Stop counting at the first segment that had repairs. If `repair-log.json` is missing or malformed, set to `0`.
 9. Compute reward vector fields. Each score is clamped to the range `[0, 1]` (minimum 0, maximum 1):
    - `quality_score`: `1 - (surviving_findings / total_findings)`. Where `surviving_findings` is the count of findings still present after the final re-audit (i.e., findings that were not resolved), and `total_findings` is the total number of unique findings discovered across all audit and re-audit passes. If `total_findings` is `0`, set `quality_score` to `0.9` (not 1.0, because zero findings may indicate auditor gaps rather than perfect quality; a perfect 1.0 should only come from resolving known findings).
-   - `cost_score`: token-efficiency score derived from average tokens per spawn. Compute `avg_tokens_per_spawn = total_token_usage / max(1, subagent_spawn_count)`. Then compute `cost_score = 1 / (1 + (avg_tokens_per_spawn / 12000))`. If `total_token_usage` is `0` or `subagent_spawn_count` is `0`, set `cost_score` to `1.0`.
-   - `efficiency_score`: `1 - (repair_cycle_count / 3)`. Uses the `repair_cycle_count` computed in substep 3.
+   - `cost_score`: token-efficiency score normalized by task risk level. Compute `avg_tokens_per_spawn = total_token_usage / max(1, subagent_spawn_count)`. Determine budget per spawn by `risk_level`: low=8000, medium=12000, high=18000, critical=25000 (default 12000). Then compute `cost_score = 1 / (1 + (avg_tokens_per_spawn / budget))`. If `total_token_usage` is `0` or `subagent_spawn_count` is `0`, set `cost_score` to `1.0`. Additionally, if ALL agents used default routing (every entry in `agent_source` is `"generic"`), apply a `0.05` penalty: `cost_score = max(0, cost_score - 0.05)`. This penalizes cold-start/default-fallback runs that could not leverage learned routing.
+   - `efficiency_score`: `1 - (repair_cycle_count / 3) - (max(0, spec_review_iterations - 1) * 0.1)`. Uses the `repair_cycle_count` computed in substep 3 and the `spec_review_iterations` computed in substep 4. Multiple spec review iterations indicate the spec required rework, which is an efficiency cost.
 10. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
 
 ```json
