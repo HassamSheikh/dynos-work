@@ -2,6 +2,27 @@
 
 All notable changes to dynos-work are documented here.
 
+## [3.0.0] - 2026-04-03
+
+### Added
+- Learned agents system: dynos-work generates project-specific executors and auditors that improve over time
+- Agent generation in learn step: analyzes codebase patterns and repair history, rate-limited to every 3 tasks, passive (no extra spawns)
+- Agent Routing table in `dynos_patterns.md`: routes to learned agents when they outperform generics
+- Alongside/replace mode for learned auditors: both run for 3-task proving window, then replace when proven
+- Self-pruning: learned agents soft-deleted to `.archive/` after 3 consecutive tasks of underperformance
+- EMA quad key: (role, model, task_type, source) tracks generic vs learned agent effectiveness separately
+- Finding-overlap tracking for alongside auditor evaluation
+- Path validation on learned agent file reads (defense-in-depth)
+- Sanitization on agent generation instructions (prompt injection prevention)
+- Security-auditor replace protection (can never be replaced by learned agent)
+- Priority-stack composite weights: 0.6 quality + 0.25 efficiency + 0.15 cost
+
+### Changed
+- `skills/learn/SKILL.md` gains Steps 6-9: agent generation, routing table, pruning, mode transitions
+- `skills/execute/SKILL.md` reads Agent Routing table, routes to learned executors when composite is higher
+- `skills/audit/SKILL.md` reads Agent Routing table, supports alongside/replace mode, tracks agent_source and finding overlap in retrospective
+- EMA effectiveness tracking extended from triple to quad key
+
 ## [2.12.0] - 2026-04-03
 
 ### Added

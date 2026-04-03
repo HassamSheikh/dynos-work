@@ -1,6 +1,6 @@
 {
   "skill": "learn",
-  "description": "Aggregate task retrospectives into project memory. Computes effectiveness scores, derives Model Policy and Skip Policy.",
+  "description": "Aggregate task retrospectives into project memory. Computes effectiveness scores, derives Model Policy and Skip Policy, generates learned agents, maintains Agent Routing, and prunes underperforming agents.",
   "input_schema": {
     "task-retrospective.json": {
       "type": "object",
@@ -23,7 +23,11 @@
   "output_schema": {
     "dynos_patterns.md": {
       "type": "string",
-      "description": "Learned patterns file with top finding categories, executor reliability, avg repair cycles, prevention rules, spawn efficiency, effectiveness scores, model policy, skip policy, baseline policy"
+      "description": "Learned patterns file with top finding categories, executor reliability, avg repair cycles, prevention rules, spawn efficiency, effectiveness scores, model policy, skip policy, baseline policy, agent routing"
+    },
+    "learned-agents": {
+      "type": "directory",
+      "description": "Generated learned agent .md files in .dynos/learned-agents/{auditors,executors,skills,.archive}/"
     }
   }
 }

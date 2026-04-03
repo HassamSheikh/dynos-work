@@ -55,6 +55,31 @@ If the entire policy table is missing, unreadable, or corrupt, also log once:
 {timestamp} [WARN] policy table missing/corrupt -- using defaults
 ```
 
+**Agent Routing lookup:** After the Model Policy lookup, attempt to read the `## Agent Routing` table from `dynos_patterns.md` in the project memory directory. The table has columns `Role`, `Task Type`, `Agent Source`, `Agent Path`, `Composite Score`, and `Mode`. For each executor about to be spawned, look up the rows matching (executor role, `task_type`). Two rows may exist for the same `(Role, Task Type)` pair: one with `Agent Source` = `generic` and one with a learned source (e.g. `learned:{agent-name}`). Compare the learned row's `Composite Score` against the generic row's `Composite Score`. If the learned row's `Composite Score` is strictly greater than the generic row's `Composite Score`:
+1. **Path validation:** Verify the learned row's `Agent Path` value starts with `.dynos/learned-agents/`. If the path points outside this directory, ignore it, fall back to generic, and log: `{timestamp} [WARN] learned agent path outside .dynos/learned-agents/ -- using generic`.
+2. Read the learned agent's `.md` file from the `Agent Path` column.
+3. If the file exists and is readable, use its contents as the executor's spawn instructions instead of the generic executor agent instructions.
+4. Append to log:
+   ```
+   {timestamp} [ROUTE] {executor-name} using learned:{learned-agent-name} (composite: {score})
+   ```
+
+If any of the following conditions are true, fall back to the generic executor silently (no error):
+- The `## Agent Routing` section is absent from `dynos_patterns.md`
+- The `dynos_patterns.md` file is missing or unreadable
+- No row matches the (executor role, `task_type`) pair
+- No learned row exists, or the learned row's `Composite Score` is not strictly greater than the generic row's `Composite Score`
+- The learned agent `.md` file at the specified `Agent Path` does not exist or is unreadable
+- The `Agent Path` fails path validation (points outside `.dynos/learned-agents/`)
+- The table is malformed
+
+When falling back to generic, append to log:
+```
+{timestamp} [ROUTE] {executor-name} using generic (composite: n/a)
+```
+
+Atomic read is sufficient since execute and learn never run simultaneously.
+
 Spawn their executor agents in parallel.
 
 Executor agents by type:

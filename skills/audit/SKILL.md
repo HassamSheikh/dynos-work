@@ -73,13 +73,35 @@ Before spawning each auditor, determine which model to use:
    ```
    Use `policy` when the model came from a matching Model Policy row (even if overridden by the security floor). Use `default` when falling back due to missing policy.
 
+**Agent Routing (learned auditor selection):**
+
+After resolving skip and model policies, determine whether each auditor should use a generic prompt, a learned prompt, or both:
+
+1. Read `dynos_patterns.md` from the project memory directory (same path as above). Look for a markdown table under the heading `## Agent Routing`. The table has columns `| Role | Task Type | Agent Source | Agent Path | Composite Score | Mode |`. Match each auditor by looking up the `Role` column (matching auditor name) and the current task's `task_type` (from `classification.type` in manifest) against the `Task Type` column. Read `Mode` for alongside/replace, `Agent Path` for the learned agent `.md` file path, and `Composite Score` for logging. **Path validation:** If an `Agent Path` value does not start with `.dynos/learned-agents/` and is not `built-in`, treat the entry as invalid -- log `{timestamp} [WARN] invalid agent path: {path} -- using generic for {auditor-name}` and fall back to generic for that auditor. If `dynos_patterns.md` is missing, unreadable, has no `## Agent Routing` section, or has no matching row for a given auditor and task type, use generic for that auditor. Do not error. Reuse the existing `[WARN]` log line if already emitted for missing policy table; do not duplicate.
+2. **Security-auditor replace protection:** The `security-auditor` must NEVER be replaced by a learned auditor. Even if a learned security auditor exists in the Agent Routing table with mode=replace, always run the generic `security-auditor`. A learned security auditor may only run in alongside mode (supplementary, never replacing). This matches the monotonicity constraint (security-auditor never downgraded). If a replace entry is found for `security-auditor`, override it to alongside and log: `{timestamp} [WARN] security-auditor replace blocked -- forced to alongside (monotonicity)`.
+3. For each auditor that was not skipped, check its row in the Agent Routing table:
+   - **No entry:** Use the generic auditor. Append to log:
+     ```
+     {timestamp} [ROUTE] {auditor-name} using generic (mode: default)
+     ```
+   - **Mode = `replace`:** Use only the learned auditor prompt (from the `Agent Path` column). Do not spawn the generic auditor for this role. Append to log:
+     ```
+     {timestamp} [ROUTE] {auditor-name} using learned:{agent-name} (mode: replace, composite: {score})
+     ```
+   - **Mode = `alongside`:** Spawn BOTH the generic auditor AND the learned auditor for this role. Both run in parallel and both produce audit reports. Append to log:
+     ```
+     {timestamp} [ROUTE] {auditor-name} using alongside (mode: alongside, composite: {score})
+     ```
+4. **Finding deduplication in alongside mode:** When both generic and learned auditors produce findings for the same role, deduplicate before counting. Two findings are considered the same if they share the same dedup key: `{file}:{line}:{category}` (where `line` is the finding's reported line from the `location` field, and `category` is the finding ID prefix). If both auditors report the same finding, count it once. Retain the version from the learned auditor (preference for learned). The deduplicated finding set is what feeds into the repair pipeline and retrospective counts.
+5. **Alongside promotion tracking:** For each alongside auditor, record whether the learned auditor's findings are a superset of the generic auditor's findings (using dedup keys). The learn step reads this data to decide whether to promote from alongside to replace after 3 tasks.
+
 Append to log:
 ```
 {timestamp} [STAGE] → CHECKPOINT_AUDIT
 {timestamp} [SPAWN] {N} auditors in parallel ({list of names})
 ```
 
-Spawn the determined auditors simultaneously, passing the resolved model for each auditor in the subagent spawn configuration.
+Spawn the determined auditors simultaneously, passing the resolved model for each auditor in the subagent spawn configuration. For alongside-mode auditors, this means two spawns for that role (generic + learned), both counted in {N}.
 
 Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
@@ -230,7 +252,17 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
    - `token_usage_by_agent`: Collect all per-agent token counts recorded during Steps 3 and 4 (auditor spawns, repair-coordinator spawns, executor spawns, re-audit spawns). Produce an object mapping agent name to total token count. If a given agent's token count was recorded as `null` (metadata unavailable), include it in the object with value `null`.
    - `total_token_usage`: Sum all non-null values in `token_usage_by_agent`. If all values are `null`, set to `0`.
    - `model_used_by_agent`: Collect the actual model used by each subagent spawn during Steps 3 and 4. Produce an object mapping agent name to model name string. This records the actual model used at spawn time, not the recommended model from policy. If the model information is unavailable from spawn metadata, record `null` for that agent.
-7. Compute spawn/waste tracking fields:
+   - `agent_source`: For each auditor spawned during Step 3, record its routing source. Produce an object mapping agent name to source string. Values are `"generic"` (default/no routing entry), `"learned:{prompt-name}"` (replace mode), or for alongside mode, record both entries: `"{auditor-name}"` maps to `"generic"` and `"{auditor-name}:learned"` maps to `"learned:{prompt-name}"`. This field enables the learn step to correlate agent routing decisions with quality outcomes.
+7. Compute agent routing overlap data (alongside mode only):
+   - For each auditor that ran in alongside mode during Step 3, compare the deduplicated finding sets from the generic and learned spawns.
+   - Compute the dedup key set for each: `{file}:{line}:{category}`.
+   - Record `alongside_overlap`: an object mapping auditor name to an object with:
+     - `generic_finding_keys`: array of dedup keys from the generic auditor
+     - `learned_finding_keys`: array of dedup keys from the learned auditor
+     - `learned_is_superset`: boolean, true if every key in `generic_finding_keys` also appears in `learned_finding_keys`
+     - `alongside_task_count`: integer, the current alongside task count for this auditor (incremented from the prior retrospective's value, or 1 if no prior value)
+   - If no auditors ran in alongside mode, set `alongside_overlap` to `{}`.
+8. Compute spawn/waste tracking fields:
    - `subagent_spawn_count`: Scan `.dynos/task-{id}/execution-log.md`. Count all lines containing `[SPAWN]`. If the file is missing, set to `0`.
    - `wasted_spawns`: Count auditor runs that produced zero findings. For each parsed audit report from step 1, if the `findings` array is empty (length 0), increment this counter.
    - `auditor_zero_finding_streaks`: Compute per-auditor zero-finding streaks. Read the most recent prior task's `task-retrospective.json` (not the current task) to get the previous streak values. If it does not exist, or uses the old single-integer `auditor_zero_finding_streak` format, treat all prior streaks as `0`.
@@ -238,7 +270,7 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
      - For each auditor that was **spawned** and produced **one or more findings**: reset its streak to `0`.
      - For auditors that were **skipped** (not spawned) in this audit cycle: carry forward their streak value unchanged from the prior retrospective.
    - `executor_zero_repair_streak`: Read `repair-log.json`. Sort executor segments by execution order. Starting from the most recent, count consecutive executor segments that needed zero repairs (i.e., were not assigned any repair tasks). Stop counting at the first segment that had repairs. If `repair-log.json` is missing or malformed, set to `0`.
-8. Compute reward vector fields. Each score is clamped to the range `[0, 1]` (minimum 0, maximum 1):
+9. Compute reward vector fields. Each score is clamped to the range `[0, 1]` (minimum 0, maximum 1):
    - `quality_score`: `1 - (surviving_findings / total_findings)`. Where `surviving_findings` is the count of findings still present after the final re-audit (i.e., findings that were not resolved), and `total_findings` is the total number of unique findings discovered across all audit and re-audit passes. If `total_findings` is `0`, set `quality_score` to `1.0`.
    - `cost_score`: `1 - (total_token_usage / baseline_budget)`. Where `baseline_budget` is determined by the task's `task_type`. Read `classification.type` from manifest — this is the task's `task_type`. Budgets by type:
      - `feature`: 50000
@@ -248,7 +280,7 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
 
      If `total_token_usage` is `0` or `null`, set `cost_score` to `1.0`.
    - `efficiency_score`: `1 - (repair_cycle_count / 3)`. Uses the `repair_cycle_count` computed in substep 3.
-9. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
+10. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
 
 ```json
 {
@@ -269,6 +301,8 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
   "token_usage_by_agent": { "security-auditor": 45000, "code-quality-auditor": 38000, "spec-completion-auditor": 52000, "repair-coordinator": 15000, "backend-executor": 62000 },
   "total_token_usage": 212000,
   "model_used_by_agent": { "security-auditor": "opus", "code-quality-auditor": "sonnet", "spec-completion-auditor": "sonnet", "repair-coordinator": "sonnet", "backend-executor": "opus" },
+  "agent_source": { "security-auditor": "generic", "code-quality-auditor": "learned:cq-v2", "code-quality-auditor:learned": "learned:cq-v2", "spec-completion-auditor": "generic" },
+  "alongside_overlap": { "code-quality-auditor": { "generic_finding_keys": ["src/main.ts:10:cq"], "learned_finding_keys": ["src/main.ts:10:cq", "src/util.ts:3:cq"], "learned_is_superset": true, "alongside_task_count": 2 } },
   "quality_score": 0.67,
   "cost_score": 0.79,
   "efficiency_score": 1.0
@@ -296,13 +330,15 @@ If no audit reports or repair logs exist, write the file with zeroed-out counts:
   "token_usage_by_agent": {},
   "total_token_usage": 0,
   "model_used_by_agent": {},
+  "agent_source": {},
+  "alongside_overlap": {},
   "quality_score": 1.0,
   "cost_score": 1.0,
   "efficiency_score": 1.0
 }
 ```
 
-Old retrospectives from prior tasks that lack the `token_usage_by_agent`, `total_token_usage`, `model_used_by_agent`, `quality_score`, `cost_score`, or `efficiency_score` fields are treated as missing data (default `null`), not errors. The learn skill and any aggregation logic must handle their absence gracefully.
+Old retrospectives from prior tasks that lack the `token_usage_by_agent`, `total_token_usage`, `model_used_by_agent`, `agent_source`, `alongside_overlap`, `quality_score`, `cost_score`, or `efficiency_score` fields are treated as missing data (default `null`), not errors. The learn skill and any aggregation logic must handle their absence gracefully.
 
 Append to log:
 ```
