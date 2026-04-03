@@ -127,6 +127,46 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def validate_generated_html(html_path: Path) -> list[str]:
+    """Validate generated HTML for common template rendering bugs.
+
+    Returns a list of error strings. Empty list means valid.
+    """
+    errors: list[str] = []
+    try:
+        content = html_path.read_text()
+    except (FileNotFoundError, OSError) as exc:
+        return [f"cannot read {html_path}: {exc}"]
+
+    # Check for doubled braces in style blocks (template escaping bug)
+    style_match = re.search(r"<style>(.*?)</style>", content, re.DOTALL)
+    if style_match:
+        style = style_match.group(1)
+        double_open = len(re.findall(r"\{\{", style))
+        double_close = len(re.findall(r"\}\}", style))
+        if double_open > 0:
+            errors.append(f"CSS contains {double_open} doubled '{{{{' sequences (template escaping bug)")
+        if double_close > 0:
+            errors.append(f"CSS contains {double_close} doubled '}}}}' sequences (template escaping bug)")
+
+    # Check for doubled braces in script blocks
+    script_match = re.search(r"<script>(.*?)</script>", content, re.DOTALL)
+    if script_match:
+        script = script_match.group(1)
+        # Template literal ${{ is invalid JS (should be ${)
+        template_bugs = len(re.findall(r"\$\{\{", script))
+        if template_bugs > 0:
+            errors.append(f"JS contains {template_bugs} '${{{{' sequences (should be '${{' in template literals)")
+
+    # Check required element IDs are present
+    required_ids = {"stats", "updated", "lineage", "routes", "queue", "sparkline", "gaps", "demotions", "runs"}
+    for eid in required_ids:
+        if f'id="{eid}"' not in content:
+            errors.append(f"missing required element id='{eid}'")
+
+    return errors
+
+
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
@@ -221,6 +261,35 @@ def validate_manifest(manifest: dict) -> list[str]:
                 if domain not in VALID_DOMAINS:
                     errors.append(f"classification domain invalid: {domain!r}")
     return errors
+
+
+def compute_fast_track(manifest: dict) -> bool:
+    """Determine if a task qualifies for fast-track execution.
+
+    Fast-track when ALL conditions met:
+    - risk_level is "low"
+    - exactly 1 domain
+    - classification exists
+    """
+    classification = manifest.get("classification")
+    if not isinstance(classification, dict):
+        return False
+    if classification.get("risk_level") != "low":
+        return False
+    domains = classification.get("domains", [])
+    if not isinstance(domains, list) or len(domains) != 1:
+        return False
+    return True
+
+
+def apply_fast_track(task_dir: Path) -> bool:
+    """Check fast-track eligibility and write to manifest. Returns True if fast-tracked."""
+    manifest_path = task_dir / "manifest.json"
+    manifest = load_json(manifest_path)
+    fast = compute_fast_track(manifest)
+    manifest["fast_track"] = fast
+    write_json(manifest_path, manifest)
+    return fast
 
 
 def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
@@ -568,11 +637,22 @@ def make_trajectory_entry(retrospective: dict) -> dict:
     if quality_score == 0 and cost_score == 0 and efficiency_score == 0:
         total_findings = sum(v for v in categories.values() if isinstance(v, int))
         repair_cycles = int(retrospective.get("repair_cycle_count", 0) or 0)
-        wasted_spawns = int(retrospective.get("wasted_spawns", 0) or 0)
+        spec_iterations = int(retrospective.get("spec_review_iterations", 0) or 0)
+        total_tokens = _safe_float(retrospective.get("total_token_usage"), 0.0)
         subagent_spawns = int(retrospective.get("subagent_spawn_count", 0) or 0)
-        quality_score = 1 / (1 + total_findings)
-        efficiency_score = max(0.0, 1 - (repair_cycles / 3))
-        cost_score = 1 / (1 + (wasted_spawns / max(1, subagent_spawns)))
+        risk_level = str(retrospective.get("task_risk_level", "medium"))
+        agent_source = retrospective.get("agent_source", {})
+        # Quality: cap at 0.9 when zero findings (may indicate auditor gaps)
+        quality_score = 0.9 if total_findings == 0 else 1 / (1 + total_findings)
+        # Efficiency: penalize repair cycles and excess spec iterations
+        efficiency_score = max(0.0, 1 - (repair_cycles / 3) - (max(0, spec_iterations - 1) * 0.1))
+        # Cost: normalize by risk-level token budget per spawn
+        budget_per_spawn = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}.get(risk_level, 12000)
+        avg_tokens = total_tokens / max(1, subagent_spawns)
+        cost_score = max(0.0, min(1.0, 1 / (1 + (avg_tokens / budget_per_spawn))))
+        # Penalty: all-generic routing means no learned leverage
+        if isinstance(agent_source, dict) and agent_source and all(v == "generic" for v in agent_source.values()):
+            cost_score = max(0.0, cost_score - 0.05)
     wq, we, wc = COMPOSITE_WEIGHTS
     reward = round(wq * quality_score + we * efficiency_score + wc * cost_score, 6)
     return {

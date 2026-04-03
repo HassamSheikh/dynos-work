@@ -12,8 +12,8 @@ claude -p "Run /dynos-work:learn for the most recently completed task" || true
 # --- Step 2: Rebuild trajectory store from all retrospectives ---
 python3 hooks/dynostrajectory.py rebuild --root . || true
 
-# --- Step 3: Evolve — generate/update learned agents from new data ---
-claude -p "Run /dynos-work:evolve for the most recently completed task" || true
+# --- Step 3: Evolve — deterministic learned agent generation ---
+python3 hooks/dynoevolve.py auto --root . || true
 
 # --- Step 4: Refresh patterns file from live runtime state ---
 python3 hooks/dynopatterns.py --root . || true

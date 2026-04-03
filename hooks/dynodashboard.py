@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dynolineage import build_lineage
 from dynoreport import build_report
+from dynoslib import validate_generated_html
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -631,10 +632,16 @@ def write_dashboard(root: Path) -> dict:
     html = HTML_TEMPLATE.replace("{{", "{").replace("}}", "}")
     html = html.replace("__EMBEDDED_DATA__", safe_json)
     html_path.write_text(html)
+    validation_errors = validate_generated_html(html_path)
+    if validation_errors:
+        import sys
+        for err in validation_errors:
+            print(f"WARNING: {err}", file=sys.stderr)
     return {
         "html_path": str(html_path),
         "data_path": str(data_path),
         "summary": payload.get("summary", {}),
+        "validation_errors": validation_errors,
     }
 
 

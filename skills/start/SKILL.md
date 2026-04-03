@@ -106,13 +106,15 @@ python3 hooks/dynosctl.py transition .dynos/task-{id} SPEC_NORMALIZATION
 
 ## Step 2b — Fast-Track Gate (conditional)
 
-After classification, check if the task qualifies for fast-track execution. A task is fast-tracked when ALL of:
-- `risk_level` is `"low"`
-- `domains` has exactly 1 entry
-- The discovery phase produced no hard/critical design options
-- The task description implies fewer than 5 acceptance criteria
+After classification, determine fast-track eligibility **deterministically** by running:
 
-When fast-tracked, set `manifest.json` field `"fast_track": true` and apply these simplifications throughout the remaining steps:
+```text
+python3 -c "from dynoslib import apply_fast_track; from pathlib import Path; print(apply_fast_track(Path('.dynos/task-{id}')))"
+```
+
+This checks: `risk_level == "low"` AND exactly 1 domain. It writes `"fast_track": true` or `"fast_track": false` to `manifest.json`. If the command is not available, manually check the conditions and write the field.
+
+When fast-tracked (`fast_track: true`), apply these simplifications throughout the remaining steps:
 - **Spec (Step 3):** The planner should produce a concise spec. The `Implicit Requirements Surfaced` and `Risk Notes` sections can contain a single line each if no significant risks exist.
 - **Planning (Step 5):** The execution graph should contain a **single segment** (no multi-segment decomposition). A single executor handles the entire change.
 - **Audit (handled by audit skill):** When `fast_track: true` in the manifest, spawn only `spec-completion-auditor` and `security-auditor`. Skip all other auditors regardless of streak or domain.

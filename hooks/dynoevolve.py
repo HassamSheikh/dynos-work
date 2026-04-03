@@ -7,7 +7,72 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib import ensure_learned_registry, register_learned_agent
+from dynoslib import (
+    collect_retrospectives,
+    ensure_learned_registry,
+    register_learned_agent,
+    now_iso,
+)
+
+
+def cmd_auto(args: argparse.Namespace) -> int:
+    """Deterministic post-task evolve: check generation gates and register if warranted."""
+    root = Path(args.root).resolve()
+    retrospectives = collect_retrospectives(root)
+    registry = ensure_learned_registry(root)
+    min_tasks = int(args.min_tasks)
+    result: dict = {"checked_at": now_iso(), "generated": [], "skipped_reasons": []}
+
+    if len(retrospectives) < min_tasks:
+        result["skipped_reasons"].append(f"insufficient retrospectives: {len(retrospectives)} < {min_tasks}")
+        print(json.dumps(result, indent=2))
+        return 0
+
+    # Find (role, task_type) combos from retrospectives that have enough data
+    role_type_counts: dict[tuple[str, str], int] = {}
+    for retro in retrospectives:
+        for role in retro.get("executor_repair_frequency", {}):
+            task_type = retro.get("task_type", "")
+            if isinstance(role, str) and isinstance(task_type, str) and role and task_type:
+                role_type_counts[(role, task_type)] = role_type_counts.get((role, task_type), 0) + 1
+
+    # Check existing registry to avoid duplicates
+    existing = {
+        (a.get("role"), a.get("task_type"))
+        for a in registry.get("agents", [])
+    }
+
+    for (role, task_type), count in role_type_counts.items():
+        if count < 3:
+            continue
+        if (role, task_type) in existing:
+            continue
+        # Generate a simple learned agent placeholder
+        agent_name = f"auto-{role.replace('-executor', '')}-{task_type}"
+        agent_dir = root / ".dynos" / "learned-agents" / "executors"
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        agent_path = agent_dir / f"{agent_name}.md"
+        if not agent_path.exists():
+            agent_path.write_text(
+                f"# {agent_name}\n\n"
+                f"Auto-generated learned executor for {role} on {task_type} tasks.\n"
+                f"Based on {count} retrospective observations.\n"
+                f"Generated: {now_iso()}\n"
+            )
+        rel_path = str(agent_path.relative_to(root))
+        latest_task = retrospectives[-1].get("task_id", "unknown")
+        register_learned_agent(
+            root,
+            agent_name=agent_name,
+            role=role,
+            task_type=task_type,
+            path=rel_path,
+            generated_from=latest_task,
+        )
+        result["generated"].append({"agent_name": agent_name, "role": role, "task_type": task_type})
+
+    print(json.dumps(result, indent=2))
+    return 0
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -33,6 +98,11 @@ def cmd_register(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    auto_parser = subparsers.add_parser("auto", help="Deterministic post-task evolve check")
+    auto_parser.add_argument("--root", default=".")
+    auto_parser.add_argument("--min-tasks", type=int, default=5)
+    auto_parser.set_defaults(func=cmd_auto)
 
     init_parser = subparsers.add_parser("init-registry", help="Create learned-agent registry if missing")
     init_parser.add_argument("--root", default=".")
