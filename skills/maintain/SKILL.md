@@ -61,7 +61,25 @@ If the **Meta-Auditor** identifies a "Debt Cluster" (a module with > 20% of the 
    - Report the "Architecture Score" improvement.
    - Include a visual breakdown of the new module's hierarchy.
 
+### Step 6 -- Autonomous Task Discovery (The Manager)
+
+In addition to technical debt, the maintainer now polls your **Issue Trackers** (e.g. `gh issue list` or Jira API):
+
+1. **Bug Detection:** Identify new issues labeled `priority:high` or `bug`.
+2. **Auto-Assignment:** If a bug is within the maintainer's domain (Backend/Infra), it autonomously triggers a **Task Start**.
+3. **Draft PR:** It builds the fix and opens a Draft PR with the title `[AUTO] Fix for Issue #{id}`.
+
+### Step 7 -- The Zero-Input Auto-Merge Policy
+
+To achieve a 100% "Set-and-Forget" backend, the maintainer can **Self-Merge** specific refactors:
+
+1. **Eligibility:** Only "Technical Debt Refactors" (discovered via meta-audit) that touch < 5 files.
+2. **The 1.0 Quality Bar:**
+   - Must pass all Unit and Integration tests.
+   - Must achieve a **1.0 Quality Score** and **1.0 Security Score** from the Opus Ensemble auditors.
+3. **The Final Action:** If the above are met, the maintainer merges the branch directly into `main` and sends a notification.
+
 ## Hard Rules
-- **Non-Breaking:** If tests fail at any point, immediately abort and revert. Never push code that breaks tests.
-- **Monotonicity:** Never push a fix that lowers the overall `quality_score` of the project.
-- **Human Gate:** The final merge is always reserved for the human operator via the PR review process.
+- **Safe-Merging:** Never auto-merge a "Feature Request." These always require human strategic approval (Step 5).
+- **Audit-First:** The Auto-Merge policy is strictly prohibited unless a multi-model (Ensemble) audit has achieved zero findings.
+- **Downtime Shield:** Never auto-merge if any existing tests in the project are failing.
