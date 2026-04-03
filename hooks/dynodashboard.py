@@ -57,8 +57,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: space-between;
-      height: 48px;
-      padding: 0 28px;
+      height: 42px;
+      padding: 0 24px;
       background: hsla(214 26% 10% / 0.92);
       backdrop-filter: blur(12px);
       border-bottom: 1px solid var(--line);
@@ -66,14 +66,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .topbar-wordmark {{
       font-family: "Inter", "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
       font-weight: 800;
-      font-size: 15px;
-      letter-spacing: 0.04em;
+      font-size: 13px;
+      letter-spacing: 0.02em;
       color: var(--text);
     }}
     .topbar-right {{
       display: flex;
       align-items: center;
-      gap: 16px;
+      gap: 10px;
     }}
     .live-dot {{
       width: 8px;
@@ -367,14 +367,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       .hero, .grid {{ grid-template-columns: 1fr; }}
       .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .shell {{ padding: 20px; }}
-      .topbar {{ padding: 0 16px; }}
+      .topbar {{ padding: 0 14px; }}
       .topbar-updated {{ max-width: 220px; }}
     }}
     @media (max-width: 600px) {{
       .hero, .grid {{ grid-template-columns: 1fr; }}
       .stats {{ grid-template-columns: 1fr; }}
       .shell {{ padding: 12px; }}
-      .topbar {{ padding: 0 12px; height: 44px; }}
+      .topbar {{ padding: 0 12px; height: 38px; }}
       .topbar-wordmark {{ font-size: 13px; }}
       .topbar-updated {{ max-width: 140px; font-size: 11px; }}
       .panel {{ padding: 16px; border-radius: 10px; }}
