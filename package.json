@@ -1,7 +1,7 @@
 {
   "name": "dynos-work",
-  "version": "4.0.0",
-  "description": "Audit-governed autonomous engineering system. Standalone — no dependencies required.",
+  "version": "5.0.0",
+  "description": "Autonomous Software Foundry. Self-learning, human-directed. Standalone — no dependencies required.",
   "license": "MIT",
   "skills": "./skills/",
   "hooks": "./hooks.json"
