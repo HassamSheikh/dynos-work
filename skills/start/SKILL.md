@@ -116,17 +116,21 @@ Update `manifest.json` stage to `PLANNING`.
 Append to log:
 ```
 {timestamp} [STAGE] → PLANNING
-{timestamp} [SPAWN] planning — generate implementation plan and execution graph
 ```
 
-**Spawn the Planner subagent** with instruction: "Generate the implementation plan AND execution graph. Read `spec.md` and `design-decisions.md`. Human design choices are binding.
+1. **Determine Planning Strategy:**
+   - If `risk_level` is `high` or `critical` (from `manifest.json`), OR the `spec.md` contains more than `10` acceptance criteria: **Hierarchical Planning (Master/Worker)**.
+   - Otherwise: **Standard Planning (Single-Planner)**.
+2. **Hierarchical Flow:**
+   - **Spawn Master Planner (Opus):** Phase: "Strategic Implementation Planning (Master)". It writes the skeletal `plan.md` and `execution-graph-skeleton.json`.
+   - **Spawn Worker Planners (Sonnet) in parallel:** One for each major segment defined in the skeleton. Phase: "Detailed Segment Planning (Worker)".
+   - **Merge Results:** Combine the Strategic Plan with the Detailed Plans into the final `plan.md`. Merge all Worker segment objects into the final `execution-graph.json`.
+3. **Standard Flow:**
+   - **Spawn Planner (Opus):** Instruction: "Generate the implementation plan AND execution graph. Read `spec.md` and `design-decisions.md`. Human design choices are binding. Write `plan.md` and `execution-graph.json`."
 
-1. Write the implementation plan to `.dynos/task-{id}/plan.md`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy. If dynos_patterns.md exists in project memory, review it for relevant patterns before generating the plan.
-2. Write the execution graph to `.dynos/task-{id}/execution-graph.json`. Each segment must declare: id, executor, description, files_expected, depends_on, parallelizable, criteria_ids (list of acceptance criterion numbers this segment satisfies). Executor types: ui-executor, backend-executor, ml-executor, db-executor, refactor-executor, testing-executor, integration-executor."
-
-Wait for completion. The Planner writes `plan.md` and `execution-graph.json` per its own format. Append to log:
+Wait for completion. Append to log:
 ```
-{timestamp} [DONE] planning — plan.md and execution-graph.json written
+{timestamp} [DONE] planning — final plan.md and execution-graph.json merged/written (mode: {hierarchical|standard})
 {timestamp} [STAGE] → PLAN_REVIEW
 ```
 
