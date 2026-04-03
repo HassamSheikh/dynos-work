@@ -1,6 +1,6 @@
 ---
 name: plan
-description: "Power user: Re-run planning on an existing task. Use when you need to regenerate the plan after spec changes, or if the task was started externally. Runs PLANNING → PLAN_REVIEW → PLAN_AUDIT."
+description: "Power user: Re-run planning on an existing task. Use when you need to regenerate the plan after spec changes, or if the task was started externally. Runs PLANNING → PLAN_REVIEW → PLAN_AUDIT with deterministic artifact validation."
 ---
 
 # dynos-work: Plan
@@ -24,21 +24,37 @@ Verify `spec.md` exists. If not, print "No spec found. Run /dynos-work:start to 
 
 ### Step 2 — Generate plan (PLANNING)
 
-Update `manifest.json` stage to `PLANNING`. Append to execution log:
+Update `manifest.json` stage to `PLANNING`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} PLANNING
+```
+
+Append to execution log:
 ```
 {timestamp} [STAGE] → PLANNING
 {timestamp} [SPAWN] planning — generate implementation plan
 ```
 
-Spawn the `planning` agent with instruction: "Generate the implementation plan. Read `spec.md` and `design-decisions.md` (if it exists). Human design choices are binding. Write to `.dynos/task-{id}/plan.md`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy."
+Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md` and `design-decisions.md` (if it exists). Human design choices are binding. Write to `.dynos/task-{id}/plan.md` and `.dynos/task-{id}/execution-graph.json`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy, and explicit file ownership per segment."
 
-Wait for completion. Append to log:
+Wait for completion. Run deterministic artifact validation before human review. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py validate-task .dynos/task-{id} --strict
+```
+
+Append to log:
 ```
 {timestamp} [DONE] planning — plan.md written
 {timestamp} [STAGE] → PLAN_REVIEW
 ```
 
-Update `manifest.json` stage to `PLAN_REVIEW`.
+Update `manifest.json` stage to `PLAN_REVIEW`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_REVIEW
+```
 
 ### Step 3 — Human review (PLAN_REVIEW)
 
@@ -59,7 +75,13 @@ Approve this plan? (yes / no + what to change)
 
 ### Step 4 — Spec coverage audit (PLAN_AUDIT)
 
-Update `manifest.json` stage to `PLAN_AUDIT`. Append to log:
+Update `manifest.json` stage to `PLAN_AUDIT`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_AUDIT
+```
+
+Append to log:
 ```
 {timestamp} [STAGE] → PLAN_AUDIT
 {timestamp} [SPAWN] spec-completion-auditor — verify plan covers all acceptance criteria
@@ -74,9 +96,15 @@ Wait for completion. Read the report.
 
 ### Step 5 — Done
 
-Update `manifest.json` stage to `EXECUTION_GRAPH_BUILD`. Append to log:
+Update `manifest.json` stage to `PRE_EXECUTION_SNAPSHOT`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
-{timestamp} [ADVANCE] PLAN_AUDIT → EXECUTION_GRAPH_BUILD
+
+Append to log:
+```
+{timestamp} [ADVANCE] PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT
 ```
 
 Print:

@@ -26,12 +26,37 @@ Append to log:
 
 ### Step 3 — Execute segments (Optimized Scheduler)
 
-Update `manifest.json` stage to `EXECUTION`. Append to log:
+Update `manifest.json` stage to `EXECUTION`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} EXECUTION
+```
+
+Append to log:
 ```
 {timestamp} [STAGE] → EXECUTION
 ```
 
-Read `execution-graph.json`. Perform the following pre-execution optimizations:
+Read `execution-graph.json`. Before spawning any executor, perform deterministic preflight validation. If available in this repo, run:
+
+```text
+python3 hooks/validate_task_artifacts.py .dynos/task-{id}
+```
+
+Then enforce the following checks:
+
+1. `execution-graph.json` must parse as valid JSON.
+2. Every segment ID must be unique.
+3. Every `depends_on` reference must resolve to an existing segment.
+4. The dependency graph must be acyclic.
+5. No file may appear in more than one segment's `files_expected`.
+6. Every `criteria_id` must map to a real acceptance criterion in `spec.md`.
+7. Every acceptance criterion must be covered by at least one segment.
+8. If `.dynos/task-{id}/evidence/tdd-tests.md` exists, the execution graph must still cover every criterion represented by the approved tests.
+
+If any preflight validation fails, stop and return to `/dynos-work:start` or `/dynos-work:plan` to repair the plan artifacts.
+
+After preflight validation, perform the following execution optimizations:
 
 1. **Critical Path Identification:** 
    - Calculate the "Dependency Depth" for every segment (defined as the maximum number of steps required to reach the end of the graph from that segment).
@@ -49,9 +74,11 @@ Read `execution-graph.json`. Perform the following pre-execution optimizations:
    - As soon as a segment completes (or is resolved from cache), if it is a high-risk domain (`security`, `db`), immediately spawn its corresponding **Auditor** (following the Skip and Model Policies in `audit` skill) in the background.
    - Append to log: `{timestamp} [PIPE] {auditor-name} — background audit triggered for {segment-id}`.
 
-**Model Policy lookup:** Before spawning executors (for non-cached segments), read `classification.type` from `manifest.json` -- this is the task's `task_type`. Then attempt to read the `## Model Policy` table from `dynos_patterns.md` in the project memory directory. Match against (role, `task_type`).
+**Model Policy lookup:** Before spawning executors (for non-cached segments), read `classification.type` from `manifest.json` -- this is the task's `task_type`. Then attempt to read the `## Model Policy` table from `dynos_patterns.md` in the project memory directory. Treat the table as advisory. Hard overrides still win: explicit retry escalation, security floors, and task-specific safety constraints.
 
-**Agent Routing lookup:** For non-cached segments, attempt to read the `## Agent Routing` table. If a learned agent is available and has a higher composite score, use it and log: `{timestamp} [ROUTE] {executor-name} using learned:{learned-agent-name} (composite: {score})`.
+**TDD-First Awareness:** Check if `.dynos/task-{id}/evidence/tdd-tests.md` exists. If it does, include this instruction to every executor: "A TDD test suite has already been committed. Your implementation must make those tests pass. Do NOT write new tests or modify existing test files."
+
+**Agent Routing lookup:** For non-cached segments, prefer the live registry route resolver: `python3 hooks/dynoroute.py {executor-name} {task_type} --root .`. If it returns `source = learned:{agent-name}` with `route_allowed = true`, use that learned agent and log: `{timestamp} [ROUTE] {executor-name} using learned:{agent-name} (composite: {score})`. If the resolver falls back to `generic`, use the built-in executor. The markdown `## Agent Routing` table in `dynos_patterns.md` is now explanatory memory, not the enforcement source of truth.
 
 Spawn the prioritized batch of non-cached executor agents in parallel.
 
@@ -73,6 +100,8 @@ Each executor receives:
 Do NOT pass the full `spec.md` or `plan.md` to executors.
 
 After each batch (or cached resolution) completes:
+- Deterministically verify that only files from the segment's `files_expected` were modified. If available in this repo, use `python3 hooks/dynosctl.py check-ownership .dynos/task-{id} {segment-id} {files...}`. If extra files changed, fail the segment and route it to repair instead of accepting the evidence.
+- Deterministically verify that the segment wrote its evidence file.
 - Update `manifest.json` execution_progress.
 - Append to log: `{timestamp} [DONE] {segment-id} — complete`.
 - Find next unblocked batch (ordered by Depth) and spawn.
@@ -86,12 +115,20 @@ Append to log:
 
 ### Step 4 — Run tests
 
-Update `manifest.json` stage to `TEST_EXECUTION`. Append to log:
+Update `manifest.json` stage to `TEST_EXECUTION`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} TEST_EXECUTION
+```
+
+Append to log:
 ```
 {timestamp} [STAGE] → TEST_EXECUTION
 ```
 
 Read `plan.md` Test Strategy. Run the specified tests. Use incremental testing if the framework supports it (e.g. `jest --onlyChanged`).
+
+If an approved TDD suite exists, run those tests first as the blocking contract suite. If they pass, run any broader regression suite required by `plan.md`.
 
 If tests pass:
 - Append to log: `{timestamp} [DONE] tests — passed`
@@ -106,6 +143,11 @@ If tests fail:
 
 After successfully completing execution and tests (and any repairs triggered by tests or audit), verify all referenced `criteria_ids` from `execution-graph.json` are represented in the finalized code. 
 
+Deterministically verify before completion:
+- Every segment has an evidence file or a valid cached status.
+- Every approved test file still exists unless the plan explicitly superseded it.
+- No segment modified files outside its declared ownership without corresponding repair evidence.
+
 Append to log:
 ```
 {timestamp} [DONE] execute — all segments complete and tested
@@ -116,3 +158,4 @@ Append to log:
 - **Atomic evidence:** Evidence files must be written only after the segment's implementation is complete.
 - **Dependency discipline:** Never spawn an executor before its dependency evidence files are available.
 - **Caching Discipline:** Never skip a segment if its `files_expected` have any uncommitted changes not reflected in the existing evidence.
+- **Ownership discipline:** A segment that edits files outside `files_expected` is invalid until repaired and re-evidenced.

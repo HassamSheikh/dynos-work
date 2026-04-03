@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECT_ROOT="$(pwd)"
+
+python3 "${SCRIPT_DIR}/dynodashboard.py" generate --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
+python3 "${SCRIPT_DIR}/dynomaintain.py" ensure --root "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 
 # Escape string for JSON embedding
 escape_for_json() {
@@ -15,7 +19,7 @@ escape_for_json() {
     printf '%s' "$s"
 }
 
-session_context="dynos-work active. Use /dynos-work:start for new tasks. Power-user: /dynos-work:audit, /dynos-work:status, /dynos-work:repair, /dynos-work:resume, /dynos-work:investigate."
+session_context="dynos-work active. Use /dynos-work:start for new tasks. Power-user: /dynos-work:audit, /dynos-work:maintain, /dynos-work:status, /dynos-work:repair, /dynos-work:resume, /dynos-work:investigate. Live dashboard: python3 hooks/dynodashboard.py serve --root ."
 
 if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
   printf '{\n  "additional_context": "%s"\n}\n' "$session_context"

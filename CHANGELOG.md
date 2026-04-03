@@ -7,6 +7,72 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [6.0.0] - 2026-04-03
+### "Runtime Control Plane": Deterministic Foundry, Live Dashboard, Maintainer Daemon
+
+This release turns the plugin from a primarily prompt-defined foundry into a runtime-backed adaptive control system. The workflow remains human-directed, but key guarantees now live in code: artifact validation, route gating, benchmark-driven promotion, freshness blocking, lineage, and persistent maintenance automation.
+
+### Added
+- Deterministic control runtime:
+  - `hooks/dynoslib.py`
+  - `hooks/dynosctl.py`
+  - `hooks/validate_task_artifacts.py`
+- Task artifact enforcement for:
+  - manifest validation
+  - spec/plan structure
+  - execution-graph coverage, ownership, and cycle detection
+  - repair-log and retrospective validation
+- RL-inspired adaptive runtime components:
+  - `hooks/dynostate.py`
+  - `hooks/dynostrajectory.py`
+  - `hooks/dynosdream.py`
+- Learned component lifecycle tooling:
+  - `hooks/dynoevolve.py`
+  - `hooks/dynoeval.py`
+  - `hooks/dynogenerate.py`
+  - `hooks/dynofixture.py`
+- Benchmark and rollout harnesses:
+  - `hooks/dynobench.py`
+  - `hooks/dynorollout.py`
+  - `hooks/dynochallenge.py`
+- Live routing and automation:
+  - `hooks/dynoroute.py`
+  - `hooks/dynoauto.py`
+- Observability and traceability:
+  - `hooks/dynoreport.py`
+  - `hooks/dynolineage.py`
+  - `hooks/dynodashboard.py`
+- Persistent maintainer runtime:
+  - `hooks/dynomaintain.py`
+  - background daemon mode
+  - manual invoke mode
+  - maintenance status and PID tracking
+- New contributor and internals docs:
+  - `UNDER_THE_HOOD.md`
+  - `ARCHITECTURE.md`
+- Automated live dashboard generation and refresh from hooks
+- Fixture synthesis from completed task retrospectives
+- Benchmark index and lineage graph for task -> component -> fixture -> run traceability
+
+### Changed
+- README rewritten from scratch to be user-facing instead of runtime-internal
+- Founder mode retained as an advisory design-review layer inside the start flow
+- Learned routing now resolves from the live registry, not markdown tables
+- Promotion and rollback now depend on benchmark evidence plus must-pass category checks
+- Route resolution now blocks stale learned components by freshness policy
+- TaskCompleted hook now runs learn, automation, and dashboard refresh automatically
+- SessionStart hook now refreshes dashboard state and can ensure the maintainer daemon is running
+- `/dynos-work:maintain` is now a clearer user-facing manual maintainer path
+
+### Fixed
+- Eliminated several documentation/runtime mismatches where skills described behavior that was not enforced in code
+- Added regression tests for route resolution, auto benchmarking, fixture synthesis, lineage, dashboard generation, challenger rollout, and maintainer cycles
+
+### Security
+- Learned components can no longer silently remain active after benchmark regression or staleness
+- Promotion remains blocked unless challenger evidence clears configured policy thresholds
+
+
 ## [5.0.0] - 2026-04-03
 ### "Foundry Intelligence": Decision Transformer Architecture
 
@@ -187,3 +253,4 @@ Versions prior to 2.8.0 predate this changelog.
 [2.10.0]: https://github.com/dynos-fit/dynos-work/compare/v2.9.0...v2.10.0
 [2.9.0]: https://github.com/dynos-fit/dynos-work/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/dynos-fit/dynos-work/compare/v2.7.0...v2.8.0
+[6.0.0]: https://github.com/dynos-fit/dynos-work/compare/v5.0.0...v6.0.0

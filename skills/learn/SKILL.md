@@ -195,17 +195,19 @@ For each unique `(role, model, task_type, source)` quad derived in Step 5a (proc
 
 #### 5c -- Derive Model Policy
 
-**Tunable parameter:** Exploration constant `c = 0.5` (UCB exploration weight; higher values favor under-explored models).
-
 For each unique `(role, task_type)` pair present in the Effectiveness Scores (aggregate across all `source` values -- Model Policy is source-agnostic):
 
 1. Compute a composite score per model: `composite = 0.5 * quality_ema + 0.3 * cost_ema + 0.2 * efficiency_ema`.
-2. Compute `total_observations` = sum of `sample_count` across all models for this `(role, task_type)` pair. If `total_observations = 0`, skip UCB computation and fall back to existing defaults (do not derive a policy row for this pair).
-3. For each model, compute a UCB score: `ucb_score = composite + c * sqrt(ln(total_observations) / sample_count)`. If `sample_count = 0` for a model, assign an infinity bonus so it is always selected; break ties among infinity-bonus models alphabetically (`haiku` < `opus` < `sonnet`).
-4. Pick the model with the highest `ucb_score`. Confidence = `quality_ema` of the winner.
-5. **Meta-validator:** Model must be one of `{haiku, sonnet, opus}`. If not, clamp to nearest valid model and print warning: `{timestamp} [WARN] meta-validator clamped model from {raw} to {clamped} for ({role}, {task_type})`
-6. **Monotonicity:** `security-auditor` must never be assigned a model below `opus`. If the derived model is not `opus`, override to `opus` and print warning: `{timestamp} [WARN] monotonicity override: security-auditor forced to opus for task_type={task_type}`
-7. Confidence must be in `[0, 1]`. Clamp and warn if out of bounds: `{timestamp} [WARN] meta-validator clamped confidence from {raw} to {clamped} for ({role}, {task_type})`
+2. Ignore any row whose model is not one of `{haiku, sonnet, opus}`. Clamp and warn if needed: `{timestamp} [WARN] meta-validator clamped model from {raw} to {clamped} for ({role}, {task_type})`
+3. Rank eligible models deterministically:
+   - higher `composite` wins
+   - if composite scores are within `0.03`, higher `quality_ema` wins
+   - if still tied, higher `efficiency_ema` wins
+   - if still tied, the cheaper model wins in the order `haiku < sonnet < opus`
+   - if still tied, sort alphabetically
+4. Confidence = `min(1, quality_ema * min(1, sample_count / 5))` for the winning model. This rewards observed quality and refuses to overstate confidence on thin data.
+5. **Monotonicity:** `security-auditor` must never be assigned a model below `opus`. If the derived model is not `opus`, override to `opus` and print warning: `{timestamp} [WARN] monotonicity override: security-auditor forced to opus for task_type={task_type}`
+6. Confidence must be in `[0, 1]`. Clamp and warn if out of bounds: `{timestamp} [WARN] meta-validator clamped confidence from {raw} to {clamped} for ({role}, {task_type})`
 
 #### 5d -- Derive Skip Policy
 

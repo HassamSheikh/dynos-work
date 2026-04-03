@@ -1,3 +1,6 @@
 node_modules/
 .env
 *.log
+.dynos/
+__pycache__/
+*.pyc

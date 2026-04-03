@@ -1,0 +1,31 @@
+{
+  "fixture_id": "task-fixture-example",
+  "item_kind": "agent",
+  "target_name": "backend-sharp",
+  "role": "backend-executor",
+  "task_type": "feature",
+  "cases": [
+    {
+      "case_id": "task-1",
+      "sandbox": {
+        "files": {
+          "app.py": "def compute(x):\n    raise NotImplementedError()\n",
+          "run_variant.py": "import pathlib, sys\nvariant = sys.argv[1]\npath = pathlib.Path('app.py')\nif variant == 'baseline':\n    path.write_text(\"def compute(x):\\n    return x\\n\")\nelse:\n    path.write_text(\"def compute(x):\\n    return x * 2\\n\")\n",
+          "verify.py": "import json\nfrom app import compute\nvalue = compute(2)\nif value == 4:\n    print(json.dumps({'tests_passed': 3, 'tests_total': 3, 'findings': 0, 'tokens_used': 18000}))\nelse:\n    print(json.dumps({'tests_passed': 1, 'tests_total': 3, 'findings': 2, 'tokens_used': 18000}))\n"
+        }
+      },
+      "baseline": {
+        "commands": [
+          ["python3", "run_variant.py", "baseline"],
+          ["python3", "verify.py"]
+        ]
+      },
+      "candidate": {
+        "commands": [
+          ["python3", "run_variant.py", "candidate"],
+          ["python3", "verify.py"]
+        ]
+      }
+    }
+  ]
+}

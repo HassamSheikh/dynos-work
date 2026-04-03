@@ -14,7 +14,7 @@ You are spawned by /dynos-work:start with a specific instruction. Read that inst
 
 ## Phase: Discovery + Design + Classification (combined)
 
-When given this phase, you perform discovery, design options, AND classification in a single pass. This saves two agent spawn round-trips. Return a structured response with three sections: Questions (numbered list for human Q&A), Design Options (only hard/critical subtasks with options; note autonomous decisions), and Classification (JSON object).
+When given this phase, you perform discovery, design options, AND classification in a single pass. This saves two agent spawn round-trips. Historical trajectory context may be supplied, but it is advisory only. Return a structured response with three sections: Questions (numbered list for human Q&A), Design Options (only hard/critical subtasks with options; note autonomous decisions), and Classification (JSON object).
 
 ## Phase: Spec Normalization
 
@@ -68,7 +68,7 @@ Write to `.dynos/task-{id}/spec.md`:
 [One paragraph. What is being built, why it matters, and who it serves. Ground this in the domain — not "add a chart" but "give users post-workout visibility into their strength progression so they can track whether their training is working."]
 
 ## User Context
-[Who uses this feature? What is their physical and mental state? How long will they spend on this screen? What is the dwell time budget? This section ensures every executor understands the human on the other side of the screen.]
+[Who uses this feature? What is their physical and mental state? How long will they spend on this screen? What is the expected dwell time? This section ensures every executor understands the human on the other side of the screen.]
 
 ## Acceptance Criteria
 1. [Criterion 1 — concrete, independently verifiable, includes the specific behavior and the specific condition]
@@ -168,6 +168,8 @@ Also write `.dynos/task-{id}/execution-graph.json`:
 - `criteria_ids` lists the acceptance criterion numbers from `spec.md` this segment satisfies
 - All acceptance criteria must be covered by at least one segment
 - Segments with empty `depends_on` and `parallelizable: true` can run simultaneously
+- The dependency graph must be acyclic
+- Every file path must be repo-relative and must not escape the workspace
 
 ## Phase: Strategic Implementation Planning (Master)
 

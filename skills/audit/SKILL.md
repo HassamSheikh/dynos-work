@@ -110,7 +110,7 @@ Before spawning each auditor, determine which model to use:
 
 After resolving skip, model, and voting policies, determine whether each auditor should use a generic prompt, a learned prompt, or both:
 
-1. Read `dynos_patterns.md` from the project memory directory (same path as above). Look for a markdown table under the heading `## Agent Routing`. The table has columns `| Role | Task Type | Agent Source | Agent Path | Composite Score | Mode |`. Match each auditor by looking up the `Role` column (matching auditor name) and the current task's `task_type` (from `classification.type` in manifest) against the `Task Type` column. Read `Mode` for alongside/replace, `Agent Path` for the learned agent `.md` file path, and `Composite Score` for logging. **Path validation:** If an `Agent Path` value does not start with `.dynos/learned-agents/` and is not `built-in`, treat the entry as invalid -- log `{timestamp} [WARN] invalid agent path: {path} -- using generic for {auditor-name}` and fall back to generic for that auditor. If `dynos_patterns.md` is missing, unreadable, has no `## Agent Routing` section, or has no matching row for a given auditor and task type, use generic for that auditor. Do not error. Reuse the existing `[WARN]` log line if already emitted for missing policy table; do not duplicate.
+1. Prefer the live registry resolver: `python3 hooks/dynoroute.py {auditor-name} {task_type} --root .`. Match the current auditor name and `classification.type` from `manifest.json`. If the resolver returns `source = learned:{agent-name}` with `route_allowed = true`, use that entry's `path`, `mode`, and `composite`. If it returns `generic`, use the built-in auditor. The markdown `## Agent Routing` table in `dynos_patterns.md` is explanatory memory only and should not override the live registry.
 2. **Security-auditor replace protection:** The `security-auditor` must NEVER be replaced by a learned auditor. Even if a learned security auditor exists in the Agent Routing table with mode=replace, always run the generic `security-auditor`. A learned security auditor may only run in alongside mode (supplementary, never replacing). This matches the monotonicity constraint (security-auditor never downgraded). If a replace entry is found for `security-auditor`, override it to alongside and log: `{timestamp} [WARN] security-auditor replace blocked -- forced to alongside (monotonicity)`.
 3. **Voting Pass Restriction:** Learned auditors never partake in the initial Ensemble Voting pass. Only the generic `security-auditor` or `db-schema-auditor` definitions are used for the voting pass to ensure a consistent baseline.
 4. For each auditor that was not skipped, check its row in the Agent Routing table:
@@ -306,13 +306,7 @@ Before writing `completion.json`, generate `task-retrospective.json` in the task
    - `executor_zero_repair_streak`: Read `repair-log.json`. Sort executor segments by execution order. Starting from the most recent, count consecutive executor segments that needed zero repairs (i.e., were not assigned any repair tasks). Stop counting at the first segment that had repairs. If `repair-log.json` is missing or malformed, set to `0`.
 9. Compute reward vector fields. Each score is clamped to the range `[0, 1]` (minimum 0, maximum 1):
    - `quality_score`: `1 - (surviving_findings / total_findings)`. Where `surviving_findings` is the count of findings still present after the final re-audit (i.e., findings that were not resolved), and `total_findings` is the total number of unique findings discovered across all audit and re-audit passes. If `total_findings` is `0`, set `quality_score` to `1.0`.
-   - `cost_score`: `1 - (total_token_usage / baseline_budget)`. Where `baseline_budget` is determined by the task's `task_type`. Read `classification.type` from manifest — this is the task's `task_type`. Budgets by type:
-     - `feature`: 50000
-     - `refactor`: 30000
-     - `bugfix`: 20000
-     - _any other value or missing_: 40000
-
-     If `total_token_usage` is `0` or `null`, set `cost_score` to `1.0`.
+   - `cost_score`: token-efficiency score derived from average tokens per spawn. Compute `avg_tokens_per_spawn = total_token_usage / max(1, subagent_spawn_count)`. Then compute `cost_score = 1 / (1 + (avg_tokens_per_spawn / 12000))`. If `total_token_usage` is `0` or `subagent_spawn_count` is `0`, set `cost_score` to `1.0`.
    - `efficiency_score`: `1 - (repair_cycle_count / 3)`. Uses the `repair_cycle_count` computed in substep 3.
 10. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
 

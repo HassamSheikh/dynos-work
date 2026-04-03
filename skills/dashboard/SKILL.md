@@ -5,7 +5,16 @@ description: "Show learned patterns, model/skip policies, quality trends, cost t
 
 # dynos-work: Dashboard
 
-Display a terminal-friendly overview of dynos-work project health, learned patterns, and historical trends.
+Display a terminal-friendly overview of dynos-work project health, learned patterns, and historical trends. If the runtime dashboard tools exist in this repo, prefer them over hand-rendering.
+
+Deterministic runtime commands, when available:
+
+```text
+python3 hooks/dynoreport.py --root .
+python3 hooks/dynolineage.py --root .
+python3 hooks/dynodashboard.py generate --root .
+python3 hooks/dynodashboard.py serve --root .
+```
 
 ## What you do
 
@@ -202,7 +211,7 @@ For each numeric column across chronologically ordered tasks:
 
 10. **Step 10 -- Generate Web Dashboard (Modern UI / The "Editor")**
 
-In addition to the terminal output, generate a standalone, high-performance web dashboard at `.dynos/dashboard.html`:
+In addition to the terminal output, generate a standalone, high-performance web dashboard at `.dynos/dashboard.html` with paired live JSON at `.dynos/dashboard-data.json`:
 
 1. **Design System:** Use the latest **Premium Design Aesthetics** (curated HSL colors, smooth Inter/Outfit typography, glassmorphism, and subtle micro-animations).
 2. **Interactive Visuals:** 
@@ -211,6 +220,8 @@ In addition to the terminal output, generate a standalone, high-performance web 
    - **Gold Standard Showcase:** A searchable carousel of the project's "Gold Standard" implementations.
    - **Live Progress Tracer:** A visual "Dependency Map" (derived from the execution graph) showing the progress of any active task.
 3. **Control Center:** Include a "Maintenance Panel" to trigger the `maintain` or `learn` skills with a single click (via the Claude Code terminal if the user copies the command).
+
+Prefer `python3 hooks/dynodashboard.py generate --root .` to generate the HTML and live JSON payload. Prefer `python3 hooks/dynodashboard.py serve --root .` when the user wants real-time browser refresh over a local HTTP server.
 
 Print:
 ```

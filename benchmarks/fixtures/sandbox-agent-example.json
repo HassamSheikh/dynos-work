@@ -1,0 +1,23 @@
+{
+  "fixture_id": "sandbox-agent-example",
+  "item_kind": "agent",
+  "target_name": "backend-sharp",
+  "role": "backend-executor",
+  "task_type": "feature",
+  "cases": [
+    {
+      "case_id": "sandbox-1",
+      "sandbox": {
+        "files": {
+          "runner.py": "import json, pathlib, sys\nmode = sys.argv[1]\npath = pathlib.Path('state.txt')\nif mode == 'baseline':\n    path.write_text('baseline')\n    print(json.dumps({'tests_passed': 8, 'tests_total': 10, 'findings': 2, 'tokens_used': 32000}))\nelse:\n    path.write_text('candidate')\n    print(json.dumps({'tests_passed': 10, 'tests_total': 10, 'findings': 0, 'tokens_used': 21000}))\n"
+        }
+      },
+      "baseline": {
+        "command": ["python3", "runner.py", "baseline"]
+      },
+      "candidate": {
+        "command": ["python3", "runner.py", "candidate"]
+      }
+    }
+  ]
+}

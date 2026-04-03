@@ -1,0 +1,33 @@
+{
+  "fixture_id": "repo-rollout-example",
+  "item_kind": "agent",
+  "target_name": "backend-sharp",
+  "role": "backend-executor",
+  "task_type": "feature",
+  "cases": [
+    {
+      "case_id": "rollout-1",
+      "sandbox": {
+        "copy_repo_paths": [
+          "README.md"
+        ],
+        "files": {
+          "mutate.py": "import pathlib, sys\nmode = sys.argv[1]\npath = pathlib.Path('README.md')\ntext = path.read_text()\nif mode == 'baseline':\n    path.write_text(text + '\\nBaseline marker\\n')\nelse:\n    path.write_text(text + '\\nCandidate marker\\n')\n",
+          "verify.py": "import json, pathlib\ntext = pathlib.Path('README.md').read_text()\nif 'Candidate marker' in text:\n    print(json.dumps({'tests_passed': 2, 'tests_total': 2, 'findings': 0, 'tokens_used': 15000}))\nelif 'Baseline marker' in text:\n    print(json.dumps({'tests_passed': 1, 'tests_total': 2, 'findings': 1, 'tokens_used': 15000}))\nelse:\n    print(json.dumps({'tests_passed': 0, 'tests_total': 2, 'findings': 2, 'tokens_used': 15000}))\n"
+        }
+      },
+      "baseline": {
+        "commands": [
+          ["python3", "mutate.py", "baseline"],
+          ["python3", "verify.py"]
+        ]
+      },
+      "candidate": {
+        "commands": [
+          ["python3", "mutate.py", "candidate"],
+          ["python3", "verify.py"]
+        ]
+      }
+    }
+  ]
+}

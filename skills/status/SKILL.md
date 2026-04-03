@@ -9,7 +9,7 @@ Show the current state of the active dynos-work task.
 
 ## What you do
 
-1. Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED)
+1. Find the most recent active task in `.dynos/` (manifest.json with stage not DONE/FAILED). If available in this repo, use `python3 hooks/dynosctl.py active-task`.
 2. If no active task, report "No active dynos-work task found. Start one with /dynos-work:start"
 3. Read: manifest.json, spec.md, execution-graph.json, latest audit-reports, repair-log.json, test-results.json, execution-log.md
 4. Print a human-readable status report
@@ -27,13 +27,14 @@ Snapshot: dynos/task-20260327-001-snapshot
 
 Lifecycle Progress:
   ✓ DISCOVERY
-  ✓ DESIGN_OPTIONS
-  ✓ CLASSIFY_AND_SPEC
+  ✓ DISCOVERY
+  ✓ DESIGN_REVIEW
+  ✓ SPEC_NORMALIZATION
   ✓ SPEC_REVIEW (user-approved)
   ✓ PLANNING
-  ✓ PLAN_REVIEW (auto-approved | user-approved)
+  ✓ PLAN_REVIEW (user-approved)
   ✓ PLAN_AUDIT
-  ✓ EXECUTION_GRAPH_BUILD
+  ✓ TDD_GATE
   ✓ PRE_EXECUTION_SNAPSHOT
   ✓ EXECUTION (3/3 segments complete)
   ✓ TEST_EXECUTION (all tests passed)
@@ -76,7 +77,6 @@ Always end the status report with a "Next:" line based on current stage:
 | PLANNING | `/dynos-work:plan` (or `/dynos-work:start` for new tasks) |
 | PLAN_REVIEW | `/dynos-work:plan` |
 | PLAN_AUDIT | `/dynos-work:plan` |
-| EXECUTION_GRAPH_BUILD | `/dynos-work:execute` |
 | PRE_EXECUTION_SNAPSHOT | `/dynos-work:execute` |
 | EXECUTION | `/dynos-work:execute` |
 | TEST_EXECUTION | `/dynos-work:execute` |

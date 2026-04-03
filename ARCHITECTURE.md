@@ -1,0 +1,277 @@
+# Architecture
+
+This document is for contributors working on `dynos-work` itself.
+
+It explains where behavior lives, how the runtime is split, and what design constraints matter when changing the system.
+
+## Architecture Summary
+
+`dynos-work` is built from three cooperating layers:
+
+1. Workflow skills and agent definitions
+2. Deterministic runtime control
+3. Adaptive evaluation and observability
+
+The core rule of the repo is:
+
+> prompts can suggest behavior, but runtime code should enforce invariants
+
+That rule is what separates the public workflow from the internal control plane.
+
+## Layer 1: Skills And Agents
+
+The workflow surface lives under:
+
+- `skills/`
+- `agents/`
+
+Skills define the end-user lifecycle:
+
+- `start`
+- `plan`
+- `execute`
+- `audit`
+- `learn`
+- `evolve`
+- `status`
+- `resume`
+- `dashboard`
+
+Agent markdown files define specialist roles such as planners and state encoders.
+
+Guideline:
+
+- Use skills and agent docs to describe behavior, sequencing, and user-facing policy.
+- Do not rely on markdown alone for safety-critical guarantees.
+
+If a rule must be true regardless of model behavior, it belongs in runtime code.
+
+## Layer 2: Deterministic Runtime
+
+The runtime lives primarily in:
+
+- `hooks/dynoslib.py`
+- `hooks/dynosctl.py`
+- `hooks/validate_task_artifacts.py`
+
+`dynoslib.py` is the shared library for:
+
+- stage definitions and legal transitions
+- task artifact validation
+- repair-log and retrospective validation
+- benchmark scoring and policy comparison
+- registry management
+- automation queue helpers
+- fixture indexing and traceability
+- freshness and route gating
+
+`dynosctl.py` is the control CLI for:
+
+- task validation
+- stage transitions
+- next-command resolution
+- active-task lookup
+- ownership checks
+
+Design rule:
+
+- reusable logic belongs in `dynoslib.py`
+- narrow operator entrypoints belong in small CLIs under `hooks/`
+
+Avoid putting non-trivial policy directly into multiple scripts. Centralize it in the shared library.
+
+## Layer 3: Adaptive Evaluation
+
+The adaptive layer is split into several focused runtimes:
+
+### Memory
+
+- `hooks/dynostate.py`
+- `hooks/dynostrajectory.py`
+
+These implement state signatures and trajectory retrieval from retrospectives.
+
+### Design Review
+
+- `hooks/dynosdream.py`
+
+This is the structured design evaluator. It is advisory, not authoritative.
+
+### Learned Components
+
+- `hooks/dynoevolve.py`
+- `hooks/dynoeval.py`
+- `hooks/dynogenerate.py`
+
+These manage learned component creation, registration, and evaluation.
+
+### Benchmarks And Rollouts
+
+- `hooks/dynobench.py`
+- `hooks/dynorollout.py`
+- `hooks/dynochallenge.py`
+- `hooks/dynofixture.py`
+
+These implement:
+
+- authored fixtures
+- synthesized fixtures
+- sandbox benchmarks
+- repo-snapshot rollouts
+- task-artifact-based challenger runs
+
+### Routing And Automation
+
+- `hooks/dynoroute.py`
+- `hooks/dynoauto.py`
+- `hooks/dynomaintain.py`
+
+These manage:
+
+- live route resolution
+- shadow challenger queueing
+- stale route refresh
+- automation priority
+- persistent maintenance polling when enabled
+
+### Observability
+
+- `hooks/dynoreport.py`
+- `hooks/dynolineage.py`
+- `hooks/dynodashboard.py`
+
+These provide:
+
+- machine-readable status
+- lineage graph output
+- real-time dashboard artifacts and serving
+
+## Data Model
+
+### Task State
+
+Task state lives in `.dynos/task-*/`.
+
+Important files:
+
+- `manifest.json`
+- `spec.md`
+- `plan.md`
+- `execution-graph.json`
+- `execution-log.md`
+- `repair-log.json`
+- `task-retrospective.json`
+
+### Learned State
+
+Learned state lives under:
+
+- `.dynos/learned-agents/registry.json`
+- `.dynos/trajectories.json`
+- `.dynos/benchmarks/history.json`
+- `.dynos/benchmarks/index.json`
+- `.dynos/automation/queue.json`
+- `.dynos/automation/status.json`
+- `.dynos/policy.json`
+
+### Dashboard State
+
+The dashboard consumes:
+
+- `.dynos/dashboard-data.json`
+- `.dynos/dashboard.html`
+
+## Invariants
+
+When contributing, preserve these invariants:
+
+### Task Safety
+
+- Illegal stage transitions must fail.
+- Malformed task artifacts must not silently advance.
+- Execution graph cycles and uncovered criteria must be rejected.
+- Segment ownership must stay enforceable.
+
+### Learned Routing Safety
+
+- New learned components start in `shadow`.
+- Promotion must depend on benchmark evidence.
+- Must-pass regressions must block promotion.
+- Active regressions must be able to demote routes.
+- Stale learned routes must not silently stay active forever.
+
+### User Control
+
+- Human approval gates should remain explicit at spec and plan boundaries.
+- Learned behavior should optimize choices inside guardrails, not redefine guardrails.
+
+## Extension Guidelines
+
+### When Adding A New Runtime Script
+
+Ask:
+
+1. Is this enforcing an invariant?
+2. Does this belong as shared logic in `dynoslib.py` first?
+3. Does it need tests covering both happy and blocking paths?
+4. Does it create or mutate `.dynos/` state that should be documented?
+
+### When Changing Skills
+
+Ask:
+
+1. Is this user-facing workflow guidance or runtime enforcement?
+2. If it is enforcement, should it move to code?
+3. Does the skill still describe what the runtime actually does?
+
+### When Changing Learned Policy
+
+Ask:
+
+1. Does this increase auditability or reduce it?
+2. Can it regress silently?
+3. Does it need a benchmark or freshness policy update?
+4. Should route resolution change, or only evaluation behavior?
+
+## Testing Strategy
+
+Current automated coverage lives mainly in:
+
+- `tests/test_dynosctl.py`
+- `tests/test_learning_runtime.py`
+- `tests/test_dream_runtime.py`
+
+Contributors should add tests whenever changing:
+
+- stage control
+- validation logic
+- benchmark scoring
+- promotion or demotion policy
+- auto queueing behavior
+- dashboard or lineage outputs
+
+Preferred pattern:
+
+- add small deterministic fixtures
+- assert on JSON outputs
+- avoid tests that depend on network or host-specific setup
+
+## Recommended Reading Order
+
+For contributors, the best order is:
+
+1. `README.md`
+2. `UNDER_THE_HOOD.md`
+3. `skills/start/SKILL.md`
+4. `skills/execute/SKILL.md`
+5. `skills/audit/SKILL.md`
+6. `hooks/dynoslib.py`
+7. `hooks/dynoauto.py`
+8. `hooks/dynodashboard.py`
+9. `tests/test_learning_runtime.py`
+
+## Contributor Principle
+
+If you are deciding whether a rule belongs in a prompt or in code, bias toward code.
+
+If you are deciding whether a learned behavior should be trusted by default, bias toward shadow mode.

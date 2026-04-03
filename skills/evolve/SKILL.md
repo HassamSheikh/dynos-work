@@ -7,11 +7,30 @@ description: "Evolutionary agent management. Generates learned agents, maintains
 
 Owns the technical evolution of the system's agents. It processes findings into specialized agents and tracks their performance over time.
 
+If available in this repo, the deterministic runtime for registry, routing, promotion, and automatic challenger execution is:
+
+```text
+python3 hooks/dynoevolve.py init-registry --root .
+python3 hooks/dynoevolve.py register-agent <agent_name> <role> <task_type> <path> <generated_from> --root .
+python3 hooks/dynoeval.py evaluate candidate.json baseline.json
+python3 hooks/dynoeval.py promote <agent_name> <role> <task_type> candidate.json baseline.json --root .
+python3 hooks/dynobench.py run benchmarks/fixtures/<fixture>.json --root . --update-registry
+python3 hooks/dynorollout.py benchmarks/fixtures/<rollout-fixture>.json --root . --update-registry
+python3 hooks/dynoroute.py <role> <task_type> --root .
+python3 hooks/dynofixture.py sync --root .
+python3 hooks/dynogenerate.py <agent_name> <role> <task_type> <output_path> <generated_from> --root .
+python3 hooks/dynoreport.py --root .
+python3 hooks/dynoauto.py sync --root .
+python3 hooks/dynoauto.py run --root .
+```
+
 ## What you do
 
 ### Step 1 -- Agent Generation
 
-Generate learned agent `.md` files when specialization opportunities are detected. This step runs inline (no subagent spawns).
+Generate learned agent or skill `.md` files when specialization opportunities are detected. This step runs inline (no subagent spawns). Every generated runtime component must also be registered in `.dynos/learned-agents/registry.json`.
+
+Prefer `hooks/dynogenerate.py` when you want a deterministic learned component file instead of an ad hoc markdown draft.
 
 #### 1a -- Generation gate
 
@@ -35,7 +54,7 @@ For each identified specialization opportunity, write a learned agent `.md` file
 
 - **Executor agents:** Written to `.dynos/learned-agents/executors/{agent-name}.md`
 - **Auditor agents:** Written to `.dynos/learned-agents/auditors/{agent-name}.md`
-- Create `.dynos/learned-agents/skills/` as an empty directory (reserved for future use).
+- **Learned skills:** Written to `.dynos/learned-agents/skills/{skill-name}.md`
 
 Each file uses this frontmatter format:
 
@@ -70,7 +89,7 @@ Create any missing directories. The `.staging/` directory holds new agents enter
 
 ### Step 2 -- Agent Routing
 
-Maintain the `## Agent Routing` section in `dynos_patterns.md`.
+Maintain the `## Agent Routing` section in `dynos_patterns.md`, but treat `.dynos/learned-agents/registry.json` plus `hooks/dynoroute.py` as the live routing source of truth.
 
 #### 2a -- Compute routing composite
 
@@ -95,7 +114,7 @@ Last generation: {task-ID or "none"}
 | ... | ... | ... | ... | ... | ... |
 ```
 
-- `Mode` can be `alongside`, `replace`, or `shadow`. New agents start in `shadow` (see Step 5).
+- `Mode` can be `alongside`, `replace`, or `shadow`. New agents start in `shadow` until the offline evaluator promotes them.
 
 ### Step 3 -- Agent Pruning
 
@@ -105,24 +124,19 @@ Remove learned agents that underperform their generic counterparts for 3 consecu
 
 Manage the lifecycle of learned auditor agents through `alongside` and `replace` modes based on finding overlap and quality EMAs.
 
-### Step 5 -- Autonomous Simulation Sandbox (Zero-Risk Verification)
+### Step 5 -- Offline Evaluation And Promotion
 
-Perform an **Isolated & Secured Simulation** for agents in `shadow` mode:
+Perform deterministic offline evaluation for agents in `shadow` mode:
 
-1. **Optimized Sandbox Creation:** Create a transient repository snapshot at `/tmp/dynos-sandbox-{id}`. 
-   - **Performance Hack:** Use `git clone --local` or direct symlinks for the `node_modules/` or `vendor/` folders to avoid redundant installs.
-2. **Security Jail:** The sandbox agent is strictly prohibited from:
-   - Initiating any outbound network requests (e.g., API calls, DB fetches).
-   - Deleting or Writing files outside of the `/tmp/dynos-sandbox-{id}` path.
-   - Accessing sensitive environment variables (e.g., `.env` files must be mocked).
-3. **Simulated Error Injection:** Find a historical "Failure Point" (a bug that was previously caught by a task auditor). Restore the sandbox files to that buggy state.
-4. **The Self-Correction Loop:** 
-   - Spawn the staged agent to identify and fix the issue.
-   - Allow **2 autonomous repair cycles** within the sandbox if first attempts fail.
-   - The agent must achieve a pass on **Unit Tests** and a **Security Audit** within the sandbox.
-5. **Promotion Certification:** On success, update the agent's composite score and mark for promotion.
-6. **Mandatory Sandbox Cleanup:** Immediately after completion (Success or Failure), **DELETE** the sandbox folder and everything in it.
-7. **Log Result:** `{timestamp} [SANDBOX] {agent-name} — Outcome: {PASS|RECOVERY|FAIL}, Adaptability: {score}, Cleanup: COMPLETE`.
+1. Collect candidate benchmark results and baseline benchmark results as JSON arrays of quality/cost/efficiency outcomes.
+2. Evaluate them with `hooks/dynoeval.py evaluate`.
+3. Prefer `hooks/dynobench.py run ... --update-registry` when a fixture benchmark exists. Fixtures may be static score inputs, single-command sandbox cases, or multi-step task fixtures with command pipelines over realistic sandbox workdirs. Prefer `hooks/dynorollout.py` when the benchmark should start from copied repo paths and execute a repo-snapshot rollout. Use `hooks/dynoeval.py promote` for direct benchmark JSON comparisons.
+4. Store the benchmark summary and recommendation in `.dynos/learned-agents/registry.json`.
+5. If the recommendation is `keep_shadow` or `reject`, keep the agent in shadow mode.
+6. Do not promote an agent on fewer than 3 benchmark cases.
+7. If a fixture declares `must_pass_categories`, any regression in those categories blocks promotion and can automatically demote an active `alongside` or `replace` component back out of the route.
+8. Prefer `python3 hooks/dynoauto.py run --root .` after learn/task completion so shadow challengers are benchmarked automatically when matching fixtures exist.
+9. If no benchmark fixture exists yet for a shadow challenger, prefer `python3 hooks/dynofixture.py sync --root .` to synthesize a task-derived fixture from completed retrospectives before falling back to manual authoring.
 
 ### Step 6 -- Proactive Meta-Audit (The Strategic Scanner)
 

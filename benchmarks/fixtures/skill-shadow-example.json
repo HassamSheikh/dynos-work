@@ -1,0 +1,66 @@
+{
+  "fixture_id": "skill-shadow-example",
+  "item_kind": "skill",
+  "target_name": "plan-tightener",
+  "role": "plan-skill",
+  "task_type": "feature",
+  "cases": [
+    {
+      "case_id": "case-1",
+      "baseline": {
+        "tests_passed": 8,
+        "tests_total": 10,
+        "findings": 2,
+        "files_touched": 5,
+        "duration_seconds": 120,
+        "tokens_used": 26000
+      },
+      "candidate": {
+        "tests_passed": 10,
+        "tests_total": 10,
+        "findings": 1,
+        "files_touched": 4,
+        "duration_seconds": 110,
+        "tokens_used": 21000
+      }
+    },
+    {
+      "case_id": "case-2",
+      "baseline": {
+        "tests_passed": 7,
+        "tests_total": 10,
+        "findings": 3,
+        "files_touched": 6,
+        "duration_seconds": 150,
+        "tokens_used": 30000
+      },
+      "candidate": {
+        "tests_passed": 9,
+        "tests_total": 10,
+        "findings": 1,
+        "files_touched": 5,
+        "duration_seconds": 130,
+        "tokens_used": 23000
+      }
+    },
+    {
+      "case_id": "case-3",
+      "baseline": {
+        "tests_passed": 8,
+        "tests_total": 10,
+        "findings": 2,
+        "files_touched": 5,
+        "duration_seconds": 140,
+        "tokens_used": 28000
+      },
+      "candidate": {
+        "tests_passed": 10,
+        "tests_total": 10,
+        "findings": 1,
+        "files_touched": 4,
+        "duration_seconds": 120,
+        "tokens_used": 22000
+      }
+    }
+  ]
+}

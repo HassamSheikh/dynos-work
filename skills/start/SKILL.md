@@ -1,234 +1,281 @@
 ---
 name: start
-description: "Unified Foundry entry point. Combines 'Founder Mode' strategic dreaming (MCTS/RL-informed) with rigorous 'Standard Mode' spec and plan gates. Every task goes through the full pipeline. Human approval is mandatory at Spec Review and Plan Review with no skip paths."
+description: "Unified Foundry entry point. Drives discovery, design review, spec normalization, plan generation, deterministic artifact validation, and mandatory human approval before execution."
 ---
 
 # dynos-work: Unified Foundry Start
 
 You are the entry point for dynos-work. You own all human-in-the-loop gates before execution. When done, the task is ready for `/dynos-work:execute`.
 
-There is **one pipeline** for all tasks. There are no shortcuts. The Founder's dreaming power is embedded inside the standard discovery flow to give you **better choices**—not to skip your approval.
+There is one pipeline for all tasks. There are no shortcuts. Historical memory may inform discovery and design review, but it is advisory only. Human approval and deterministic artifact checks decide readiness.
 
 ---
 
-## Step 1 — Initialize
+## Step 0 — Metadata & Initialization
 
-1. Generate a task ID in the format `task-YYYYMMDD-NNN` (use today's date, increment NNN if directory exists)
-2. Create the task directory: `.dynos/task-{id}/`
-3. Write `raw-input.md` with the full task description exactly as given
-4. Write `manifest.json`:
+1. Generate a task ID in the format `task-YYYYMMDD-NNN`.
+2. Create the task directory: `.dynos/task-{id}/`.
+3. Write `raw-input.md` with the full task description exactly as given.
+4. Initialize `manifest.json` with at least:
+
 ```json
 {
-  "task_id": "task-20260327-001",
+  "task_id": "task-20260403-001",
   "created_at": "ISO timestamp",
   "title": "First 80 characters of task description",
   "raw_input": "Full task description as provided by user",
-  "stage": "DISCOVERY",
+  "input_type": "text | prd | wireframe | mixed",
+  "stage": "FOUNDRY_INITIALIZED",
   "classification": null,
   "retry_counts": {},
   "blocked_reason": null,
-  "completion_at": null
+  "completed_at": null
 }
 ```
-5. Create execution log at `.dynos/task-{id}/execution-log.md`:
-```
-# Execution Log — task-{id}
-Plugin: dynos-work vX.X.X
-Started: {ISO timestamp}
 
----
-{timestamp} [STAGE] → DISCOVERY
+5. Initialize `.dynos/task-{id}/execution-log.md`.
+6. Before writing `raw-input.md`, inspect the user input for:
+   - A file path ending in `.prd.md`, `.pdf`, or `.txt` and treat it as a primary spec source.
+   - A URL to a Figma link, screenshot, or wireframe and note it as a design artifact.
+   - An attached screenshot or image and note it as a visual spec artifact.
+7. Deterministically verify that `manifest.json` parses as valid JSON and that `task_id`, `created_at`, `raw_input`, and `stage` are present before continuing. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py validate-task .dynos/task-{id}
 ```
-6. Print:
-```
-dynos-work: Foundry Task Initialized
-ID: task-YYYYMMDD-NNN
-```
+8. Print: `dynos-work: Foundry Task Initialized: task-YYYYMMDD-NNN`
 
 ---
 
-## Step 2 — RL-Informed Discovery + Design + Classification
+## Step 1 — Discovery Intake
 
-**Before spawning the Planner**, run the **Decision Transformer pre-check** (in background):
-1. Spawn the **state-encoder** agent to produce a State Signature ($) for the current codebase module.
-2. Search `.dynos/trajectories.json` for the 3 most similar successful past trajectories.
-3. Extract known **failure points and winning patterns** from those trajectories.
-4. Pass this context into the Planner spawn as additional instruction.
+1. Build discovery context from:
+   - `raw-input.md`
+   - relevant existing code in the repo
+   - optional trajectory memory from `.dynos/trajectories.json` if available
+2. If trajectory memory exists, use it only to surface likely ambiguity or failure patterns. Do not treat it as ground truth and do not copy prior solutions blindly.
+3. Generate up to 5 targeted questions that materially reduce implementation risk.
+4. Present the questions to the user using `AskUserQuestion`.
+5. Write `discovery-notes.md` with the Q&A.
 
-**Spawn the Planner subagent** (dynos-work:planning) with instruction: "Phase: Discovery + Design + Classification (combined). Read `raw-input.md`. Also read the attached trajectory context (failure points and winning patterns from similar past tasks). Perform all three phases in one pass:
+---
 
-1. **Discovery:** Generate up to 5 targeted questions that would meaningfully improve understanding of the spec — gaps, ambiguities, trade-offs, unstated constraints. **RL-Informed:** Priority questions must target high-entropy areas identified from past trajectory failures in similar domains. Do not ask obvious or trivial questions.
-2. **Design Options:** Break the task into subtasks. Rate each: complexity (easy/medium/hard) and value (low/medium/high/critical). For any subtask rated hard complexity OR critical value, generate 2-3 design options with pros and cons. Decide easy/medium subtasks autonomously.
-3. **Classification:** Classify the task (type, domains, risk_level).
+## Step 2 — Discovery + Design + Classification
 
-Return a structured response with three sections: Questions (numbered list), Design Options (only hard/critical subtasks with options; note autonomous decisions), and Classification (JSON object)."
+Spawn the Planner subagent (`dynos-work:planning`) with instruction:
 
-**Present discovery questions** to the user using **AskUserQuestion** (all questions in one prompt). Wait for their answers.
+```text
+Phase: Discovery + Design + Classification (combined).
+Read raw-input.md and discovery-notes.md if present. Also read any attached trajectory context as advisory prior history only.
 
-Write `.dynos/task-{id}/discovery-notes.md` with Q&A.
+Perform three things in one pass:
+1. Discovery: generate only the highest-value unresolved questions.
+2. Design Options: break the task into subtasks. For any subtask rated hard complexity or critical value, generate 2-3 design options with pros and cons. For easy or medium subtasks, decide directly.
+3. Classification: produce type, domains, risk_level, and notes.
 
-**If hard/critical design options were returned**, run the **Founder Dreaming step** for each option:
-1. Spawn the **Founder (skills/founder/SKILL.md)** in Simulation mode for each high-risk design option.
-2. The Founder creates a sandbox at `/tmp/dynos-dream-{id}/`, drafts the core implementation, and runs an autonomous Opus-level Security audit.
-3. It returns a **Design Certificate** (PASS/FAIL, Security Score, Performance Metrics, Recommendation).
-
-**Present design options to the user one at a time** using **AskUserQuestion**, including the Design Certificate evidence:
-```
-=== Design Decision: {subtask name} ===
-
-Option A: {description}
-  Simulation Certificate: PASS | Security Score: 0 findings | Recommendation: Elite
-
-Option B: {description}  
-  Simulation Certificate: FAIL | Security Score: 3 findings | Recommendation: High Risk
-
-Which option do you prefer? (A / B / custom)
+Return three sections:
+- Questions
+- Design Options
+- Classification (JSON)
 ```
 
-If no critical/hard subtasks: note autonomous decisions. Do not spawn the Founder for low/medium complexity subtasks.
+Present any remaining discovery questions to the user and append answers to `discovery-notes.md`.
 
-Write `.dynos/task-{id}/design-decisions.md` with decisions.
+If hard or critical design options were returned:
+1. Run the Founder skill in simulation mode for each high-risk design option.
+2. Treat simulation output as advisory evidence, not automatic approval.
+3. Present each option to the user with the simulation evidence and record the chosen design in `design-decisions.md`.
 
-Write classification to `manifest.json` under the `classification` key.
+If no high-risk design options were returned, write `design-decisions.md` with the autonomous design choices and rationale.
 
-Append to log:
+Write the returned classification object to `manifest.json`.
+
+Deterministic validation before proceeding:
+1. `classification.type` must be one of `feature | bugfix | refactor | migration | ml | full-stack`.
+2. `classification.risk_level` must be one of `low | medium | high | critical`.
+3. `classification.domains` must be an array of known domains only.
+4. If validation fails, stop and correct the classification before moving on.
+
+Update `manifest.json` stage to `SPEC_NORMALIZATION`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} SPEC_NORMALIZATION
 ```
-{timestamp} [DT] state-encoder run — trajectory context attached
-{timestamp} [DONE] discovery + design + classification — notes, decisions, and classification written
-{timestamp} [STAGE] → CLASSIFY_AND_SPEC
-```
-
-Update `manifest.json` stage to `CLASSIFY_AND_SPEC`.
 
 ---
 
 ## Step 3 — Spec Normalization
 
-**Spawn the Planner subagent** with instruction: "Phase: Spec Normalization. Read `raw-input.md`, `discovery-notes.md`, and `design-decisions.md`. Human design choices are binding. Write normalized spec with numbered acceptance criteria to `spec.md`."
+Spawn the Planner subagent with instruction:
 
-Wait for it to complete. The Planner writes `spec.md` per its own format. Verify `spec.md` exists.
-
-Append to log:
-```
-{timestamp} [DONE] spec normalization — spec.md written
-{timestamp} [STAGE] → SPEC_REVIEW
+```text
+Phase: Spec Normalization.
+Read raw-input.md, discovery-notes.md, and design-decisions.md.
+Write spec.md.
 ```
 
-Update `manifest.json` stage to `SPEC_REVIEW`.
+After `spec.md` is written, run deterministic spec validation:
+1. The file must contain the headings `Task Summary`, `User Context`, `Acceptance Criteria`, `Implicit Requirements Surfaced`, `Out of Scope`, `Assumptions`, and `Risk Notes`.
+2. Acceptance criteria must be a numbered list starting at `1` and incrementing by `1` with no gaps.
+3. Every acceptance criterion must be concrete and independently testable.
+4. Any assumption that affects behavior must be labeled `needs confirmation` or `safe assumption`.
+
+If any rule fails, send the Planner back to fix `spec.md` before presenting it.
+
+Update `manifest.json` stage to `SPEC_REVIEW`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} SPEC_REVIEW
+```
 
 ---
 
-## Step 4 — Spec Review (you run this, not a subagent)
+## Step 4 — Spec Review
 
-**THIS GATE ALWAYS RUNS. THERE IS NO SKIP PATH.**
+This gate always runs. There is no skip path.
 
-Read `spec.md` and `design-decisions.md`. Present to the user using **AskUserQuestion**:
+Present `spec.md` to the user and ask for approval.
 
+- If approved: append `{timestamp} [HUMAN] SPEC_REVIEW — approved` to the execution log.
+- If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, and present the updated spec again.
+- If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Spec rejected by user`, and stop.
+
+When approved, update `manifest.json` stage to `PLANNING`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} PLANNING
 ```
-=== Spec Review ===
-
-[contents of spec.md]
-
----
-=== Design Decisions ===
-
-[contents of design-decisions.md, or "No design decisions recorded."]
-
----
-Does this spec accurately capture what you want built?
-(yes / no + what to change)
-```
-
-- If **approved**: append `{timestamp} [HUMAN] SPEC_REVIEW — approved` to log. Proceed to Step 5.
-- If **changes requested**: append `{timestamp} [HUMAN] SPEC_REVIEW — changes requested: {summary}` to log. Spawn Planner with instruction: "Phase: Spec Normalization. Human requested changes: [{feedback}]. Re-normalize spec.md incorporating the feedback. Design decisions remain binding unless explicitly overridden." Then re-present the updated spec. Repeat until approved.
-
-Update `manifest.json` stage to `PLANNING`.
 
 ---
 
-## Step 5 — Generate Plan + Execution Graph (PLANNING)
+## Step 5 — Generate Plan + Execution Graph
 
-Append to log:
-```
+Append to the execution log:
+
+```text
 {timestamp} [STAGE] → PLANNING
 ```
 
-1. **Determine Planning Strategy (RL-informed):**
-   - Consult the **Model & Skip Policy** table in `dynos_patterns.md` if available.
-   - If `risk_level` is `high` or `critical` (from `manifest.json`), OR the `spec.md` contains more than `10` acceptance criteria: **Hierarchical Planning (Master/Worker)**.
-   - Otherwise: **Standard Planning (Single-Planner)**.
+Choose planning mode deterministically:
+- Use hierarchical planning if `risk_level` is `high` or `critical`, or if `spec.md` contains more than 10 acceptance criteria.
+- Otherwise use standard planning.
 
-2. **Hierarchical Flow:**
-   - **Spawn Master Planner (Opus):** Phase: "Strategic Implementation Planning (Master)". It writes the skeletal `plan.md` and `execution-graph-skeleton.json`.
-   - **Spawn Worker Planners (Sonnet) in parallel:** One for each major segment defined in the skeleton. Phase: "Detailed Segment Planning (Worker)".
-   - **Merge Results:** Combine the Strategic Plan with the Detailed Plans into the final `plan.md`. Merge all Worker segment objects into the final `execution-graph.json`.
+Hierarchical flow:
+1. Spawn Master Planner (Opus) for strategic boundaries.
+2. Spawn Worker Planners in parallel for non-overlapping subsystems.
+3. Merge outputs into final `plan.md` and `execution-graph.json`.
 
-3. **Standard Flow:**
-   - **Spawn Planner (Opus):** Instruction: "Generate the implementation plan AND execution graph. Read `spec.md` and `design-decisions.md`. Reference Gold Standard patterns from `dynos_patterns.md` if available. Human design choices are binding. Write `plan.md` and `execution-graph.json`."
+Standard flow:
+1. Spawn Planner (Opus) with instruction to generate `plan.md` and `execution-graph.json`.
 
-Wait for completion. Append to log:
+After generation, run deterministic artifact validation before any human review. If available in this repo, run:
+
+```text
+python3 hooks/validate_task_artifacts.py .dynos/task-{id}
 ```
-{timestamp} [DONE] planning — final plan.md and execution-graph.json merged/written (mode: {hierarchical|standard})
+
+The command is the source of truth for artifact validation. Use the rules below to explain and repair failures:
+
+For `plan.md`:
+1. It must contain `Technical Approach`, `Reference Code`, `Components / Modules`, `Data Flow`, `Error Handling Strategy`, `Test Strategy`, `Dependency Graph`, and `Open Questions`.
+2. Every component or module section must list exact files.
+3. `Reference Code` paths must exist in the repo unless explicitly marked as to-be-created.
+
+For `execution-graph.json`:
+1. It must parse as valid JSON.
+2. Every segment must have unique `id`.
+3. Every segment must declare exactly one valid executor.
+4. No file may appear in more than one segment's `files_expected`.
+5. Every `depends_on` reference must point to an existing segment.
+6. The dependency graph must be acyclic.
+7. Every `criteria_id` must map to a real acceptance criterion in `spec.md`.
+8. Every acceptance criterion in `spec.md` must be covered by at least one segment.
+
+If any validation fails, respawn planning and fix the artifacts before continuing.
+
+Append to the execution log:
+
+```text
+{timestamp} [DONE] planning — final plan.md and execution-graph.json written (mode: {hierarchical|standard})
 {timestamp} [STAGE] → PLAN_REVIEW
 ```
 
-Update `manifest.json` stage to `PLAN_REVIEW`.
+Update `manifest.json` stage to `PLAN_REVIEW`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_REVIEW
+```
 
 ---
 
-## Step 6 — Plan Review (you run this, not a subagent)
+## Step 6 — Plan Review
 
-**THIS GATE ALWAYS RUNS. THERE IS NO SKIP PATH.**
+This gate always runs. There is no skip path.
 
-Read `plan.md`. Present to the user using **AskUserQuestion**:
+Present `plan.md` to the user and ask for approval.
 
-```
-=== Plan Review ===
-
-[contents of plan.md]
-
----
-Approve this plan? (yes / no + what to change)
-```
-
-- If **approved**: append `{timestamp} [HUMAN] PLAN_REVIEW — approved` to log. Proceed to Step 7.
-- If **changes requested**: append `{timestamp} [HUMAN] PLAN_REVIEW — changes requested: {summary}` to log. Spawn Planner again with the feedback. Re-present the updated plan. Repeat until approved.
-- If **rejected**: set `manifest.json` stage to `FAILED`. Append `[FAILED] Plan rejected by user`. Stop.
+- If approved: append `{timestamp} [HUMAN] PLAN_REVIEW — approved` to the execution log.
+- If changes are requested: append the feedback, respawn planning, re-run deterministic artifact validation, and present the updated plan again.
+- If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Plan rejected by user`, and stop.
 
 ---
 
-## Step 7 — Spec Coverage Audit (PLAN_AUDIT)
+## Step 7 — Plan Audit
 
-Update `manifest.json` stage to `PLAN_AUDIT`. Append to log:
-```
-{timestamp} [STAGE] → PLAN_AUDIT
-{timestamp} [SPAWN] spec-completion-auditor — verify plan covers all acceptance criteria
-```
-
-Spawn the `spec-completion-auditor` agent with instruction: "Audit the plan against the spec BEFORE execution. Read `spec.md` and `plan.md`. Verify every acceptance criterion in `spec.md` is explicitly addressed in `plan.md`. Flag criteria with no corresponding component, module, or task. Write report to `.dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json`."
-
-Wait for completion. Read the report.
-
-- If all criteria covered: append `{timestamp} [DONE] spec-completion-auditor — all criteria covered` to log. Proceed to Step 8.
-- If gaps found: append `{timestamp} [DECISION] plan gaps found — respawning planner to fill: {list}` to log. Spawn planning agent with instruction: "The plan is missing coverage for: [{uncovered criteria}]. Update `plan.md` and `execution-graph.json` to address them." Re-run the audit. Repeat until all covered.
+1. Spawn `spec-completion-auditor` to verify that `plan.md` and `execution-graph.json` cover all acceptance criteria in `spec.md`.
+2. If the auditor finds gaps, route back to planning, repair the gaps, and rerun both deterministic artifact validation and the plan audit.
+3. Create a git branch safety net: `dynos/task-{id}-snapshot`.
 
 ---
 
-## Step 8 — Done
+## Step 8 — TDD-First Gate
 
-Update `manifest.json` stage to `PRE_EXECUTION_SNAPSHOT`. Append to log:
+This gate always runs. There is no skip path.
+
+1. Spawn `testing-executor` with instruction:
+
+```text
+TDD-First Mode.
+Read spec.md and plan.md.
+Write a complete test suite covering every acceptance criterion.
+Do not implement production code.
+Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 ```
+
+2. Deterministically validate the generated tests before user review:
+   - Every acceptance criterion from `spec.md` must be mapped to at least one test case in the evidence summary.
+   - Test file paths must be under the repository root.
+   - No production source files may be modified in this step.
+3. Present the test file paths and summary to the user.
+4. If changes are requested, rerun the testing executor and the same deterministic validation.
+5. When approved, append `{timestamp} [HUMAN] TDD_REVIEW — approved` to the execution log.
+6. Commit the approved tests to the snapshot branch before any production code is written.
+
+---
+
+## Step 9 — Done
+
+Update `manifest.json` stage to `PRE_EXECUTION_SNAPSHOT`. If available in this repo, use:
+
+```text
+python3 hooks/dynosctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
+```
+
+Append to the execution log:
+
+```text
 {timestamp} [ADVANCE] PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT
 ```
 
 Print:
-```
+
+```text
 Foundry Ready to Execute.
 
 Task:   {task_id}
 Spec:   {N} acceptance criteria (human approved)
-Plan:   approved and audited (mode: {standard|hierarchical})
-Memory: {N} trajectories consulted
+Plan:   approved, validated, and audited (mode: {standard|hierarchical})
+Memory: advisory only
 
 Next: /dynos-work:execute
 ```
@@ -237,26 +284,18 @@ Next: /dynos-work:execute
 
 ## What you do NOT do
 
-- You do not execute code
-- You do not audit code
-- You do not decide when the task is done
-- You do not skip discovery, spec review, or plan review — ever
-- You do not let the Founder bypass the Spec Review gate — the Founder provides evidence, the human approves
+- You do not execute production code.
+- You do not audit production code.
+- You do not decide when the task is done.
+- You do not skip discovery, spec review, plan review, plan audit, or TDD review.
+- You do not let historical memory or the Founder override human approval or deterministic validation.
 
 ---
 
 ## Hard Rules
 
-- **No Stealth Paths**: There is no "Phase 0 shortcut." All tasks follow Steps 1–8.
-- **RL-First**: Discovery questions and design options must be informed by trajectory memory before being presented to the user.
-- **Founder is a Consultant**: The Founder Dreaming step provides simulation certificates. It never skips or replaces Human Gate #2 or #3.
-- **Evidence-Based Decisions**: Design options presented to the user must include Simulation Certificate data for hard/critical subtasks.
-
----
-
-## If the user provides incomplete input
-
-If the task description is too vague (e.g. "fix the bug" with no context), ask one clarifying question before initializing.
-
-**Too vague:** "fix the thing" → ask "Which thing?"
-**Sufficient:** "Add JWT auth to the /api/users endpoint" → proceed immediately
+- **No stealth paths:** all tasks follow Steps 0-9.
+- **Memory is advisory:** trajectory retrieval may inform questions or design review, but it never overrides the current repo or user instructions.
+- **Founder is a consultant:** simulation output informs design decisions but never replaces review gates.
+- **Validation before trust:** do not present `spec.md`, `plan.md`, `execution-graph.json`, or the generated test suite for approval until deterministic validation passes.
+- **Stop on ambiguity:** if a blocking ambiguity remains unresolved after discovery, flag it explicitly instead of silently choosing.

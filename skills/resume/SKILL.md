@@ -9,7 +9,7 @@ Resume a dynos-work task that was interrupted.
 
 ## What you do
 
-1. List all tasks in `.dynos/` that are not DONE or FAILED (read each manifest.json)
+1. List all tasks in `.dynos/` that are not DONE or FAILED (read each manifest.json). If available in this repo, use `python3 hooks/dynosctl.py active-task`.
 2. If one active task: resume it automatically
 3. If multiple active tasks: show list and ask which to resume
 4. Read `manifest.json` to determine current stage
@@ -17,8 +17,9 @@ Resume a dynos-work task that was interrupted.
 
 | Stage | Run this |
 |---|---|
+| SPEC_NORMALIZATION, SPEC_REVIEW | `/dynos-work:start` |
 | PLANNING, PLAN_REVIEW, PLAN_AUDIT | `/dynos-work:plan` |
-| EXECUTION_GRAPH_BUILD, PRE_EXECUTION_SNAPSHOT, EXECUTION, TEST_EXECUTION | `/dynos-work:execute` |
+| PRE_EXECUTION_SNAPSHOT, EXECUTION, TEST_EXECUTION | `/dynos-work:execute` |
 | CHECKPOINT_AUDIT, REPAIR_PLANNING, REPAIR_EXECUTION, FINAL_AUDIT | `/dynos-work:audit` |
 
 ## Output on resume
