@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -53,20 +56,28 @@ VALID_CLASSIFICATION_TYPES = {
 VALID_DOMAINS = {"ui", "backend", "db", "ml", "security"}
 VALID_RISK_LEVELS = {"low", "medium", "high", "critical"}
 
+# Shared composite score weights: (quality, efficiency, cost)
+COMPOSITE_WEIGHTS = (0.6, 0.25, 0.15)
+
 STAGE_ORDER = [
     "FOUNDRY_INITIALIZED",
+    "CLASSIFY_AND_SPEC",
     "SPEC_NORMALIZATION",
     "SPEC_REVIEW",
     "PLANNING",
     "PLAN_REVIEW",
     "PLAN_AUDIT",
+    "EXECUTION_GRAPH_BUILD",
     "PRE_EXECUTION_SNAPSHOT",
     "EXECUTION",
     "TEST_EXECUTION",
     "CHECKPOINT_AUDIT",
+    "FINAL_AUDIT",
     "REPAIR_PLANNING",
     "REPAIR_EXECUTION",
     "DONE",
+    "CANCELLED",
+    "FAILED",
 ]
 
 ALLOWED_STAGE_TRANSITIONS = {
@@ -121,7 +132,22 @@ def load_json(path: Path) -> dict:
 
 
 def write_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    """Atomic JSON write: write to temp file then rename to avoid partial writes."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.write(json.dumps(data, indent=2) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def require(path: Path) -> str:
@@ -426,7 +452,7 @@ def find_active_tasks(root: Path) -> list[Path]:
     for manifest_path in dynos_dir.glob("task-*/manifest.json"):
         try:
             manifest = load_json(manifest_path)
-        except Exception:
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
             continue
         if manifest.get("stage") not in {"DONE", "FAILED", "CANCELLED"}:
             tasks.append(manifest_path.parent)
@@ -448,7 +474,7 @@ def collect_retrospectives(root: Path) -> list[dict]:
     for path in sorted((root / ".dynos").glob("task-*/task-retrospective.json")):
         try:
             data = load_json(path)
-        except Exception:
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
             continue
         data["_path"] = str(path)
         retrospectives.append(data)
@@ -531,7 +557,8 @@ def make_trajectory_entry(retrospective: dict) -> dict:
         quality_score = 1 / (1 + total_findings)
         efficiency_score = max(0.0, 1 - (repair_cycles / 3))
         cost_score = 1 / (1 + (wasted_spawns / max(1, subagent_spawns)))
-    reward = round(0.5 * quality_score + 0.2 * cost_score + 0.3 * efficiency_score, 6)
+    wq, we, wc = COMPOSITE_WEIGHTS
+    reward = round(wq * quality_score + we * efficiency_score + wc * cost_score, 6)
     return {
         "trajectory_id": retrospective["task_id"],
         "source_task_id": retrospective["task_id"],
@@ -684,7 +711,7 @@ def benchmark_policy_config(root: Path) -> dict:
         return default
     try:
         data = load_json(path)
-    except Exception:
+    except (json.JSONDecodeError, FileNotFoundError, OSError):
         write_json(path, default)
         return default
     merged = {**default, **{k: v for k, v in data.items() if isinstance(v, int) and v >= 0}}
@@ -705,10 +732,11 @@ def compute_benchmark_summary(benchmarks: list[dict]) -> dict:
     quality = sum(_safe_float(item.get("quality_score")) for item in benchmarks) / len(benchmarks)
     cost = sum(_safe_float(item.get("cost_score")) for item in benchmarks) / len(benchmarks)
     efficiency = sum(_safe_float(item.get("efficiency_score")) for item in benchmarks) / len(benchmarks)
+    wq, we, wc = COMPOSITE_WEIGHTS
     composite = sum(
-        0.6 * _safe_float(item.get("quality_score"))
-        + 0.25 * _safe_float(item.get("efficiency_score"))
-        + 0.15 * _safe_float(item.get("cost_score"))
+        wq * _safe_float(item.get("quality_score"))
+        + we * _safe_float(item.get("efficiency_score"))
+        + wc * _safe_float(item.get("cost_score"))
         for item in benchmarks
     ) / len(benchmarks)
     return {
@@ -883,7 +911,8 @@ def apply_evaluation_to_registry(
         matched["status"] = "active_shadow"
     else:
         matched["status"] = "active"
-    registry.setdefault("benchmarks", []).append(
+    benchmarks = registry.setdefault("benchmarks", [])
+    benchmarks.append(
         {
             "agent_name": agent_name,
             "item_kind": item_kind,
@@ -897,14 +926,23 @@ def apply_evaluation_to_registry(
             **(context or {}),
         }
     )
+    if len(benchmarks) > MAX_REGISTRY_BENCHMARKS:
+        registry["benchmarks"] = benchmarks[-MAX_REGISTRY_BENCHMARKS:]
     registry["updated_at"] = now_iso()
     write_json(learned_registry_path(root), registry)
     return registry
 
 
+MAX_BENCHMARK_HISTORY_RUNS = 200
+MAX_REGISTRY_BENCHMARKS = 200
+
+
 def append_benchmark_run(root: Path, run: dict) -> dict:
     history = ensure_benchmark_history(root)
-    history.setdefault("runs", []).append(run)
+    runs = history.setdefault("runs", [])
+    runs.append(run)
+    if len(runs) > MAX_BENCHMARK_HISTORY_RUNS:
+        history["runs"] = runs[-MAX_BENCHMARK_HISTORY_RUNS:]
     history["updated_at"] = now_iso()
     write_json(benchmark_history_path(root), history)
     return history
@@ -952,7 +990,7 @@ def iter_benchmark_fixtures(root: Path) -> list[Path]:
     fixtures: list[Path] = []
     for directory in candidates:
         if directory.exists():
-            fixtures.extend(path for path in directory.rglob("*.json") if path.is_file())
+            fixtures.extend(path for path in directory.rglob("*.json") if path.is_file() and not path.is_symlink())
     return sorted(fixtures)
 
 
@@ -961,7 +999,7 @@ def matching_fixtures_for_registry_entry(root: Path, entry: dict) -> list[Path]:
     for fixture_path in iter_benchmark_fixtures(root):
         try:
             fixture = load_json(fixture_path)
-        except Exception:
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
             continue
         if fixture.get("item_kind", "agent") != entry.get("item_kind", "agent"):
             continue
@@ -983,7 +1021,8 @@ def retrospective_benchmark_score(retrospective: dict) -> dict:
     quality = _safe_float(retrospective.get("quality_score"), 0.0)
     cost = _safe_float(retrospective.get("cost_score"), 0.0)
     efficiency = _safe_float(retrospective.get("efficiency_score"), 0.0)
-    composite = 0.6 * quality + 0.25 * efficiency + 0.15 * cost
+    wq, we, wc = COMPOSITE_WEIGHTS
+    composite = wq * quality + we * efficiency + wc * cost
     return {
         "quality_score": round(quality, 6),
         "cost_score": round(cost, 6),
@@ -1049,10 +1088,11 @@ def synthesize_fixture_for_entry(root: Path, entry: dict, *, limit: int = 5) -> 
         "cost_score": round(baseline_cost, 6),
         "efficiency_score": round(baseline_efficiency, 6),
     }
+    wq, we, wc = COMPOSITE_WEIGHTS
     baseline_summary["composite_score"] = round(
-        0.6 * baseline_summary["quality_score"]
-        + 0.25 * baseline_summary["efficiency_score"]
-        + 0.15 * baseline_summary["cost_score"],
+        wq * baseline_summary["quality_score"]
+        + we * baseline_summary["efficiency_score"]
+        + wc * baseline_summary["cost_score"],
         6,
     )
     fixture_cases = []
@@ -1174,8 +1214,9 @@ def benchmark_fixture_score(result: dict) -> dict:
         cost = _safe_float(result.get("cost_score"))
         efficiency = _safe_float(result.get("efficiency_score"))
         composite = result.get("composite_score")
+        wq, we, wc = COMPOSITE_WEIGHTS
         if not isinstance(composite, (int, float)):
-            composite = 0.6 * quality + 0.25 * efficiency + 0.15 * cost
+            composite = wq * quality + we * efficiency + wc * cost
         return {
             "quality_score": round(quality, 6),
             "efficiency_score": round(efficiency, 6),
@@ -1192,7 +1233,8 @@ def benchmark_fixture_score(result: dict) -> dict:
     quality *= 1 / (1 + findings)
     efficiency = 1 / (1 + max(0.0, duration_seconds / 300))
     cost = 1 / (1 + max(0.0, tokens_used / 50000) + max(0.0, files_touched / 40))
-    composite = 0.6 * quality + 0.25 * efficiency + 0.15 * cost
+    wq, we, wc = COMPOSITE_WEIGHTS
+    composite = wq * quality + we * efficiency + wc * cost
     return {
         "quality_score": round(quality, 6),
         "efficiency_score": round(efficiency, 6),

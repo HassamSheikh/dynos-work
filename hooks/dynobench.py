@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-from hashlib import sha256
 from pathlib import Path
 
 from dynoslib import (
@@ -21,6 +20,29 @@ from dynoslib import (
     now_iso,
     upsert_fixture_trace,
 )
+
+ALLOWED_COMMAND_PREFIXES = (
+    "python3", "python", "node", "npm", "npx", "pytest", "jest",
+    "go", "cargo", "make", "sh", "bash",
+)
+
+
+def _validate_command(command: list[str], sandbox: Path) -> None:
+    """Reject commands not on the allowlist or that escape the sandbox."""
+    if not command:
+        raise SystemExit("empty command in sandbox variant")
+    executable = Path(command[0]).name
+    if executable not in ALLOWED_COMMAND_PREFIXES:
+        raise SystemExit(
+            f"command {command[0]!r} not in sandbox allowlist: {ALLOWED_COMMAND_PREFIXES}"
+        )
+    for arg in command[1:]:
+        resolved = (sandbox / arg).resolve()
+        if resolved.is_absolute() and not str(resolved).startswith(str(sandbox)):
+            if Path(arg).is_absolute() or ".." in arg:
+                raise SystemExit(
+                    f"command argument escapes sandbox: {arg!r}"
+                )
 
 
 def load_fixture(path: Path) -> dict:
@@ -34,10 +56,11 @@ def load_fixture(path: Path) -> dict:
 def snapshot_tree(root: Path) -> dict[str, str]:
     snapshot: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             continue
         rel = str(path.relative_to(root))
-        snapshot[rel] = sha256(path.read_bytes()).hexdigest()
+        st = path.stat()
+        snapshot[rel] = f"{st.st_size}:{st.st_mtime_ns}"
     return snapshot
 
 
@@ -52,13 +75,22 @@ def touched_files(before: dict[str, str], after: dict[str, str]) -> int:
     return touched
 
 
+def _assert_path_within(resolved: Path, parent: Path, label: str) -> None:
+    """Raise if resolved path escapes the expected parent directory."""
+    try:
+        resolved.relative_to(parent)
+    except ValueError:
+        raise SystemExit(f"path traversal blocked: {resolved} escapes {label} ({parent})")
+
+
 def materialize_sandbox(case: dict) -> Path:
     sandbox = Path(tempfile.mkdtemp(prefix="dynos-bench-", dir="/tmp"))
     for relative_path, content in case.get("sandbox", {}).get("files", {}).items():
-        target = sandbox / relative_path
+        target = (sandbox / relative_path).resolve()
+        _assert_path_within(target, sandbox, "sandbox")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
-    fixture_dir = Path(case.get("_fixture_dir", "."))
+    fixture_dir = Path(case.get("_fixture_dir", ".")).resolve()
     for copy_entry in case.get("sandbox", {}).get("copy_paths", []):
         if isinstance(copy_entry, str):
             source_rel = copy_entry
@@ -67,7 +99,9 @@ def materialize_sandbox(case: dict) -> Path:
             source_rel = copy_entry["source"]
             target_rel = copy_entry.get("target", source_rel)
         source = (fixture_dir / source_rel).resolve()
-        target = sandbox / target_rel
+        _assert_path_within(source, fixture_dir, "fixture_dir")
+        target = (sandbox / target_rel).resolve()
+        _assert_path_within(target, sandbox, "sandbox")
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.is_dir():
             shutil.copytree(source, target, dirs_exist_ok=True)
@@ -82,7 +116,9 @@ def materialize_sandbox(case: dict) -> Path:
             target_rel = copy_entry.get("target", source_rel)
         repo_root = Path(case.get("_repo_root", ".")).resolve()
         source = (repo_root / source_rel).resolve()
-        target = sandbox / target_rel
+        _assert_path_within(source, repo_root, "repo_root")
+        target = (sandbox / target_rel).resolve()
+        _assert_path_within(target, sandbox, "sandbox")
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.is_dir():
             shutil.copytree(source, target, dirs_exist_ok=True)
@@ -142,6 +178,7 @@ def run_command_sequence(sandbox: Path, commands: list[list[str]], env: dict[str
     merged_metrics: dict = {}
     exit_code = 0
     for command in commands:
+        _validate_command(command, sandbox)
         completed = subprocess.run(
             command,
             cwd=sandbox,

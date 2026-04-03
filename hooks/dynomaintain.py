@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import signal
@@ -47,7 +48,7 @@ def maintainer_policy(root: Path) -> dict:
         return default
     try:
         data = load_json(path)
-    except Exception:
+    except (json.JSONDecodeError, FileNotFoundError, OSError):
         path.write_text(json.dumps(default, indent=2) + "\n")
         return default
     merged = dict(default)
@@ -74,7 +75,7 @@ def current_pid(root: Path) -> int | None:
         return None
     try:
         pid = int(path.read_text().strip())
-    except Exception:
+    except (ValueError, OSError):
         return None
     return pid if is_pid_running(pid) else None
 
@@ -201,31 +202,44 @@ def cmd_run_loop(args: argparse.Namespace) -> int:
 
 def cmd_start(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
-    existing = current_pid(root)
-    if existing is not None:
-        print(json.dumps({"status": "already_running", "pid": existing}, indent=2))
+    lock_file = maintenance_dir(root) / "start.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = open(lock_file, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock_fd.close()
+        print(json.dumps({"status": "start_in_progress"}, indent=2))
         return 0
-    hooks_dir = Path(__file__).resolve().parent
-    poll_seconds = int(args.poll_seconds or maintainer_policy(root)["maintainer_poll_seconds"])
-    process = subprocess.Popen(
-        [
-            "python3",
-            str(hooks_dir / "dynomaintain.py"),
-            "run-loop",
-            "--root",
-            str(root),
-            "--poll-seconds",
-            str(poll_seconds),
-        ],
-        cwd=root,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    time.sleep(0.2)
-    print(json.dumps({"status": "started", "pid": process.pid, "poll_seconds": poll_seconds}, indent=2))
-    return 0
+    try:
+        existing = current_pid(root)
+        if existing is not None:
+            print(json.dumps({"status": "already_running", "pid": existing}, indent=2))
+            return 0
+        hooks_dir = Path(__file__).resolve().parent
+        poll_seconds = int(args.poll_seconds or maintainer_policy(root)["maintainer_poll_seconds"])
+        process = subprocess.Popen(
+            [
+                "python3",
+                str(hooks_dir / "dynomaintain.py"),
+                "run-loop",
+                "--root",
+                str(root),
+                "--poll-seconds",
+                str(poll_seconds),
+            ],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(0.2)
+        print(json.dumps({"status": "started", "pid": process.pid, "poll_seconds": poll_seconds}, indent=2))
+        return 0
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 def cmd_ensure(args: argparse.Namespace) -> int:
@@ -263,7 +277,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if status_path(root).exists():
         try:
             payload = load_json(status_path(root))
-        except Exception:
+        except (json.JSONDecodeError, FileNotFoundError, OSError):
             payload = {"running": False, "pid": None}
     payload["running"] = current_pid(root) is not None
     payload["pid"] = current_pid(root)

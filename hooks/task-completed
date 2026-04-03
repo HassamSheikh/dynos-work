@@ -20,5 +20,5 @@ python3 hooks/dynodashboard.py generate --root . || true
 PROJECT_DIR=$(pwd | sed 's|/|-|g')
 SETTINGS="$HOME/.claude/projects/$PROJECT_DIR/settings.json"
 if [ -f "$SETTINGS" ] && grep -q '"dynos_auto_commit".*true' "$SETTINGS" 2>/dev/null; then
-  git add -u && git commit -m "dynos-work: auto-commit after task completion" || true
+  git add .dynos/ benchmarks/ && git diff --cached --quiet || git commit -m "dynos-work: auto-commit after task completion" || true
 fi

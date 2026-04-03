@@ -40,7 +40,7 @@ def iter_code_files(target: Path) -> list[Path]:
         return [target]
     files: list[Path] = []
     for path in target.rglob("*"):
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             continue
         if ".git" in path.parts or ".dynos" in path.parts or "node_modules" in path.parts:
             continue
@@ -82,7 +82,7 @@ def encode_state(root: Path, target: Path | None = None) -> dict:
     architecture_complexity = round((control_flow + symbols) / max(1, len(files)), 4)
     dependency_flux = round(import_count / max(1, len(files)), 4)
     total_findings = sum(findings_by_category.values())
-    finding_entropy = round(total_findings / max(1, len(retrospectives[-5:]) or 1), 4)
+    finding_entropy = round(total_findings / max(1, len(retrospectives[-5:])), 4)
     dominant_languages = [lang for lang, _ in sorted(languages.items(), key=lambda item: (-item[1], item[0]))[:5]]
 
     return {

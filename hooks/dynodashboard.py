@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer, HTTPStatus
 from pathlib import Path
 
 from dynolineage import build_lineage
@@ -403,7 +403,8 @@ def write_dashboard(root: Path) -> dict:
     data_path = dynos_dir / "dashboard-data.json"
     html_path = dynos_dir / "dashboard.html"
     data_path.write_text(json.dumps(payload, indent=2) + "\n")
-    html = HTML_TEMPLATE.replace("__EMBEDDED_DATA__", json.dumps(payload))
+    safe_json = json.dumps(payload).replace("</", "<\\/")
+    html = HTML_TEMPLATE.replace("__EMBEDDED_DATA__", safe_json)
     html_path.write_text(html)
     return {
         "html_path": str(html_path),
@@ -418,11 +419,26 @@ def cmd_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+ALLOWED_SERVE_FILES = {"dashboard.html", "dashboard-data.json"}
+
+
+class RestrictedHandler(SimpleHTTPRequestHandler):
+    def do_GET(self) -> None:
+        path = self.path.split("?")[0].lstrip("/")
+        if path not in ALLOWED_SERVE_FILES:
+            self.send_error(HTTPStatus.FORBIDDEN, "Access denied")
+            return
+        super().do_GET()
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     write_dashboard(root)
     os.chdir(root / ".dynos")
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), SimpleHTTPRequestHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), RestrictedHandler)
     print(json.dumps({"url": f"http://127.0.0.1:{args.port}/dashboard.html"}, indent=2))
     server.serve_forever()
     return 0
