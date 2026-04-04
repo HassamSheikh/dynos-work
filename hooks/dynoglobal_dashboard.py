@@ -1975,6 +1975,7 @@ def cmd_kill(args: object) -> int:
 
 def cmd_restart(args: object) -> int:
     """Restart the dashboard server (kill + serve)."""
+    import time
     pid = _read_dashboard_pid()
     if pid is not None:
         try:
@@ -1983,6 +1984,12 @@ def cmd_restart(args: object) -> int:
         except OSError:
             pass
         _dashboard_pid_path().unlink(missing_ok=True)
-        import time
-        time.sleep(0.5)  # let port release
+        # Wait for process to die and port to release
+        for _ in range(20):
+            try:
+                os.kill(pid, 0)
+                time.sleep(0.25)
+            except OSError:
+                break
+        time.sleep(0.5)  # extra buffer for port release
     return cmd_serve(args)
