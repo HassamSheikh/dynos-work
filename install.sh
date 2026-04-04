@@ -233,17 +233,16 @@ main() {
     step_global_dirs
     step_plugin
 
-    # Register and start local daemon — but NOT for the dynos-work repo itself
-    # (contributors cloning the repo don't want autofix running on the tool's own code)
-    if [ -d "$(pwd)/.git" ] && [ "$(pwd)" != "$INSTALL_DIR" ]; then
-        step_register "$(pwd)"
-        step_daemon "$(pwd)"
-    elif [ "$(pwd)" = "$INSTALL_DIR" ]; then
-        info "Skipping local daemon for dynos-work repo itself"
-        ok "Run 'dynos local start --root /path/to/your/project' to set up a project"
-    fi
-
     step_global_daemon
+
+    ok "Local daemon not started (manual setup per project)"
+    echo ""
+    echo "  To set up a project:"
+    echo ""
+    echo "    cd /path/to/your/project"
+    echo "    dynos registry register ."
+    echo "    dynos local start --root ."
+    echo "    dynos local start --root . --autofix   # with autofix"
 
     # Developer extras
     if [ "$DEV_MODE" = true ]; then
