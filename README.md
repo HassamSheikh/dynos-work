@@ -328,196 +328,91 @@ Local project state always takes precedence. Global insights are additive: they 
 
 ## CLI
 
-All commands go through a single entry point: `dynos <subcommand>`.
+All commands go through `dynos`.
+
+### Setup
 
 ```bash
-# Add to PATH (one-time, add to ~/.bashrc for permanence)
-export PATH="/path/to/dynos-work/bin:$PATH"
+dynos init                        # register project + start daemon
+dynos init --autofix              # with autofix enabled
 ```
 
-### Project Daemon (`dynos local`)
-
-Runs the background data pipeline for a single project: trajectories, patterns, postmortems, improvements, fixtures, automation queue, dashboard refresh. With `--autofix`, also scans for issues and auto-fixes them.
+### Project
 
 ```bash
-dynos local start --root .                # start daemon (data pipeline only)
-dynos local start --root . --autofix      # start daemon + autonomous autofix
-dynos local stop --root .                 # stop daemon
-dynos local status --root .               # show daemon status (running, autofix, cycle count)
-dynos local run-once --root .             # single cycle, no daemon
-dynos local run-once --root . --autofix   # single cycle + autofix scan
-dynos local logs --root .                 # show recent cycle history
+dynos local start                 # start project daemon
+dynos local start --autofix       # start with autofix
+dynos local stop                  # stop daemon
+dynos local status                # show daemon status
+dynos local logs                  # cycle history
+dynos local run-once              # run single cycle
+dynos local dashboard             # per-project dashboard
 ```
 
-`dynos maintain` is an alias for `dynos local`.
-
-### Proactive Scanner (`dynos proactive`)
-
-Scans for technical debt across four categories. Called automatically by the daemon when `--autofix` is enabled, or run manually.
+### Global
 
 ```bash
-dynos proactive scan --root .              # run scan now
-dynos proactive scan --root . --max-findings 5  # cap findings per scan
-dynos proactive list --root .              # show all tracked findings
-dynos proactive clear --root .             # reset findings history
+dynos global start                # start cross-project sweeper
+dynos global stop                 # stop sweeper
+dynos global status               # show health
+dynos global run-once             # single sweep
+dynos global logs                 # sweep history
+```
+
+### Dashboard
+
+```bash
+dynos dashboard                   # start global dashboard server
+dynos dashboard stop              # stop server
+dynos dashboard restart           # restart server
+```
+
+### Autofix
+
+```bash
+dynos autofix scan                # scan all registered projects
+dynos autofix scan /path          # scan one project (must be registered)
+dynos autofix list                # show findings
+dynos autofix clear               # reset findings
 ```
 
 What it scans:
-- **Recurring audit findings** from retrospectives (categories appearing in >50% of last 10 tasks)
-- **Dependency vulnerabilities** via `pip-audit` / `npm audit`
-- **Dead code** via Python AST (unused imports, unreferenced functions)
-- **Architectural drift** against gold standard patterns
+- Recurring audit findings from retrospectives
+- Dependency vulnerabilities (pip-audit / npm audit)
+- Dead code (unused imports, unreferenced functions)
+- Architectural drift against learned patterns
 
 What it does with findings:
-- Low/medium severity: creates git worktree, invokes Claude to fix, opens PR
-- High/critical severity: opens GitHub issue for human review
-- Deduplicates against previous findings (never re-processes same issue)
+- Low/medium: creates git worktree, invokes Claude to fix, opens PR
+- High/critical: opens GitHub issue for human review
+- Deduplicates against previous findings
 - Max 2 attempts per finding, then permanently suppressed
 
-### Global Daemon (`dynos global`)
-
-Orchestrates maintenance across all registered projects. Sweeps each project via subprocess (crash-isolated, 300s timeout per project).
+### Projects
 
 ```bash
-dynos global start                         # start background sweeper
-dynos global stop                          # stop sweeper
-dynos global status                        # show daemon health
-dynos global run-once                      # single sweep of all projects
-dynos global logs                          # show recent sweep history
+dynos list                        # list all registered projects
+dynos remove                      # unregister current project
+dynos pause                       # pause maintenance
+dynos resume                      # resume maintenance
 ```
 
-### Global Dashboard (`dynos global dashboard`)
+All accept an optional path or `--root /path` to target a specific project. Default is current directory.
 
-Unified web dashboard showing all registered projects in one page.
+### Internals
 
-```bash
-dynos global dashboard                     # generate HTML only
-dynos global dashboard generate            # same as above
-dynos global dashboard serve               # generate + start HTTP server at :8766
-dynos global dashboard serve --port 9000   # custom port
-dynos global dashboard kill                # stop the server
-dynos global dashboard restart             # kill + serve
-```
-
-Dashboard shows:
-- Global daemon status and aggregate stats
-- Per-project cards (click to expand full detail)
-- Active routes, recent tasks, benchmark runs, findings, maintenance cycle history
-- Autofix PRs per project
-- Paused/archived projects dimmed at bottom
-
-### Project Registry (`dynos registry`)
-
-Manages which projects the global daemon maintains.
+These are advanced commands used by the system internally. Most users never need them.
 
 ```bash
-dynos registry register .                  # register current directory
-dynos registry register /path/to/project   # register any project
-dynos registry unregister /path/to/project # remove from registry
-dynos registry list                        # show all registered projects
-dynos registry status                      # show with daemon health
-dynos registry pause /path/to/project      # pause maintenance
-dynos registry resume /path/to/project     # resume maintenance
-```
-
-### Task Control (`dynos ctl`)
-
-Manage task lifecycle, validate artifacts, approve improvements.
-
-```bash
-dynos ctl active-task --root .             # show current active task
-dynos ctl validate-task .dynos/task-XXX    # validate task artifacts
-dynos ctl transition .dynos/task-XXX STAGE # advance task stage
-dynos ctl next-command .dynos/task-XXX     # what command to run next
-dynos ctl check-ownership .dynos/task-XXX seg-1 file1 file2  # verify segment owns files
-dynos ctl list-pending --root .            # show unapplied improvements
-dynos ctl approve imp-ID --root .          # approve an improvement
-```
-
-### Postmortems (`dynos postmortem`)
-
-Generate postmortems from completed tasks and propose improvements.
-
-```bash
-dynos postmortem generate --root . --task-id task-XXX  # single task
-dynos postmortem generate-all --root .     # all tasks
-dynos postmortem propose --root .          # propose improvements (dry run)
-dynos postmortem improve --root .          # propose + apply safe improvements
-dynos postmortem list-pending --root .     # show pending proposals
-dynos postmortem approve ID --root .       # approve a specific proposal
-```
-
-### Routing (`dynos route`)
-
-Deterministic routing decisions: which model, which auditors, which learned agents.
-
-```bash
-dynos route audit-plan --root . --task-type feature --domains ui
-dynos route executor-plan --root . --task-type refactor --graph .dynos/task-XXX/execution-graph.json
-dynos route resolve security-auditor feature --root .
-```
-
-### Patterns (`dynos patterns`)
-
-Aggregate retrospectives into prevention rules, model policy, skip policy, agent routing.
-
-```bash
-dynos patterns --root .                    # generate dynos_patterns.md
-```
-
-### Planning (`dynos plan`)
-
-Deterministic planning decisions.
-
-```bash
-dynos plan start-plan --root . --task-dir .dynos/task-XXX
-dynos plan planning-mode --root . --task-dir .dynos/task-XXX
-dynos plan task-policy --root . --task-dir .dynos/task-XXX
-```
-
-### Learned Agents (`dynos evolve`)
-
-Manage the shadow/alongside/replace promotion lifecycle for learned agents.
-
-```bash
-dynos evolve auto --root .                 # post-task evolve check
-dynos evolve init-registry --root .        # create registry if missing
-dynos evolve register-agent --root . --name my-agent --role executor --task-type feature
-```
-
-### Trajectories (`dynos trajectory`)
-
-Manage the trajectory store used for task similarity matching.
-
-```bash
-dynos trajectory rebuild --root .          # rebuild from retrospectives
-dynos trajectory search --root . --query query.json  # find similar past tasks
-```
-
-### Per-Project Dashboard (`dynos dashboard`)
-
-Generate or serve the per-project dashboard (single project view).
-
-```bash
-dynos dashboard generate --root .          # generate HTML
-dynos dashboard serve --root .             # serve at :8765
-dynos dashboard serve --root . --port 9000 # custom port
-```
-
-### Benchmarks (`dynos bench`)
-
-Run benchmark fixtures to evaluate learned agents and skills.
-
-```bash
-dynos bench run --fixture path/to/fixture.json
-```
-
-### Reports (`dynos report`)
-
-Generate project health reports.
-
-```bash
-dynos report --root .                      # generate report JSON
+dynos ctl                         # task lifecycle, validation, approvals
+dynos postmortem                  # postmortem generation + improvements
+dynos patterns                    # regenerate learned patterns
+dynos trajectory                  # trajectory store management
+dynos route                       # routing decisions (model, auditor, agent)
+dynos evolve                      # learned agent promotion lifecycle
+dynos bench                       # benchmark runner
+dynos report                      # project health reports
+dynos plan                        # planning policy resolution
 ```
 
 ## Installation
