@@ -13,8 +13,9 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 
 ## Step 0 — Metadata & Initialization
 
-1. Generate a task ID in the format `task-YYYYMMDD-NNN`.
-2. Create the task directory: `.dynos/task-{id}/`.
+1. Ensure `.dynos/` exists: `mkdir -p .dynos`. Then auto-register this project with the global registry (silent, idempotent): run `python3 "${PLUGIN_HOOKS}/dynoregistry.py" register "$(pwd)" 2>/dev/null || true`. This creates `~/.dynos/projects/{slug}/` and adds the project to `~/.dynos/registry.json` if not already registered. No user action needed.
+2. Generate a task ID in the format `task-YYYYMMDD-NNN`.
+3. Create the task directory: `.dynos/task-{id}/`.
 3. Write `raw-input.md` with the full task description exactly as given.
 4. Initialize `manifest.json` with at least:
 
