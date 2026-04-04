@@ -243,7 +243,6 @@ main() {
         echo ""
         echo "  Developer commands:"
         echo ""
-        echo "    source $SHELL_RC                   # reload PATH"
         echo "    PYTHONPATH=hooks pytest tests/      # run tests"
         echo "    dynos local status --root .         # check daemon"
         echo "    dynos proactive scan --root .       # run autofix scan"
@@ -256,7 +255,6 @@ main() {
         echo ""
         echo "  Quick start:"
         echo ""
-        echo "    source $SHELL_RC              # reload PATH (or open new terminal)"
         echo "    dynos local status --root .   # check daemon"
         echo "    dynos global dashboard serve  # start dashboard"
         echo ""
@@ -269,6 +267,10 @@ main() {
     echo ""
     echo "  Full docs: https://github.com/dynos-fit/dynos-work"
     echo ""
+
+    # Restart shell so PATH takes effect immediately
+    echo "  Reloading shell..."
+    exec "$SHELL"
 }
 
 main "$@"
