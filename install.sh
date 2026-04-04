@@ -2,12 +2,15 @@
 set -euo pipefail
 
 # dynos-work installer
-# Installs the plugin, sets up CLI, registers the project, starts the daemon.
+# Usage:
+#   ./install.sh              # user install (clones to ~/.dynos-work)
+#   ./install.sh --develop    # developer install (uses current repo)
 
 REPO_URL="https://github.com/dynos-fit/dynos-work.git"
-INSTALL_DIR="${DYNOS_INSTALL_DIR:-$HOME/.dynos-work}"
-BIN_DIR="$INSTALL_DIR/bin"
-HOOKS_DIR="$INSTALL_DIR/hooks"
+DEV_MODE=false
+INSTALL_DIR=""
+BIN_DIR=""
+HOOKS_DIR=""
 SHELL_RC=""
 
 # ---------------------------------------------------------------------------
@@ -29,15 +32,44 @@ detect_shell_rc() {
 
 check_deps() {
     local missing=()
-    command -v git   >/dev/null 2>&1 || missing+=(git)
+    command -v git     >/dev/null 2>&1 || missing+=(git)
     command -v python3 >/dev/null 2>&1 || missing+=(python3)
     if [ ${#missing[@]} -gt 0 ]; then
         fail "Missing required tools: ${missing[*]}"
     fi
 
-    # Optional but recommended
     command -v gh     >/dev/null 2>&1 || warn "gh (GitHub CLI) not found. Autofix PRs and issues will be disabled."
     command -v claude >/dev/null 2>&1 || warn "claude CLI not found. Autofix code changes will be disabled."
+}
+
+parse_args() {
+    for arg in "$@"; do
+        case "$arg" in
+            --develop|--dev|-d) DEV_MODE=true ;;
+            --help|-h)
+                echo "Usage: ./install.sh [--develop]"
+                echo ""
+                echo "  --develop  Developer mode. Uses the current repo directory"
+                echo "             instead of cloning to ~/.dynos-work."
+                exit 0
+                ;;
+            *) fail "Unknown argument: $arg. Use --help for usage." ;;
+        esac
+    done
+}
+
+resolve_dirs() {
+    if [ "$DEV_MODE" = true ]; then
+        # Developer mode: use the repo we're currently in
+        INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
+        if [ ! -f "$INSTALL_DIR/bin/dynos" ]; then
+            fail "Not in a dynos-work repo. Run from the repo root or clone it first."
+        fi
+    else
+        INSTALL_DIR="${DYNOS_INSTALL_DIR:-$HOME/.dynos-work}"
+    fi
+    BIN_DIR="$INSTALL_DIR/bin"
+    HOOKS_DIR="$INSTALL_DIR/hooks"
 }
 
 # ---------------------------------------------------------------------------
@@ -45,6 +77,11 @@ check_deps() {
 # ---------------------------------------------------------------------------
 
 step_clone() {
+    if [ "$DEV_MODE" = true ]; then
+        ok "Developer mode: using local repo at $INSTALL_DIR"
+        return
+    fi
+
     if [ -d "$INSTALL_DIR/.git" ]; then
         info "Updating existing installation at $INSTALL_DIR"
         git -C "$INSTALL_DIR" pull --quiet
@@ -60,6 +97,16 @@ step_path() {
     detect_shell_rc
     local path_line="export PATH=\"$BIN_DIR:\$PATH\""
 
+    # Remove any old dynos-work PATH entries that point elsewhere
+    if [ "$DEV_MODE" = true ]; then
+        local old_path="$HOME/.dynos-work/bin"
+        if grep -qF "$old_path" "$SHELL_RC" 2>/dev/null; then
+            # Remove old user-install PATH entry
+            sed -i "\|$old_path|d" "$SHELL_RC" 2>/dev/null || true
+            warn "Removed old user-install PATH entry ($old_path)"
+        fi
+    fi
+
     if grep -qF "$BIN_DIR" "$SHELL_RC" 2>/dev/null; then
         ok "PATH already configured in $SHELL_RC"
     else
@@ -69,7 +116,6 @@ step_path() {
         ok "Added dynos to PATH in $SHELL_RC"
     fi
 
-    # Make available in current session
     export PATH="$BIN_DIR:$PATH"
 }
 
@@ -86,7 +132,7 @@ step_register() {
         ok "Project registered"
     else
         warn "Current directory is not a git repo. Skipping project registration."
-        warn "Run 'dynos registry register /path/to/project' later to register a project."
+        warn "Run 'dynos registry register /path/to/project' later."
     fi
 }
 
@@ -115,15 +161,34 @@ step_global_daemon() {
     ok "Global daemon started (sweeps all registered projects)"
 }
 
+step_dev_tests() {
+    info "Running tests to verify setup"
+    if PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 -m pytest "$INSTALL_DIR/tests/" -x -q 2>&1 | tail -1 | grep -q "passed"; then
+        ok "All tests pass"
+    else
+        warn "Some tests failed. Run 'PYTHONPATH=hooks pytest tests/' for details."
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 main() {
-    echo ""
-    echo "  dynos-work installer"
-    echo "  ────────────────────"
-    echo ""
+    parse_args "$@"
+    resolve_dirs
+
+    if [ "$DEV_MODE" = true ]; then
+        echo ""
+        echo "  dynos-work developer setup"
+        echo "  ──────────────────────────"
+        echo ""
+    else
+        echo ""
+        echo "  dynos-work installer"
+        echo "  ────────────────────"
+        echo ""
+    fi
 
     check_deps
     step_clone
@@ -138,21 +203,47 @@ main() {
 
     step_global_daemon
 
+    # Developer extras
+    if [ "$DEV_MODE" = true ]; then
+        step_dev_tests
+    fi
+
     echo ""
-    echo "  ────────────────────"
-    ok "Installation complete"
-    echo ""
-    echo "  Quick start:"
-    echo ""
-    echo "    source $SHELL_RC              # reload PATH (or open new terminal)"
-    echo "    dynos local status --root .   # check daemon"
-    echo "    dynos global dashboard serve  # start dashboard"
-    echo ""
-    echo "  In Claude Code:"
-    echo ""
-    echo "    /dynos-work:start [your task] # start a task"
-    echo "    /dynos-work:execute           # execute the plan"
-    echo "    /dynos-work:audit             # audit and repair"
+    echo "  ──────────────────────"
+    if [ "$DEV_MODE" = true ]; then
+        ok "Developer setup complete"
+        echo ""
+        echo "  Your repo:   $INSTALL_DIR"
+        echo "  CLI:         $BIN_DIR/dynos"
+        echo "  Hooks:       $HOOKS_DIR/"
+        echo "  State:       .dynos/"
+        echo "  Global:      ~/.dynos/"
+        echo ""
+        echo "  Developer commands:"
+        echo ""
+        echo "    source $SHELL_RC                   # reload PATH"
+        echo "    PYTHONPATH=hooks pytest tests/      # run tests"
+        echo "    dynos local status --root .         # check daemon"
+        echo "    dynos proactive scan --root .       # run autofix scan"
+        echo "    dynos global dashboard serve        # start dashboard"
+        echo ""
+        echo "  Your local changes take effect immediately."
+        echo "  No need to reinstall after editing hooks."
+    else
+        ok "Installation complete"
+        echo ""
+        echo "  Quick start:"
+        echo ""
+        echo "    source $SHELL_RC              # reload PATH (or open new terminal)"
+        echo "    dynos local status --root .   # check daemon"
+        echo "    dynos global dashboard serve  # start dashboard"
+        echo ""
+        echo "  In Claude Code:"
+        echo ""
+        echo "    /dynos-work:start [your task] # start a task"
+        echo "    /dynos-work:execute           # execute the plan"
+        echo "    /dynos-work:audit             # audit and repair"
+    fi
     echo ""
     echo "  Full docs: https://github.com/dynos-fit/dynos-work"
     echo ""
