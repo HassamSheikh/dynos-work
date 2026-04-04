@@ -109,6 +109,12 @@ step_daemon() {
     ok "Local daemon started"
 }
 
+step_global_daemon() {
+    info "Starting global daemon"
+    PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynoglobal.py" start >/dev/null 2>&1 || true
+    ok "Global daemon started (sweeps all registered projects)"
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -129,6 +135,8 @@ main() {
         step_register "$(pwd)"
         step_daemon "$(pwd)"
     fi
+
+    step_global_daemon
 
     echo ""
     echo "  ────────────────────"
