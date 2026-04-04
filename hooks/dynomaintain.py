@@ -177,8 +177,43 @@ def maintenance_cycle(root: Path) -> dict:
         lock_fd.close()
 
 
+def _autofix_flag_path(root: Path) -> Path:
+    return maintenance_dir(root) / "autofix.enabled"
+
+
+def _is_autofix_enabled(root: Path) -> bool:
+    return _autofix_flag_path(root).exists()
+
+
+def _run_autofix(root: Path) -> dict:
+    """Run the autofix scan via the skill's Python entry point."""
+    hooks_dir = Path(__file__).resolve().parent
+    proactive_path = hooks_dir / "dynoproactive.py"
+    if not proactive_path.exists():
+        return {"autofix": "skipped", "reason": "dynoproactive.py not found (autofix not yet implemented)"}
+    try:
+        result = subprocess.run(
+            [sys.executable, str(proactive_path), "scan", "--root", str(root)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                return json.loads(result.stdout)
+            except json.JSONDecodeError:
+                pass
+        return {"autofix": "completed", "returncode": result.returncode}
+    except subprocess.TimeoutExpired:
+        return {"autofix": "timeout"}
+    except OSError as exc:
+        return {"autofix": "error", "error": str(exc)}
+
+
 def cmd_run_once(args: argparse.Namespace) -> int:
-    result = maintenance_cycle(Path(args.root).resolve())
+    root = Path(args.root).resolve()
+    result = maintenance_cycle(root)
+    autofix = getattr(args, "autofix", False)
+    if autofix or _is_autofix_enabled(root):
+        result["autofix"] = _run_autofix(root)
     print(json.dumps(result, indent=2))
     return 0
 
@@ -199,6 +234,9 @@ def _stop_handler(signum: int, frame: object) -> None:
 def cmd_run_loop(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     maintenance_dir(root).mkdir(parents=True, exist_ok=True)
+    autofix = getattr(args, "autofix", False)
+    if autofix:
+        _autofix_flag_path(root).write_text("1")
     poll_seconds = int(args.poll_seconds or maintainer_policy(root)["maintainer_poll_seconds"])
     pid_path(root).write_text(f"{os.getpid()}\n")
     if stop_path(root).exists():
@@ -208,6 +246,8 @@ def cmd_run_loop(args: argparse.Namespace) -> int:
     try:
         while not _SHOULD_STOP and not stop_path(root).exists():
             cycle = maintenance_cycle(root)
+            if _is_autofix_enabled(root):
+                cycle["autofix"] = _run_autofix(root)
             try:
                 cycle_count = sum(1 for _ in open(log_path(root)))
             except OSError:
@@ -261,16 +301,20 @@ def cmd_start(args: argparse.Namespace) -> int:
             return 0
         hooks_dir = Path(__file__).resolve().parent
         poll_seconds = int(args.poll_seconds or maintainer_policy(root)["maintainer_poll_seconds"])
+        autofix = getattr(args, "autofix", False)
+        cmd = [
+            "python3",
+            str(hooks_dir / "dynomaintain.py"),
+            "run-loop",
+            "--root",
+            str(root),
+            "--poll-seconds",
+            str(poll_seconds),
+        ]
+        if autofix:
+            cmd.append("--autofix")
         process = subprocess.Popen(
-            [
-                "python3",
-                str(hooks_dir / "dynomaintain.py"),
-                "run-loop",
-                "--root",
-                str(root),
-                "--poll-seconds",
-                str(poll_seconds),
-            ],
+            cmd,
             cwd=root,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -278,7 +322,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             start_new_session=True,
         )
         time.sleep(0.2)
-        print(json.dumps({"status": "started", "pid": process.pid, "poll_seconds": poll_seconds}, indent=2))
+        print(json.dumps({"status": "started", "pid": process.pid, "poll_seconds": poll_seconds, "autofix": autofix}, indent=2))
         return 0
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -324,6 +368,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             payload = {"running": False, "pid": None}
     payload["running"] = current_pid(root) is not None
     payload["pid"] = current_pid(root)
+    payload["autofix"] = _is_autofix_enabled(root)
     # Summarize recent cycle history
     lp = log_path(root)
     if lp.exists():
@@ -373,6 +418,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_once = subparsers.add_parser("run-once", help="Run one maintenance cycle")
     run_once.add_argument("--root", default=".")
+    run_once.add_argument("--autofix", action="store_true", help="Also run AI autofix scan after data pipeline (scans for debt, opens PRs)")
     run_once.set_defaults(func=cmd_run_once)
 
     invoke = subparsers.add_parser("invoke", help="Manual maintainer trigger for one maintenance cycle")
@@ -382,11 +428,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_loop = subparsers.add_parser("run-loop", help="Run the maintainer loop in the foreground")
     run_loop.add_argument("--root", default=".")
     run_loop.add_argument("--poll-seconds", type=int)
+    run_loop.add_argument("--autofix", action="store_true", help="Also run AI autofix scan after each cycle")
     run_loop.set_defaults(func=cmd_run_loop)
 
     start = subparsers.add_parser("start", help="Start the maintainer daemon in the background")
     start.add_argument("--root", default=".")
     start.add_argument("--poll-seconds", type=int)
+    start.add_argument("--autofix", action="store_true", help="Also run AI autofix scan after each cycle")
     start.set_defaults(func=cmd_start)
 
     ensure = subparsers.add_parser("ensure", help="Start the daemon only when policy enables autostart")

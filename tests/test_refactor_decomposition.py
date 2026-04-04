@@ -675,6 +675,7 @@ class TestBinDynosUnchanged:
         "evolve",
         "trajectory",
         "dashboard",
+        "local",
         "maintain",
         "bench",
         "report",

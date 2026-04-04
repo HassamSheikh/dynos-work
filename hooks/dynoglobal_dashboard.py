@@ -308,6 +308,7 @@ def _gather_maintenance_data(project_root: Path) -> dict:
         "daemon_running": False,
         "daemon_pid": None,
         "poll_seconds": None,
+        "autofix_enabled": False,
         "last_cycle_at": None,
         "last_cycle_actions": [],
         "cycle_history": [],
@@ -322,6 +323,9 @@ def _gather_maintenance_data(project_root: Path) -> dict:
             result["daemon_running"] = data.get("running", False)
             result["daemon_pid"] = data.get("pid")
             result["poll_seconds"] = data.get("poll_seconds")
+            # Check autofix flag
+            autofix_flag = maint_dir / "autofix.enabled"
+            result["autofix_enabled"] = autofix_flag.exists()
             last_cycle = data.get("last_cycle", {})
             result["last_cycle_at"] = last_cycle.get("executed_at")
             actions_raw = last_cycle.get("actions", [])
@@ -583,6 +587,7 @@ def _render_compact_card(proj: dict, index: int) -> str:
         f'<span class="daemon-dot" style="background:{daemon_dot_color};" '
         f'aria-label="{daemon_dot_label}"></span>'
         f'<span class="mini">{daemon_dot_label}</span>'
+        f'{"<span class=\"tag\" style=\"font-size:9px;padding:1px 6px;margin-left:6px;\">autofix</span>" if maintenance.get("autofix_enabled") else ""}'
         f'<span class="mini" style="margin-left:auto;">{last_cycle_display}</span>'
         f'</div>'
         f'<div class="pcard-spark">{spark_html}</div>'
