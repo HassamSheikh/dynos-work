@@ -326,25 +326,76 @@ The global daemon aggregates anonymous statistics and portable prevention rules 
 
 Local project state always takes precedence. Global insights are additive: they inform maintenance and prevention but never override local decisions.
 
-## Main Commands
+## CLI
 
-### Workflow
+`dynos-work` ships a unified CLI (`bin/dynos`) that gives direct access to every runtime subsystem. This is the same tooling the plugin agents use internally. You do not need to use these commands during normal task flow, but they are available for debugging, manual maintenance, and scripting.
+
+Add `bin/` to your PATH:
 
 ```bash
-/dynos-work:start [task]
-/dynos-work:plan
-/dynos-work:execute
-/dynos-work:audit
-/dynos-work:resume
-/dynos-work:status
+export PATH="/path/to/dynos-work/bin:$PATH"
 ```
 
-### Learning
+Then run any subcommand:
 
 ```bash
-/dynos-work:learn
-/dynos-work:evolve
-/dynos-work:trajectory
+dynos <subcommand> [args...]
+```
+
+### Subcommands
+
+| Subcommand | What it does | Backed by |
+|---|---|---|
+| `route` | Deterministic audit and executor routing. Resolves model policy, skip policy, learned agent routing, and security floors for a given task type. | `dynorouter.py` |
+| `plan` | Planning policy resolution. Generates or re-generates plans from specs. | `dynoplanner.py` |
+| `patterns` | Aggregates task retrospectives into prevention rules, model policy, skip policy, agent routing tables, and gold standard instances. Writes `dynos_patterns.md` to project memory. | `dynopatterns.py` |
+| `ctl` | Task lifecycle management. List pending tasks, approve improvements, validate task artifacts, transition stages, check segment ownership. | `dynosctl.py` |
+| `postmortem` | Postmortem generation and improvement engine. Generates postmortems from completed tasks, proposes improvements, approves or rejects them. | `dynopostmortem.py` |
+| `registry` | Project registration. Register, unregister, pause, resume, list, and manage projects in the global registry. | `dynoregistry.py` |
+| `global` | Global daemon operations. Start/stop the cross-project background daemon, run single sweeps, view status and logs. | `dynoglobal.py` |
+| `evolve` | Learned agent management. Generate candidate agents from retrospectives, evaluate them, manage shadow/alongside/replace promotion lifecycle. | `dynoevolve.py` |
+| `trajectory` | Trajectory store operations. Rebuild the trajectory store from task retrospectives, query similar prior tasks. | `dynostrajectory.py` |
+| `dashboard` | Generate the local web dashboard. Produces `dashboard.html` and `dashboard-data.json` from live project state. | `dynodashboard.py` |
+| `maintain` | Project-level maintenance daemon. Start/stop a per-project background daemon, run a single maintenance cycle, view cycle logs. | `dynomaintain.py` |
+| `bench` | Benchmark runner. Evaluate learned agents and skills against fixtures, record history, compute scores. | `dynobench.py` |
+| `report` | Report generation. Produce summaries of task history, quality trends, and project health. | `dynoreport.py` |
+
+### Why it exists
+
+The CLI exists for three reasons:
+
+1. **Debuggability.** When a task stalls or an audit produces unexpected results, you can inspect and replay individual steps. `dynos ctl list-pending --root .` shows what is stuck. `dynos route audit-plan --root . --task-type feature --domains ui` shows exactly which auditors would spawn and why.
+
+2. **Automation.** The global daemon (`dynos global start`) and project daemon (`dynos maintain start`) run maintenance cycles unattended. They call the same subcommands internally. CI pipelines and cron jobs can use the CLI directly.
+
+3. **Transparency.** Every decision the plugin makes (routing, model selection, skip policy, promotion) is backed by a deterministic Python function you can call and inspect. The CLI is the interface to those functions.
+
+### Examples
+
+```bash
+# See which auditors would run for a refactor task
+dynos route audit-plan --root . --task-type refactor --domains backend
+
+# Validate all artifacts for a task
+dynos ctl validate-task .dynos/task-20260404-003
+
+# Run a single maintenance cycle (trajectories, patterns, postmortems, improvements)
+dynos maintain run-once --root .
+
+# Check global daemon health
+dynos global status
+
+# Register the current project
+dynos registry register .
+
+# Generate the dashboard
+dynos dashboard --root .
+
+# Rebuild trajectory store after manual edits
+dynos trajectory rebuild --root .
+
+# View what the pattern engine learned
+dynos patterns --root .
 ```
 
 ## Installation
