@@ -670,6 +670,79 @@ def cmd_improve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_list_pending(args: argparse.Namespace) -> int:
+    """List improvement proposals that were not auto-applied."""
+    root = Path(args.root).resolve()
+    imp_dir = _persistent_project_dir(root) / "improvements"
+    if not imp_dir.exists():
+        print(json.dumps({"pending": []}))
+        return 0
+
+    pending = []
+    # Scan all proposal files, cross-reference with results
+    for pfile in sorted(imp_dir.glob("proposals-*.json")):
+        pdata = load_json(pfile)
+        if not isinstance(pdata, dict):
+            continue
+        date_key = pfile.stem.replace("proposals-", "")
+        rfile = imp_dir / f"results-{date_key}.json"
+        rdata = load_json(rfile) if rfile.exists() else {}
+        applied_ids = set()
+        for r in (rdata.get("results", []) if isinstance(rdata, dict) else []):
+            if r.get("applied"):
+                applied_ids.add(r.get("id"))
+
+        for p in pdata.get("proposals", []):
+            pid = p.get("id", "")
+            if pid not in applied_ids:
+                pending.append({
+                    "id": pid,
+                    "type": p.get("type"),
+                    "action": p.get("action"),
+                    "description": p.get("description"),
+                    "source_file": str(pfile),
+                })
+
+    print(json.dumps({"pending": pending}, indent=2))
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    """Approve and apply a specific improvement proposal by ID."""
+    root = Path(args.root).resolve()
+    imp_dir = _persistent_project_dir(root) / "improvements"
+    target_id = args.improvement_id
+
+    # Find the proposal across all proposal files
+    found = None
+    for pfile in sorted(imp_dir.glob("proposals-*.json")):
+        pdata = load_json(pfile)
+        if not isinstance(pdata, dict):
+            continue
+        for p in pdata.get("proposals", []):
+            if p.get("id") == target_id:
+                found = p
+                break
+        if found:
+            break
+
+    if not found:
+        print(json.dumps({"error": f"proposal '{target_id}' not found"}))
+        return 1
+
+    result = apply_improvement(root, found)
+    # Update the results file
+    date_key = datetime.now(timezone.utc).strftime("%Y%m%d")
+    result_path = imp_dir / f"results-{date_key}.json"
+    existing = load_json(result_path) if result_path.exists() else {}
+    results_list = existing.get("results", []) if isinstance(existing, dict) else []
+    results_list.append(result)
+    write_json(result_path, {"executed_at": now_iso(), "results": results_list})
+
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def cmd_propose(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     proposals = propose_improvements(root)
@@ -724,6 +797,15 @@ def build_parser() -> argparse.ArgumentParser:
     improve = subparsers.add_parser("improve", help="Propose and apply safe project-local improvements")
     improve.add_argument("--root", default=".")
     improve.set_defaults(func=cmd_improve)
+
+    pending = subparsers.add_parser("list-pending", help="List improvement proposals not yet applied")
+    pending.add_argument("--root", default=".")
+    pending.set_defaults(func=cmd_list_pending)
+
+    approve = subparsers.add_parser("approve", help="Approve and apply a specific improvement by ID")
+    approve.add_argument("improvement_id", help="The proposal ID to approve (e.g. imp-prevent-cq)")
+    approve.add_argument("--root", default=".")
+    approve.set_defaults(func=cmd_approve)
 
     return parser
 
