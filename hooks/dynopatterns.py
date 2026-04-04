@@ -2,6 +2,7 @@
 """Generate dynos_patterns.md from live runtime data."""
 
 from __future__ import annotations
+import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import argparse
 from pathlib import Path

@@ -2,6 +2,7 @@
 """Build lineage graph for learned components, fixtures, runs, and source tasks."""
 
 from __future__ import annotations
+import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import argparse
 import json

@@ -6,6 +6,7 @@ Returns structured spawn decisions. No prompt interpretation needed.
 """
 
 from __future__ import annotations
+import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import argparse
 import json
