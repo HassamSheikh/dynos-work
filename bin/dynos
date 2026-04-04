@@ -35,6 +35,7 @@ Subcommands:
   bench       Benchmark runner                        (dynobench.py)
   report      Generate reports                        (dynoreport.py)
   proactive   Autonomous autofix scanner              (dynoproactive.py)
+  init        Set up current project (register + start daemon)
 
 Run 'dynos <subcommand> --help' for details.
 EOF
@@ -63,6 +64,35 @@ case "$cmd" in
   bench)      exec python3 "${HOOKS_DIR}/dynobench.py" "$@" ;;
   report)     exec python3 "${HOOKS_DIR}/dynoreport.py" "$@" ;;
   proactive)  exec python3 "${HOOKS_DIR}/dynoproactive.py" "$@" ;;
+  init)
+    # Register + start daemon in one step
+    # Usage: dynos init [--autofix]
+    root="$(pwd)"
+    if [ ! -d "$root/.git" ]; then
+      echo "Error: not a git repository" >&2
+      exit 1
+    fi
+    autofix=""
+    for arg in "$@"; do
+      case "$arg" in
+        --autofix) autofix="--autofix" ;;
+      esac
+    done
+    echo "Registering project..."
+    python3 "${HOOKS_DIR}/dynoregistry.py" register "$root" 2>/dev/null || true
+    mkdir -p "$root/.dynos"
+    echo "Starting local daemon..."
+    python3 "${HOOKS_DIR}/dynomaintain.py" start --root "$root" $autofix 2>/dev/null || true
+    echo ""
+    echo "Project ready: $root"
+    if [ -n "$autofix" ]; then
+      echo "Daemon running with autofix"
+    else
+      echo "Daemon running (use --autofix to enable autofix)"
+    fi
+    echo ""
+    echo "Next: use /dynos-work:start in Claude Code to begin a task"
+    ;;
   help|-h|--help) usage ;;
   *) echo "Unknown subcommand: $cmd" >&2; usage >&2; exit 1 ;;
 esac

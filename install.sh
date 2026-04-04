@@ -240,9 +240,8 @@ main() {
     echo "  To set up a project:"
     echo ""
     echo "    cd /path/to/your/project"
-    echo "    dynos registry register ."
-    echo "    dynos local start --root ."
-    echo "    dynos local start --root . --autofix   # with autofix"
+    echo "    dynos init              # register + start daemon"
+    echo "    dynos init --autofix    # with autofix"
 
     # Developer extras
     if [ "$DEV_MODE" = true ]; then
