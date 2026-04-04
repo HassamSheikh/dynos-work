@@ -749,7 +749,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp_logs.add_argument("--last", default="10", help="Number of recent sweeps to show")
     sp_logs.set_defaults(func=cmd_logs)
 
-    sp_dash = subparsers.add_parser("dashboard", help="Generate global dashboard")
+    sp_dash = subparsers.add_parser("dashboard", help="Generate or serve global dashboard")
+    dash_sub = sp_dash.add_subparsers(dest="dash_command")
+    dash_gen = dash_sub.add_parser("generate", help="Generate dashboard HTML (default)")
+    dash_gen.set_defaults(func=cmd_dashboard_shim)
+    dash_serve = dash_sub.add_parser("serve", help="Generate and serve on local HTTP server")
+    dash_serve.add_argument("--port", type=int, default=8766, help="Port to serve on")
+    dash_serve.set_defaults(func=cmd_serve_shim)
     sp_dash.set_defaults(func=cmd_dashboard_shim)
 
     return parser
@@ -759,6 +765,12 @@ def cmd_dashboard_shim(args: argparse.Namespace) -> int:
     """Shim that imports and delegates to dynoglobal_dashboard."""
     from dynoglobal_dashboard import cmd_dashboard
     return cmd_dashboard(args)
+
+
+def cmd_serve_shim(args: argparse.Namespace) -> int:
+    """Shim that imports and delegates to dynoglobal_dashboard serve."""
+    from dynoglobal_dashboard import cmd_serve
+    return cmd_serve(args)
 
 
 def main() -> int:

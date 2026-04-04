@@ -5,7 +5,10 @@ from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import json
+import os
 import sys
+from http import HTTPStatus
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from dynodashboard import build_dashboard_payload
@@ -802,6 +805,21 @@ def write_global_dashboard(payload: dict) -> dict:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+_ALLOWED_SERVE_FILES = {"global-dashboard.html", "global-dashboard-data.json"}
+
+
+class _RestrictedHandler(SimpleHTTPRequestHandler):
+    def do_GET(self) -> None:
+        path = self.path.split("?")[0].lstrip("/")
+        if path not in _ALLOWED_SERVE_FILES:
+            self.send_error(HTTPStatus.FORBIDDEN, "Access denied")
+            return
+        super().do_GET()
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
 def cmd_dashboard(args: object) -> int:
     """CLI entry point. Build payload, write dashboard, print JSON to stdout."""
     try:
@@ -814,3 +832,33 @@ def cmd_dashboard(args: object) -> int:
     result = write_global_dashboard(payload)
     print(json.dumps(result, indent=2))
     return 0 if result.get("ok") else 1
+
+
+def cmd_serve(args: object) -> int:
+    """Generate the global dashboard and serve it on a local HTTP server."""
+    port: int = getattr(args, "port", 8766)
+
+    try:
+        payload = build_global_payload()
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        return 1
+
+    write_global_dashboard(payload)
+
+    from dynoglobal import global_home
+    serve_dir = global_home()
+    os.chdir(serve_dir)
+
+    url = f"http://127.0.0.1:{port}/global-dashboard.html"
+    print(json.dumps({"url": url}, indent=2))
+    sys.stdout.flush()
+
+    server = ThreadingHTTPServer(("127.0.0.1", port), _RestrictedHandler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
