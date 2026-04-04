@@ -33,6 +33,10 @@ def stop_path(root: Path) -> Path:
     return maintenance_dir(root) / "stop"
 
 
+def log_path(root: Path) -> Path:
+    return maintenance_dir(root) / "cycles.jsonl"
+
+
 def policy_path(root: Path) -> Path:
     return _persistent_project_dir(root) / "policy.json"
 
@@ -131,13 +135,26 @@ def maintenance_cycle(root: Path) -> dict:
         "executed_at": now_iso(),
         "actions": actions,
         "ok": all(item["returncode"] == 0 for item in actions),
+        "failed_steps": [a["name"] for a in actions if a["returncode"] != 0],
+        "duration_steps": len(actions),
     }
+    # Append to cycle log (JSONL — one line per cycle, append-only)
+    lp = log_path(root)
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    with open(lp, "a") as f:
+        f.write(json.dumps(cycle) + "\n")
+    # Read cycle count from log
+    try:
+        cycle_count = sum(1 for _ in open(lp))
+    except OSError:
+        cycle_count = 1
     write_status(
         root,
         {
             "updated_at": now_iso(),
             "running": False,
             "last_cycle": cycle,
+            "cycle_count": cycle_count,
             "pid": current_pid(root),
         },
     )
@@ -175,6 +192,10 @@ def cmd_run_loop(args: argparse.Namespace) -> int:
     try:
         while not _SHOULD_STOP and not stop_path(root).exists():
             cycle = maintenance_cycle(root)
+            try:
+                cycle_count = sum(1 for _ in open(log_path(root)))
+            except OSError:
+                cycle_count = 1
             write_status(
                 root,
                 {
@@ -183,6 +204,7 @@ def cmd_run_loop(args: argparse.Namespace) -> int:
                     "pid": os.getpid(),
                     "poll_seconds": poll_seconds,
                     "last_cycle": cycle,
+                    "cycle_count": cycle_count,
                 },
             )
             for _ in range(poll_seconds):
@@ -286,7 +308,46 @@ def cmd_status(args: argparse.Namespace) -> int:
             payload = {"running": False, "pid": None}
     payload["running"] = current_pid(root) is not None
     payload["pid"] = current_pid(root)
+    # Summarize recent cycle history
+    lp = log_path(root)
+    if lp.exists():
+        try:
+            lines = lp.read_text().strip().splitlines()
+            cycles = [json.loads(l) for l in lines if l.strip()]
+            payload["cycle_count"] = len(cycles)
+            recent = cycles[-5:]
+            payload["recent_cycles"] = [
+                {
+                    "executed_at": c.get("executed_at"),
+                    "ok": c.get("ok"),
+                    "failed_steps": c.get("failed_steps", []),
+                }
+                for c in recent
+            ]
+            failures = sum(1 for c in cycles if not c.get("ok"))
+            payload["total_failures"] = failures
+        except (json.JSONDecodeError, OSError):
+            pass
     print(json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Show recent maintenance cycle logs."""
+    root = Path(args.root).resolve()
+    lp = log_path(root)
+    if not lp.exists():
+        print(json.dumps({"cycles": [], "message": "No cycle logs yet"}))
+        return 0
+    try:
+        lines = lp.read_text().strip().splitlines()
+        cycles = [json.loads(l) for l in lines if l.strip()]
+    except (json.JSONDecodeError, OSError) as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+    n = int(args.last or 10)
+    recent = cycles[-n:]
+    print(json.dumps({"total_cycles": len(cycles), "showing": len(recent), "cycles": recent}, indent=2))
     return 0
 
 
@@ -323,6 +384,11 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Show maintainer status")
     status.add_argument("--root", default=".")
     status.set_defaults(func=cmd_status)
+
+    logs = subparsers.add_parser("logs", help="Show recent maintenance cycle logs")
+    logs.add_argument("--root", default=".")
+    logs.add_argument("--last", default="10", help="Number of recent cycles to show (default: 10)")
+    logs.set_defaults(func=cmd_logs)
 
     return parser
 

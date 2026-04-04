@@ -30,6 +30,7 @@ Subcommands:
   evolve      Learned agent management                (dynoevolve.py)
   trajectory  Trajectory store operations             (dynostrajectory.py)
   dashboard   Generate web dashboard                  (dynodashboard.py)
+  maintain    Daemon: start, stop, status, logs      (dynomaintain.py)
   bench       Benchmark runner                        (dynobench.py)
   report      Generate reports                        (dynoreport.py)
 
@@ -55,6 +56,7 @@ case "$cmd" in
   evolve)     exec python3 "${HOOKS_DIR}/dynoevolve.py" "$@" ;;
   trajectory) exec python3 "${HOOKS_DIR}/dynostrajectory.py" "$@" ;;
   dashboard)  exec python3 "${HOOKS_DIR}/dynodashboard.py" "$@" ;;
+  maintain)   exec python3 "${HOOKS_DIR}/dynomaintain.py" "$@" ;;
   bench)      exec python3 "${HOOKS_DIR}/dynobench.py" "$@" ;;
   report)     exec python3 "${HOOKS_DIR}/dynoreport.py" "$@" ;;
   help|-h|--help) usage ;;
