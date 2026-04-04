@@ -1945,8 +1945,10 @@ def cmd_serve(args: object) -> int:
     print(json.dumps({"url": url}, indent=2))
     sys.stdout.flush()
 
-    ThreadingHTTPServer.allow_reuse_address = True
-    server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
+    class _ReuseServer(ThreadingHTTPServer):
+        allow_reuse_address = True
+        allow_reuse_port = True
+    server = _ReuseServer(("127.0.0.1", port), handler_cls)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
