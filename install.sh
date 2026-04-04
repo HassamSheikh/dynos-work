@@ -155,6 +155,24 @@ step_daemon() {
     ok "Local daemon started"
 }
 
+step_plugin() {
+    if ! command -v claude >/dev/null 2>&1; then
+        warn "claude CLI not found. Skipping plugin install."
+        warn "Install the plugin manually in Claude Code: /plugin install dynos-work"
+        return
+    fi
+
+    # Check if marketplace is added
+    if ! claude plugin marketplace list 2>/dev/null | grep -q "HassamSheikh"; then
+        info "Adding dynos-work marketplace"
+        claude plugin marketplace add HassamSheikh/dynos-work 2>/dev/null || true
+    fi
+
+    info "Installing dynos-work plugin"
+    claude plugin install dynos-work 2>/dev/null || true
+    ok "Claude Code plugin installed (slash commands ready)"
+}
+
 step_global_daemon() {
     info "Starting global daemon"
     PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynoglobal.py" start >/dev/null 2>&1 || true
@@ -194,6 +212,7 @@ main() {
     step_clone
     step_path
     step_global_dirs
+    step_plugin
 
     # Register and start daemon if in a project directory
     if [ -d "$(pwd)/.git" ]; then
