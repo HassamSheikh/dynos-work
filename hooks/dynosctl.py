@@ -74,6 +74,16 @@ def cmd_check_ownership(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_list_pending(args: argparse.Namespace) -> int:
+    from dynopostmortem import cmd_list_pending as _list_pending
+    return _list_pending(args)
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    from dynopostmortem import cmd_approve as _approve
+    return _approve(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -102,6 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
     ownership_parser.add_argument("segment_id")
     ownership_parser.add_argument("files", nargs="+")
     ownership_parser.set_defaults(func=cmd_check_ownership)
+
+    pending_parser = subparsers.add_parser("list-pending", help="List unapplied improvement proposals")
+    pending_parser.add_argument("--root", default=".")
+    pending_parser.set_defaults(func=cmd_list_pending)
+
+    approve_parser = subparsers.add_parser("approve", help="Approve and apply an improvement by ID")
+    approve_parser.add_argument("improvement_id", help="Proposal ID (e.g. imp-prevent-cq)")
+    approve_parser.add_argument("--root", default=".")
+    approve_parser.set_defaults(func=cmd_approve)
 
     return parser
 
