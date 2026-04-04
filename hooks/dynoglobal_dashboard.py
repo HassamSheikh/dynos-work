@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
 import json
+import os
+import signal
 import sys
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -841,9 +843,34 @@ def cmd_dashboard(args: object) -> int:
     return 0 if result.get("ok") else 1
 
 
+def _dashboard_pid_path() -> Path:
+    """Path to the dashboard server PID file."""
+    from dynoglobal import global_home
+    return global_home() / "dashboard.pid"
+
+
+def _read_dashboard_pid() -> int | None:
+    """Read the dashboard server PID if running."""
+    pid_path = _dashboard_pid_path()
+    if not pid_path.exists():
+        return None
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)  # check alive
+        return pid
+    except (ValueError, OSError):
+        pid_path.unlink(missing_ok=True)
+        return None
+
+
 def cmd_serve(args: object) -> int:
     """Generate the global dashboard and serve it on a local HTTP server."""
     port: int = getattr(args, "port", 8766)
+
+    existing = _read_dashboard_pid()
+    if existing:
+        print(json.dumps({"ok": False, "error": f"dashboard server already running (PID {existing}). Use 'dashboard kill' first."}))
+        return 1
 
     try:
         payload = build_global_payload()
@@ -857,10 +884,15 @@ def cmd_serve(args: object) -> int:
     serve_dir = str(global_home())
     handler_cls = _make_restricted_handler(serve_dir)
 
+    # Write PID file
+    pid_path = _dashboard_pid_path()
+    pid_path.write_text(str(os.getpid()))
+
     url = f"http://127.0.0.1:{port}/global-dashboard.html"
     print(json.dumps({"url": url}, indent=2))
     sys.stdout.flush()
 
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
     try:
         server.serve_forever()
@@ -868,4 +900,36 @@ def cmd_serve(args: object) -> int:
         pass
     finally:
         server.server_close()
+        pid_path.unlink(missing_ok=True)
     return 0
+
+
+def cmd_kill(args: object) -> int:
+    """Stop the running dashboard server."""
+    pid = _read_dashboard_pid()
+    if pid is None:
+        print(json.dumps({"ok": True, "message": "no dashboard server running"}))
+        return 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(json.dumps({"ok": True, "message": f"killed dashboard server (PID {pid})"}))
+    except OSError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
+    _dashboard_pid_path().unlink(missing_ok=True)
+    return 0
+
+
+def cmd_restart(args: object) -> int:
+    """Restart the dashboard server (kill + serve)."""
+    pid = _read_dashboard_pid()
+    if pid is not None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(json.dumps({"message": f"killed old server (PID {pid})"}), flush=True)
+        except OSError:
+            pass
+        _dashboard_pid_path().unlink(missing_ok=True)
+        import time
+        time.sleep(0.5)  # let port release
+    return cmd_serve(args)

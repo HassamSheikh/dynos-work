@@ -756,6 +756,11 @@ def build_parser() -> argparse.ArgumentParser:
     dash_serve = dash_sub.add_parser("serve", help="Generate and serve on local HTTP server")
     dash_serve.add_argument("--port", type=int, default=8766, help="Port to serve on")
     dash_serve.set_defaults(func=cmd_serve_shim)
+    dash_kill = dash_sub.add_parser("kill", help="Stop the dashboard server")
+    dash_kill.set_defaults(func=cmd_kill_shim)
+    dash_restart = dash_sub.add_parser("restart", help="Restart the dashboard server")
+    dash_restart.add_argument("--port", type=int, default=8766, help="Port to serve on")
+    dash_restart.set_defaults(func=cmd_restart_shim)
     sp_dash.set_defaults(func=cmd_dashboard_shim)
 
     return parser
@@ -771,6 +776,18 @@ def cmd_serve_shim(args: argparse.Namespace) -> int:
     """Shim that imports and delegates to dynoglobal_dashboard serve."""
     from dynoglobal_dashboard import cmd_serve
     return cmd_serve(args)
+
+
+def cmd_kill_shim(args: argparse.Namespace) -> int:
+    """Shim that imports and delegates to dynoglobal_dashboard kill."""
+    from dynoglobal_dashboard import cmd_kill
+    return cmd_kill(args)
+
+
+def cmd_restart_shim(args: argparse.Namespace) -> int:
+    """Shim that imports and delegates to dynoglobal_dashboard restart."""
+    from dynoglobal_dashboard import cmd_restart
+    return cmd_restart(args)
 
 
 def main() -> int:
