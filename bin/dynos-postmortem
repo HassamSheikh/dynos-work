@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# Thin wrapper for dynopostmortem.py — works from any directory.
-# Usage: dynos-postmortem generate --root /path/to/project
-#        dynos-postmortem improve --root /path/to/project
-HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
-PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" exec python3 "${HOOKS_DIR}/dynopostmortem.py" "$@"

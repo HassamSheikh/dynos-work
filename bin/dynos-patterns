@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Thin wrapper for dynopatterns.py — works from any directory.
-# Usage: dynos-patterns --root .
-HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
-PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" exec python3 "${HOOKS_DIR}/dynopatterns.py" "$@"

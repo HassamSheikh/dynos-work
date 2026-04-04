@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# Thin wrapper for dynoplanner.py — works from any directory.
-# Usage: dynos-planner start-plan --root . --task-dir .dynos/task-xxx --task-type feature --domains backend --risk-level low
-#        dynos-planner planning-mode --root . --task-type feature --risk-level high --ac-count 12
-#        dynos-planner task-policy --root . --task-dir .dynos/task-xxx
-HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
-PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" exec python3 "${HOOKS_DIR}/dynoplanner.py" "$@"

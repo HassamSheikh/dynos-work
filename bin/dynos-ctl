@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# Thin wrapper for dynosctl.py — works from any directory.
-# Usage: dynos-ctl list-pending --root .
-#        dynos-ctl approve imp-prevent-cq --root .
-#        dynos-ctl validate-task .dynos/task-xxx
-#        dynos-ctl transition .dynos/task-xxx EXECUTION
-#        dynos-ctl active-task
-HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
-PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" exec python3 "${HOOKS_DIR}/dynosctl.py" "$@"

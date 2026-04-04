@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Unified CLI for dynos-work. One command, all subcommands.
+#
+# Usage:
+#   dynos route audit-plan --root . --task-type feature --domains ui
+#   dynos plan start-plan --root . --task-dir .dynos/task-xxx ...
+#   dynos patterns --root .
+#   dynos ctl list-pending --root .
+#   dynos ctl approve imp-prevent-cq --root .
+#   dynos postmortem improve --root .
+#   dynos registry register /path/to/project
+#   dynos global status
+
+set -euo pipefail
+HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
+export PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}"
+
+usage() {
+  cat <<EOF
+dynos — unified CLI for dynos-work
+
+Subcommands:
+  route       Deterministic audit/executor routing    (dynorouter.py)
+  plan        Start/planning policy resolution        (dynoplanner.py)
+  patterns    Generate JSON policy + markdown patterns (dynopatterns.py)
+  ctl         Task lifecycle, approvals, validation   (dynosctl.py)
+  postmortem  Postmortems and improvements            (dynopostmortem.py)
+  registry    Project registration                    (dynoregistry.py)
+  global      Global registry operations              (dynoglobal.py)
+  evolve      Learned agent management                (dynoevolve.py)
+  trajectory  Trajectory store operations             (dynostrajectory.py)
+  dashboard   Generate web dashboard                  (dynodashboard.py)
+  bench       Benchmark runner                        (dynobench.py)
+  report      Generate reports                        (dynoreport.py)
+
+Run 'dynos <subcommand> --help' for details.
+EOF
+}
+
+if [ $# -eq 0 ]; then
+  usage
+  exit 0
+fi
+
+cmd="$1"; shift
+
+case "$cmd" in
+  route)      exec python3 "${HOOKS_DIR}/dynorouter.py" "$@" ;;
+  plan)       exec python3 "${HOOKS_DIR}/dynoplanner.py" "$@" ;;
+  patterns)   exec python3 "${HOOKS_DIR}/dynopatterns.py" "$@" ;;
+  ctl)        exec python3 "${HOOKS_DIR}/dynosctl.py" "$@" ;;
+  postmortem) exec python3 "${HOOKS_DIR}/dynopostmortem.py" "$@" ;;
+  registry)   exec python3 "${HOOKS_DIR}/dynoregistry.py" "$@" ;;
+  global)     exec python3 "${HOOKS_DIR}/dynoglobal.py" "$@" ;;
+  evolve)     exec python3 "${HOOKS_DIR}/dynoevolve.py" "$@" ;;
+  trajectory) exec python3 "${HOOKS_DIR}/dynostrajectory.py" "$@" ;;
+  dashboard)  exec python3 "${HOOKS_DIR}/dynodashboard.py" "$@" ;;
+  bench)      exec python3 "${HOOKS_DIR}/dynobench.py" "$@" ;;
+  report)     exec python3 "${HOOKS_DIR}/dynoreport.py" "$@" ;;
+  help|-h|--help) usage ;;
+  *) echo "Unknown subcommand: $cmd" >&2; usage >&2; exit 1 ;;
+esac
