@@ -168,10 +168,19 @@ def derive_health_tag(project_data: dict) -> str:
     return "healthy"
 
 
+def _collect_project_retrospectives(project_path: Path) -> list[dict]:
+    """Collect retrospective data for a project."""
+    from dynoslib_core import collect_retrospectives
+    try:
+        return collect_retrospectives(project_path)
+    except Exception:
+        return []
+
+
 def gather_all_projects() -> dict:
     """Load registry, iterate all projects (active/paused/archived).
 
-    Active: full payload + sparkline data.
+    Active: full payload + sparkline data + retrospectives + benchmark runs.
     Paused/archived: name, path, status, last_active_at only.
     Missing dirs: warning tag. Failed extraction: error tag + log.
     """
@@ -180,6 +189,17 @@ def gather_all_projects() -> dict:
 
     active_projects: list[dict] = []
     inactive_projects: list[dict] = []
+
+    _empty_proj = {
+        "stats": {},
+        "quality_scores": [],
+        "sparkline_svg": "",
+        "task_count": 0,
+        "learned_routes": 0,
+        "last_cycle_at": "",
+        "payload": {},
+        "retrospectives": [],
+    }
 
     for entry in projects_list:
         proj_path_str = entry.get("path", "")
@@ -205,12 +225,7 @@ def gather_all_projects() -> dict:
                 "last_active_at": entry.get("last_active_at", ""),
                 "health": "warning",
                 "warning": "directory missing",
-                "stats": {},
-                "quality_scores": [],
-                "sparkline_svg": "",
-                "task_count": 0,
-                "learned_routes": 0,
-                "last_cycle_at": "",
+                **_empty_proj,
             })
             log_global(f"global dashboard: missing directory for project {proj_path_str}")
             continue
@@ -221,8 +236,9 @@ def gather_all_projects() -> dict:
             payload = data.get("payload", {})
             quality_scores = data.get("quality_scores", [])
             summary = payload.get("summary", {})
+            retrospectives = _collect_project_retrospectives(proj_path)
 
-            sparkline_svg = build_sparkline_svg(quality_scores)
+            sparkline_svg = build_sparkline_svg(quality_scores, width=400, height=60)
             health = derive_health_tag(data)
 
             active_projects.append({
@@ -238,6 +254,8 @@ def gather_all_projects() -> dict:
                 "learned_routes": summary.get("active_routes", 0),
                 "last_cycle_at": payload.get("generated_at", ""),
                 "daemon_running": _check_project_daemon(proj_path),
+                "payload": payload,
+                "retrospectives": retrospectives,
             })
         except (OSError, json.JSONDecodeError) as exc:
             log_global(f"global dashboard: error extracting project {proj_path_str}: {exc}")
@@ -248,12 +266,7 @@ def gather_all_projects() -> dict:
                 "last_active_at": entry.get("last_active_at", ""),
                 "health": "error",
                 "error": str(exc),
-                "stats": {},
-                "quality_scores": [],
-                "sparkline_svg": "",
-                "task_count": 0,
-                "learned_routes": 0,
-                "last_cycle_at": "",
+                **_empty_proj,
             })
         except Exception as exc:
             log_global(f"global dashboard: unexpected error for {proj_path_str}: {exc}")
@@ -264,12 +277,7 @@ def gather_all_projects() -> dict:
                 "last_active_at": entry.get("last_active_at", ""),
                 "health": "error",
                 "error": str(exc),
-                "stats": {},
-                "quality_scores": [],
-                "sparkline_svg": "",
-                "task_count": 0,
-                "learned_routes": 0,
-                "last_cycle_at": "",
+                **_empty_proj,
             })
 
     return {
@@ -344,8 +352,26 @@ def _esc(value: object) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-def _render_active_card(proj: dict) -> str:
-    """Render a single active project card HTML fragment."""
+def _score_color(value: float) -> str:
+    """Return semantic CSS color for a score value: green >0.7, amber 0.4-0.7, red <0.4."""
+    if value > 0.7:
+        return "hsl(158 52% 58%)"
+    if value >= 0.4:
+        return "hsl(34 82% 64%)"
+    return "hsl(350 72% 68%)"
+
+
+def _score_tag_class(value: float) -> str:
+    """Return tag class for a score value."""
+    if value > 0.7:
+        return "tag"
+    if value >= 0.4:
+        return "tag warn"
+    return "tag danger"
+
+
+def _render_active_section(proj: dict) -> str:
+    """Render a full-detail project section HTML fragment."""
     name = _esc(proj.get("name", "unknown"))
     path = _esc(proj.get("path", ""))
     health = proj.get("health", "healthy")
@@ -354,8 +380,12 @@ def _render_active_card(proj: dict) -> str:
     last_cycle = _esc(proj.get("last_cycle_at", "n/a"))
     sparkline = proj.get("sparkline_svg", "")
     warning = proj.get("warning", "")
-    error = proj.get("error", "")
+    error_msg = proj.get("error", "")
     daemon_running = proj.get("daemon_running", False)
+    payload = proj.get("payload", {})
+    retrospectives = proj.get("retrospectives", [])
+    stats = proj.get("stats", {})
+    summary = payload.get("summary", {})
 
     health_class = "tag"
     health_label = health
@@ -370,37 +400,270 @@ def _render_active_card(proj: dict) -> str:
         else '<span class="tag warn" style="font-size:11px;padding:3px 8px;">daemon stopped</span>'
     )
 
+    # --- Header ---
     extra_info = ""
     if warning:
-        extra_info = f'<div class="mini" style="color:hsl(34 82% 64%);">{_esc(warning)}</div>'
-    elif error:
-        extra_info = f'<div class="mini" style="color:hsl(350 72% 68%);">{_esc(error)}</div>'
+        extra_info = f'<div class="mini" style="color:hsl(34 82% 64%);margin-top:4px;">{_esc(warning)}</div>'
+    elif error_msg:
+        extra_info = f'<div class="mini" style="color:hsl(350 72% 68%);margin-top:4px;">{_esc(error_msg)}</div>'
 
+    header = (
+        f'<div class="proj-header">'
+        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">'
+        f'<div>'
+        f'<div style="font-weight:800;font-size:18px;">{name}</div>'
+        f'<div class="mini" style="word-break:break-all;">{path}</div>'
+        f'</div>'
+        f'<div style="display:flex;gap:8px;align-items:center;">'
+        f'{daemon_badge}'
+        f'<span class="{health_class}">{_esc(health_label)}</span>'
+        f'</div>'
+        f'</div>'
+        f'{extra_info}'
+        f'</div>'
+    )
+
+    # --- Stats row ---
+    avg_quality = stats.get("average_quality_score", 0.0)
+    avg_cost = 0.0
+    avg_efficiency = 0.0
+    if retrospectives:
+        costs = [r.get("cost_score", 0) for r in retrospectives if isinstance(r.get("cost_score"), (int, float))]
+        effs = [r.get("efficiency_score", 0) for r in retrospectives if isinstance(r.get("efficiency_score"), (int, float))]
+        if costs:
+            avg_cost = sum(costs) / len(costs)
+        if effs:
+            avg_efficiency = sum(effs) / len(effs)
+
+    benchmark_runs_count = summary.get("benchmark_runs", 0)
+    learned_components = summary.get("learned_components", 0)
+
+    stats_row = (
+        f'<div class="proj-stats-row">'
+        f'<div class="proj-stat"><span class="proj-stat-val">{task_count}</span><span class="proj-stat-lbl">Tasks</span></div>'
+        f'<div class="proj-stat"><span class="proj-stat-val" style="color:{_score_color(avg_quality)}">{avg_quality:.2f}</span><span class="proj-stat-lbl">Quality</span></div>'
+        f'<div class="proj-stat"><span class="proj-stat-val" style="color:{_score_color(avg_cost)}">{avg_cost:.2f}</span><span class="proj-stat-lbl">Cost</span></div>'
+        f'<div class="proj-stat"><span class="proj-stat-val" style="color:{_score_color(avg_efficiency)}">{avg_efficiency:.2f}</span><span class="proj-stat-lbl">Efficiency</span></div>'
+        f'<div class="proj-stat"><span class="proj-stat-val">{learned_components}</span><span class="proj-stat-lbl">Learned</span></div>'
+        f'<div class="proj-stat"><span class="proj-stat-val">{benchmark_runs_count}</span><span class="proj-stat-lbl">Benchmarks</span></div>'
+        f'</div>'
+    )
+
+    # --- Quality sparkline ---
     sparkline_html = sparkline if sparkline else (
-        '<div style="border:1px dashed hsla(210 30% 80% / 0.14);border-radius:8px;'
-        'height:40px;display:flex;align-items:center;justify-content:center;'
-        'color:var(--muted);font-size:11px;font-style:italic;">no retrospectives</div>'
+        '<div class="empty-state" style="min-height:40px;padding:12px 16px;">'
+        '<span>No retrospectives yet. Complete a task to see quality trends.</span></div>'
+    )
+    sparkline_section = (
+        f'<div style="margin:12px 0;">'
+        f'<div class="mini" style="margin-bottom:6px;text-transform:uppercase;letter-spacing:0.1em;font-weight:700;">Quality Trend</div>'
+        f'<div style="height:64px;border:1px solid var(--line);border-radius:10px;'
+        f'background:linear-gradient(180deg, hsla(158 58% 50% / 0.06), transparent);padding:2px;overflow:hidden;">'
+        f'{sparkline_html}'
+        f'</div>'
+        f'</div>'
+    )
+
+    # --- Active Routes table ---
+    active_routes = payload.get("active_routes", [])
+    if active_routes:
+        route_rows = ""
+        for r in active_routes:
+            comp = float(r.get("composite", 0))
+            route_rows += (
+                f'<tr>'
+                f'<td>{_esc(r.get("agent_name", ""))}</td>'
+                f'<td>{_esc(r.get("role", ""))}</td>'
+                f'<td>{_esc(r.get("task_type", ""))}</td>'
+                f'<td>{_esc(r.get("mode", ""))}</td>'
+                f'<td style="color:{_score_color(comp)};font-weight:700;">{comp:.3f}</td>'
+                f'</tr>'
+            )
+        routes_table = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Active Routes</div>'
+            f'<div class="table-scroll"><table class="dtable" aria-label="Active routes for {name}">'
+            f'<thead><tr><th>Agent</th><th>Role</th><th>Task Type</th><th>Mode</th><th>Composite</th></tr></thead>'
+            f'<tbody>{route_rows}</tbody>'
+            f'</table></div></div>'
+        )
+    else:
+        routes_table = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Active Routes</div>'
+            f'<div class="empty-state"><span>No active learned routes. Using generic fallback.</span></div>'
+            f'</div>'
+        )
+
+    # --- Recent Tasks table (from retrospectives) ---
+    if retrospectives:
+        # Sort by task_id descending, limit to 10 most recent
+        sorted_retros = sorted(retrospectives, key=lambda r: r.get("task_id", ""), reverse=True)[:10]
+        task_rows = ""
+        for r in sorted_retros:
+            qs = float(r.get("quality_score", 0))
+            cs = float(r.get("cost_score", 0))
+            es = float(r.get("efficiency_score", 0))
+            findings_by_cat = r.get("findings_by_category", {})
+            findings_summary = ", ".join(f'{_esc(k)}:{v}' for k, v in findings_by_cat.items()) if findings_by_cat else "none"
+            repairs = r.get("repair_cycle_count", 0)
+            task_rows += (
+                f'<tr>'
+                f'<td class="mono">{_esc(r.get("task_id", ""))}</td>'
+                f'<td>{_esc(r.get("task_type", ""))}</td>'
+                f'<td><span class="{_score_tag_class(1.0 if r.get("task_outcome") == "DONE" else 0.0)}">'
+                f'{_esc(r.get("task_outcome", ""))}</span></td>'
+                f'<td style="color:{_score_color(qs)};font-weight:700;">{qs:.2f}</td>'
+                f'<td style="color:{_score_color(cs)};font-weight:700;">{cs:.2f}</td>'
+                f'<td style="color:{_score_color(es)};font-weight:700;">{es:.2f}</td>'
+                f'<td class="mini">{findings_summary}</td>'
+                f'<td>{repairs}</td>'
+                f'</tr>'
+            )
+        tasks_table = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Recent Tasks</div>'
+            f'<div class="table-scroll"><table class="dtable" aria-label="Recent tasks for {name}">'
+            f'<thead><tr><th>Task ID</th><th>Type</th><th>Outcome</th><th>Quality</th>'
+            f'<th>Cost</th><th>Efficiency</th><th>Findings</th><th>Repairs</th></tr></thead>'
+            f'<tbody>{task_rows}</tbody>'
+            f'</table></div></div>'
+        )
+    else:
+        tasks_table = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Recent Tasks</div>'
+            f'<div class="empty-state"><span>No tasks completed yet. Run a task to see results.</span></div>'
+            f'</div>'
+        )
+
+    # --- Benchmark Runs table ---
+    recent_runs = payload.get("recent_runs", [])
+    if recent_runs:
+        bench_rows = ""
+        for run in recent_runs:
+            target = _esc(run.get("target_name", "unknown"))
+            fixture = _esc(run.get("fixture_id", run.get("run_id", "")))
+            executed = _esc(run.get("executed_at", ""))
+            cases = run.get("cases", [])
+            case_count = len(cases) if isinstance(cases, list) else 0
+            eval_rec = run.get("evaluation", {}).get("recommendation", "recorded")
+            bench_rows += (
+                f'<tr>'
+                f'<td>{target}</td>'
+                f'<td class="mono">{fixture}</td>'
+                f'<td class="mini">{executed}</td>'
+                f'<td>{case_count}</td>'
+                f'<td><span class="tag">{_esc(eval_rec)}</span></td>'
+                f'</tr>'
+            )
+        bench_table = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Benchmark Runs</div>'
+            f'<div class="table-scroll"><table class="dtable" aria-label="Benchmark runs for {name}">'
+            f'<thead><tr><th>Target</th><th>Fixture</th><th>Date</th><th>Cases</th><th>Result</th></tr></thead>'
+            f'<tbody>{bench_rows}</tbody>'
+            f'</table></div></div>'
+        )
+    else:
+        bench_table = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Benchmark Runs</div>'
+            f'<div class="empty-state"><span>No benchmark runs yet.</span></div>'
+            f'</div>'
+        )
+
+    # --- Findings summary (aggregated across all retrospectives) ---
+    agg_findings: dict[str, int] = {}
+    for r in retrospectives:
+        fbc = r.get("findings_by_category", {})
+        if isinstance(fbc, dict):
+            for cat, count in fbc.items():
+                if isinstance(count, (int, float)):
+                    agg_findings[cat] = agg_findings.get(cat, 0) + int(count)
+    if agg_findings:
+        cat_labels = {"sc": "Spec Completion", "sec": "Security", "cq": "Code Quality", "dc": "Dead Code"}
+        findings_items = ""
+        for cat, count in sorted(agg_findings.items(), key=lambda x: -x[1]):
+            label = cat_labels.get(cat, cat)
+            findings_items += (
+                f'<div class="finding-chip">'
+                f'<span class="finding-label">{_esc(label)}</span>'
+                f'<span class="finding-count">{count}</span>'
+                f'</div>'
+            )
+        findings_section = (
+            f'<div class="detail-section">'
+            f'<div class="section-title">Findings Summary</div>'
+            f'<div class="findings-grid">{findings_items}</div>'
+            f'</div>'
+        )
+    else:
+        findings_section = ""
+
+    # --- Alerts section (demotions, coverage gaps, automation queue) ---
+    demotions = payload.get("demotions", [])
+    coverage_gaps = payload.get("coverage_gaps", [])
+    automation_queue = payload.get("automation_queue", [])
+
+    alerts_items = ""
+    for d in demotions:
+        alerts_items += (
+            f'<div class="alert-row">'
+            f'<span class="tag danger">demotion</span>'
+            f'<span>{_esc(d.get("agent_name", ""))}</span>'
+            f'<span class="mini">{_esc(d.get("role", ""))} / {_esc(d.get("task_type", ""))}</span>'
+            f'</div>'
+        )
+    for g in coverage_gaps:
+        alerts_items += (
+            f'<div class="alert-row">'
+            f'<span class="tag warn">gap</span>'
+            f'<span>{_esc(g.get("target_name", ""))}</span>'
+            f'<span class="mini">{_esc(g.get("role", ""))} / {_esc(g.get("task_type", ""))}</span>'
+            f'</div>'
+        )
+    for q in automation_queue:
+        alerts_items += (
+            f'<div class="alert-row">'
+            f'<span class="tag warn">queued</span>'
+            f'<span>{_esc(q.get("agent_name", ""))}</span>'
+            f'<span class="mini">{_esc(q.get("reason", "queued"))}</span>'
+            f'</div>'
+        )
+
+    if alerts_items:
+        alerts_section = (
+            f'<div class="detail-section">'
+            f'<div class="section-title" style="color:hsl(350 72% 68%);">Alerts</div>'
+            f'{alerts_items}'
+            f'</div>'
+        )
+    else:
+        alerts_section = ""
+
+    # --- Lineage summary ---
+    lineage = payload.get("lineage", {})
+    lineage_nodes = lineage.get("nodes", 0)
+    lineage_edges = lineage.get("edges", 0)
+    lineage_line = (
+        f'<div class="mini" style="margin-top:8px;">Lineage: {lineage_nodes} nodes / {lineage_edges} edges '
+        f'| Last cycle: {last_cycle}</div>'
     )
 
     return (
-        f'<div class="panel project-card">'
-        f'<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px;">'
-        f'<div>'
-        f'<div style="font-weight:800;font-size:15px;">{name}</div>'
-        f'<div class="mini" style="word-break:break-all;">{path}</div>'
+        f'<div class="panel project-section">'
+        f'{header}'
+        f'{stats_row}'
+        f'{sparkline_section}'
+        f'<div class="detail-grid">'
+        f'{routes_table}'
+        f'{tasks_table}'
         f'</div>'
-        f'<span class="{health_class}">{_esc(health_label)}</span>'
-        f'</div>'
-        f'{extra_info}'
-        f'<div style="display:flex;gap:8px;align-items:center;margin:8px 0;">'
-        f'{daemon_badge}'
-        f'</div>'
-        f'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:10px 0;">'
-        f'<div class="mini"><span style="font-weight:700;color:var(--text);">{task_count}</span> tasks</div>'
-        f'<div class="mini"><span style="font-weight:700;color:var(--text);">{learned_routes}</span> routes</div>'
-        f'<div class="mini">cycle: {last_cycle}</div>'
-        f'</div>'
-        f'<div style="height:44px;">{sparkline_html}</div>'
+        f'{bench_table}'
+        f'{findings_section}'
+        f'{alerts_section}'
+        f'{lineage_line}'
         f'</div>'
     )
 
@@ -451,9 +714,9 @@ def _render_html(payload: dict) -> str:
     total_learned = aggregates.get("total_learned_routes", 0)
     active_count = aggregates.get("active_count", 0)
 
-    # Build active project cards
+    # Build active project sections (full detail)
     if active_projects:
-        active_cards_html = "\n".join(_render_active_card(p) for p in active_projects)
+        active_cards_html = "\n".join(_render_active_section(p) for p in active_projects)
     else:
         active_cards_html = (
             '<div class="empty-state">'
@@ -612,6 +875,10 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 12px;
       color: var(--muted);
     }}
+    .mono {{
+      font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", "Fira Code", monospace;
+      font-size: 12px;
+    }}
     .tag {{
       display: inline-flex;
       align-items: center;
@@ -650,6 +917,134 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
       text-align: center;
       min-height: 64px;
     }}
+    /* -- Project sections (full detail) -- */
+    .project-section {{
+      margin-bottom: 24px;
+    }}
+    .proj-header {{
+      margin-bottom: 14px;
+    }}
+    .proj-stats-row {{
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      margin: 12px 0;
+    }}
+    .proj-stat {{
+      background: hsla(215 20% 16% / 0.72);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      text-align: center;
+    }}
+    .proj-stat-val {{
+      display: block;
+      font-size: 1.3rem;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum";
+    }}
+    .proj-stat-lbl {{
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-top: 2px;
+    }}
+    .detail-grid {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin: 14px 0;
+    }}
+    .detail-section {{
+      margin: 10px 0;
+    }}
+    .section-title {{
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--sky);
+      margin-bottom: 8px;
+      font-weight: 700;
+    }}
+    /* -- Tables -- */
+    .table-scroll {{
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+    }}
+    .dtable {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      white-space: nowrap;
+    }}
+    .dtable thead th {{
+      background: hsla(215 20% 16% / 0.72);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      position: sticky;
+      top: 0;
+    }}
+    .dtable tbody td {{
+      padding: 7px 12px;
+      border-bottom: 1px solid hsla(210 30% 80% / 0.05);
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .dtable tbody tr:last-child td {{
+      border-bottom: none;
+    }}
+    .dtable tbody tr:hover {{
+      background: hsla(158 58% 50% / 0.04);
+    }}
+    /* -- Findings chips -- */
+    .findings-grid {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    .finding-chip {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 6px 12px;
+    }}
+    .finding-label {{
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    .finding-count {{
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }}
+    /* -- Alert rows -- */
+    .alert-row {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: hsla(350 78% 62% / 0.04);
+      border: 1px solid hsla(350 78% 62% / 0.10);
+      margin-bottom: 6px;
+    }}
+    /* -- Inactive project cards -- */
     .project-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -691,18 +1086,26 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
     body.loaded .stats .stat:nth-child(4) {{ animation-delay: 0.28s; }}
     @media (max-width: 980px) {{
       .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .proj-stats-row {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+      .detail-grid {{ grid-template-columns: 1fr; }}
       .project-grid {{ grid-template-columns: 1fr; }}
       .shell {{ padding: 20px; }}
       .topbar {{ padding: 0 14px; }}
     }}
     @media (max-width: 600px) {{
       .stats {{ grid-template-columns: 1fr; }}
+      .proj-stats-row {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
+      .detail-grid {{ grid-template-columns: 1fr; }}
       .project-grid {{ grid-template-columns: 1fr; }}
       .shell {{ padding: 12px; }}
       .topbar {{ padding: 0 12px; height: 38px; }}
       .topbar-wordmark {{ font-size: 13px; }}
       .panel {{ padding: 16px; border-radius: 10px; }}
       .stat .value {{ font-size: 1.5rem; }}
+      .proj-stat-val {{ font-size: 1rem; }}
+      .dtable {{ font-size: 12px; }}
+      .dtable thead th {{ padding: 6px 8px; }}
+      .dtable tbody td {{ padding: 5px 8px; }}
     }}
   </style>
 </head>
@@ -715,7 +1118,7 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
   </nav>
   <div class="shell">
-    <section class="stats">
+    <section class="stats" id="stats">
       <div class="stat">
         <div class="label">Total Tasks</div>
         <div class="value">__TOTAL_TASKS__</div>
@@ -735,18 +1138,18 @@ GLOBAL_HTML_TEMPLATE = """<!DOCTYPE html>
     </section>
     <section>
       <div class="headline">Active Projects</div>
-      <div class="project-grid" style="margin-top:14px;">
+      <div style="margin-top:14px;">
         __ACTIVE_CARDS__
       </div>
     </section>
     __INACTIVE_SECTION__
-    <div class="mini" style="text-align:center;margin-top:28px;padding-bottom:16px;">
+    <div class="mini" style="text-align:center;margin-top:28px;padding-bottom:16px;" id="updated">
       Generated: __GENERATED_AT__
     </div>
   </div>
   <!-- Hidden elements to satisfy validate_generated_html() required IDs -->
   <div style="display:none">
-    <span id="stats"></span><span id="updated"></span><span id="lineage"></span>
+    <span id="lineage"></span>
     <span id="routes"></span><span id="queue"></span><span id="sparkline"></span>
     <span id="gaps"></span><span id="demotions"></span><span id="runs"></span>
   </div>
