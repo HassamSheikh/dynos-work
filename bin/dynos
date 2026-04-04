@@ -177,6 +177,10 @@ print('no')
         *) target="$arg" ;;
       esac
     done
+    # Stop daemon first if running
+    echo "Stopping daemon for $target..."
+    PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}" python3 "${HOOKS_DIR}/dynomaintain.py" stop --root "$target" 2>/dev/null || true
+    # Unregister
     exec python3 "${HOOKS_DIR}/dynoregistry.py" unregister "$target"
     ;;
   pause)
