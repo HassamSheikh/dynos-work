@@ -713,10 +713,13 @@ class TestBinDynosUnchanged:
     def test_no_new_subcommands_in_case_block(self) -> None:
         """The case block in bin/dynos has exactly the expected subcommands."""
         content = (ROOT / "bin" / "dynos").read_text()
-        # Extract subcommand names from case patterns like "  route)"
+        # Extract top-level subcommand names from case patterns like "  route)"
         import re
-        case_cmds = re.findall(r'^\s+(\w+)\)\s+exec', content, re.MULTILINE)
+        # Match only top-level case entries (2-space indent, not nested)
+        case_cmds = re.findall(r'^  (\w+)\)', content, re.MULTILINE)
         for cmd in case_cmds:
+            if cmd in ("help", "esac"):
+                continue
             assert cmd in self.EXPECTED_SUBCOMMANDS, (
                 f"bin/dynos has unexpected new subcommand: {cmd}"
             )
