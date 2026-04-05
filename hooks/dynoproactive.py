@@ -849,12 +849,21 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
             f"**Severity:** {finding['severity']}\n"
             f"**Description:** {description}\n\n"
             f"## Evidence\n```json\n{evidence_str}\n```\n\n"
-            f"This is an automated fix. Keep changes minimal and focused on this single finding. "
-            f"Do not refactor surrounding code. Commit with message: [autofix] {description[:80]}"
+            f"## CRITICAL RULES\n"
+            f"- Keep changes minimal and focused on this single finding.\n"
+            f"- Do NOT refactor surrounding code.\n"
+            f"- Do NOT run `git push` or push to any remote. The caller handles pushing.\n"
+            f"- Do NOT create PRs. The caller handles PR creation.\n"
+            f"- Stay on the current branch `{branch_name}`. Do NOT create new branches.\n"
+            f"- Commit message: [autofix] {description[:80]}"
         )
         _log(f"Running foundry pipeline for {finding_id}")
         claude_result = subprocess.run(
-            ["claude", "-p", prompt, "--dangerously-skip-permissions"],
+            [
+                "claude", "-p", prompt,
+                "--dangerously-skip-permissions",
+                "--disallowedTools", "Bash(git push*) Bash(gh pr*)",
+            ],
             capture_output=True, text=True, timeout=600, cwd=worktree_path,
         )
 
