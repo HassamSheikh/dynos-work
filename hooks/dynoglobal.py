@@ -245,7 +245,6 @@ def merge_policy(project_root: Path) -> dict:
 # ---------------------------------------------------------------------------
 # Statistics extraction (delegated to dynoglobal_stats)
 # ---------------------------------------------------------------------------
-from dynoglobal_stats import extract_project_stats  # noqa: E402
 
 
 def aggregate_cross_project_stats() -> dict:
