@@ -47,8 +47,11 @@ def _expected_budget(risk_level: str, task_type: str, multiplier: float = 1.0) -
 
 def _read_execution_log(task_dir: Path) -> str:
     path = task_dir / "execution-log.md"
-    if path.exists():
-        return path.read_text()
+    try:
+        if path.exists():
+            return path.read_text()
+    except OSError:
+        return ""
     return ""
 
 
