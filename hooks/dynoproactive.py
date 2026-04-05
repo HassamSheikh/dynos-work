@@ -806,12 +806,8 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
         _log(f"Skipping fix for {finding_id}: gh CLI not available")
         return finding
 
-    if _is_git_dirty(root):
-        finding["status"] = "failed"
-        finding["fail_reason"] = "git_working_tree_dirty"
-        finding["processed_at"] = now_iso()
-        _log(f"Skipping fix for {finding_id}: git working tree is dirty")
-        return finding
+    # Note: dirty working tree is OK — worktrees provide full isolation.
+    # The worktree is created from HEAD, not the working tree.
 
     # Check for existing PR (AC 16)
     if _check_existing_pr(finding_id):
