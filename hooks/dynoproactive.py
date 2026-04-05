@@ -621,6 +621,11 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
             ["git", "worktree", "add", "--detach", worktree_path],
             capture_output=True, text=True, timeout=30, cwd=str(root), check=True,
         )
+        # Delete stale branch from previous failed attempt if it exists
+        subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            capture_output=True, text=True, timeout=15, cwd=worktree_path,
+        )
         subprocess.run(
             ["git", "checkout", "-b", branch_name],
             capture_output=True, text=True, timeout=15, cwd=worktree_path, check=True,
