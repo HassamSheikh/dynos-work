@@ -645,6 +645,57 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
         )
 
         if claude_result.returncode == 0:
+            # Check if Claude made any changes
+            diff_check = subprocess.run(
+                ["git", "diff", "--quiet"],
+                capture_output=True, timeout=10, cwd=worktree_path,
+            )
+            staged_check = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                capture_output=True, timeout=10, cwd=worktree_path,
+            )
+            has_changes = diff_check.returncode != 0 or staged_check.returncode != 0
+
+            if not has_changes:
+                # Claude ran but made no changes — check if it committed already
+                log_check = subprocess.run(
+                    ["git", "log", "main..HEAD", "--oneline"],
+                    capture_output=True, text=True, timeout=10, cwd=worktree_path,
+                )
+                has_changes = bool(log_check.stdout.strip())
+
+            if not has_changes:
+                finding["status"] = "failed"
+                finding["fail_reason"] = "claude_no_changes"
+                _log(f"Claude produced no changes for {finding_id}")
+                return finding
+
+            # Stage and commit if Claude didn't already commit
+            subprocess.run(
+                ["git", "add", "-A"],
+                capture_output=True, timeout=10, cwd=worktree_path,
+            )
+            subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                capture_output=True, timeout=10, cwd=worktree_path,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", f"[autofix] {description[:80]}",
+                 "--author", "dynos-autofix <autofix@dynos.fit>"],
+                capture_output=True, text=True, timeout=15, cwd=worktree_path,
+            )
+
+            # Push branch to remote
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", branch_name],
+                capture_output=True, text=True, timeout=30, cwd=worktree_path,
+            )
+            if push_result.returncode != 0:
+                finding["status"] = "failed"
+                finding["fail_reason"] = f"git_push_failed: {push_result.stderr.strip()}"
+                _log(f"Push failed for {finding_id}: {push_result.stderr.strip()}")
+                return finding
+
             # Create PR
             pr_body = (
                 f"## Autofix: {description}\n\n"
