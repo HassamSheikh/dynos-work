@@ -1978,6 +1978,7 @@ def cmd_kill(args: object) -> int:
 def cmd_restart(args: object) -> int:
     """Restart the dashboard server (kill + serve)."""
     import time
+    port: int = getattr(args, "port", 8766)
     pid = _read_dashboard_pid()
     if pid is not None:
         try:
