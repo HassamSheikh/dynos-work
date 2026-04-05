@@ -822,8 +822,9 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
     try:
         # Create worktree
         _log(f"Creating worktree at {worktree_path}")
+        # Always branch from main, not whatever branch the user is on
         subprocess.run(
-            ["git", "worktree", "add", "--detach", worktree_path],
+            ["git", "worktree", "add", "--detach", worktree_path, "main"],
             capture_output=True, text=True, timeout=30, cwd=str(root), check=True,
         )
         # Delete stale branch from previous failed attempt if it exists
