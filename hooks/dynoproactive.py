@@ -569,7 +569,7 @@ def _save_scan_coverage(root: Path, coverage: dict) -> None:
 def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]:
     """Score all Python files by risk priority. Higher = scan first."""
 
-    # Find all source files in the project (any language)
+    # Find all tracked source files via git (respects .gitignore, skips hidden)
     _SOURCE_EXTENSIONS = {
         ".py", ".js", ".ts", ".tsx", ".jsx",
         ".go", ".rs", ".rb", ".java", ".kt",
@@ -577,32 +577,30 @@ def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]
         ".swift", ".dart", ".lua", ".php",
         ".sh", ".bash", ".zsh",
     }
-    _IGNORE_DIRS = {
-        ".git", ".dynos", "node_modules", "__pycache__", ".venv",
-        "venv", "dist", "build", ".next", ".nuxt", "target",
-        "vendor", ".tox", ".mypy_cache", ".pytest_cache",
-    }
 
-    all_files: list[Path] = []
-    for item in root.rglob("*"):
-        if not item.is_file():
-            continue
-        if item.suffix not in _SOURCE_EXTENSIONS:
-            continue
-        # Skip ignored directories
-        parts = item.relative_to(root).parts
-        if any(p in _IGNORE_DIRS for p in parts):
-            continue
-        all_files.append(item)
-
-    # Deduplicate
-    seen: set[str] = set()
     unique_files: list[Path] = []
-    for f in all_files:
-        rel = str(f.relative_to(root))
-        if rel not in seen:
-            seen.add(rel)
-            unique_files.append(f)
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=15, cwd=root,
+        )
+        if result.returncode == 0:
+            seen: set[str] = set()
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                p = root / line
+                if p.suffix not in _SOURCE_EXTENSIONS:
+                    continue
+                # Skip hidden dirs (dotfiles)
+                if any(part.startswith(".") for part in Path(line).parts):
+                    continue
+                if line not in seen and p.is_file():
+                    seen.add(line)
+                    unique_files.append(p)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
 
     if not unique_files:
         return []
