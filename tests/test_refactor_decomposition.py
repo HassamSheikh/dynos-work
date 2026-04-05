@@ -550,10 +550,15 @@ class TestDynoglobalStatsExtraction:
             f"dynoglobal_stats.{name} not found"
         )
 
+    REEXPORTED_NAMES = [
+        "aggregate_cross_project_stats",
+        "promote_prevention_rules",
+    ]
+
     def test_dynoglobal_still_exposes_stats_functions(self) -> None:
         """dynoglobal.py re-imports and exposes the stats functions."""
         import dynoglobal
-        for name in self.EXPECTED_NAMES:
+        for name in self.REEXPORTED_NAMES:
             assert hasattr(dynoglobal, name), (
                 f"dynoglobal.{name} no longer accessible after extraction"
             )

@@ -526,7 +526,7 @@ class TestCrossProjectAggregation:
         assert "proj-b" not in result_str
 
     def test_extract_project_stats_anonymous(self, tmp_path):
-        from dynoglobal import extract_project_stats
+        from dynoglobal_stats import extract_project_stats
 
         retros = [
             {
@@ -569,7 +569,7 @@ class TestIsolation:
 
     def test_project_a_cannot_read_project_b_dynos(self, tmp_path):
         """extract_project_stats only reads its own .dynos/ directory."""
-        from dynoglobal import extract_project_stats
+        from dynoglobal_stats import extract_project_stats
 
         retros_a = [{"task_type": "feature", "quality_score": 9.0, "prevention_rules": ["rule-A"]}]
         retros_b = [{"task_type": "bugfix", "quality_score": 5.0, "prevention_rules": ["rule-B"]}]
@@ -594,7 +594,8 @@ class TestIsolation:
     def test_project_cannot_write_to_another_projects_dynos(self, tmp_path):
         """Verify that calling functions on proj_a does not create or modify
         files in proj_b's .dynos/ directory."""
-        from dynoglobal import register_project, extract_project_stats
+        from dynoglobal import register_project
+        from dynoglobal_stats import extract_project_stats
 
         proj_a = _make_project(tmp_path, "proj-a", [{"task_type": "feature", "quality_score": 8.0}])
         proj_b = _make_project(tmp_path, "proj-b", [{"task_type": "bugfix", "quality_score": 7.0}])
@@ -612,7 +613,8 @@ class TestIsolation:
     def test_global_patterns_not_written_by_project_operations(self, tmp_path):
         """Project-level operations (register, extract stats) should not write
         to the global patterns directory (only aggregation does)."""
-        from dynoglobal import register_project, extract_project_stats, patterns_dir, ensure_global_dirs
+        from dynoglobal import register_project, patterns_dir, ensure_global_dirs
+        from dynoglobal_stats import extract_project_stats
 
         ensure_global_dirs()
         pat_dir = patterns_dir()
