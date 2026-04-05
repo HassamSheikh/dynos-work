@@ -194,7 +194,7 @@ def _run_autofix(root: Path) -> dict:
     try:
         result = subprocess.run(
             [sys.executable, str(proactive_path), "scan", "--root", str(root)],
-            capture_output=True, text=True, timeout=600,
+            capture_output=True, text=True, timeout=1800,
         )
         if result.returncode == 0 and result.stdout.strip():
             try:

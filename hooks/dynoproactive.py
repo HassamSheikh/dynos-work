@@ -580,7 +580,7 @@ def _detect_llm_review(root: Path) -> list[dict]:
     try:
         result = subprocess.run(
             ["claude", "-p", prompt, "--model", "haiku", "--dangerously-skip-permissions"],
-            capture_output=True, text=True, timeout=120, cwd=root,
+            capture_output=True, text=True, timeout=600, cwd=root,
         )
     except subprocess.TimeoutExpired:
         _log("Haiku review timed out after 120s")
@@ -819,7 +819,7 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
         _log(f"Running claude for {finding_id}")
         claude_result = subprocess.run(
             ["claude", "-p", prompt, "--dangerously-skip-permissions"],
-            capture_output=True, text=True, timeout=300, cwd=worktree_path,
+            capture_output=True, text=True, timeout=600, cwd=worktree_path,
         )
 
         if claude_result.returncode == 0:
