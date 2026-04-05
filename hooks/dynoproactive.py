@@ -813,7 +813,7 @@ def _process_finding(finding: dict, root: Path) -> dict:
     category = finding.get("category", "")
     # Recurring audit findings are not actionable code fixes — always open issue
     if category == "recurring-audit":
-        return _open_issue(finding, root)
+        return _open_issue_high_critical(finding)
     if severity in ("low", "medium"):
         return _autofix_low_medium(finding, root)
     elif severity in ("high", "critical"):
