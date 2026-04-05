@@ -819,12 +819,24 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
     branch_name = f"dynos/auto-fix-{finding_id}"
     worktree_path = f"/tmp/dynos-autofix-{finding_id}"
 
+    # Detect current branch for PR base
+    try:
+        base_result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5, cwd=str(root),
+        )
+        base_branch = base_result.stdout.strip() if base_result.returncode == 0 else "main"
+        if base_branch == "HEAD":
+            base_branch = "main"  # detached HEAD fallback
+    except (subprocess.TimeoutExpired, OSError):
+        base_branch = "main"
+
     try:
         # Create worktree
         _log(f"Creating worktree at {worktree_path}")
-        # Always branch from main, not whatever branch the user is on
+        # Branch from current HEAD (whatever branch the user is on)
         subprocess.run(
-            ["git", "worktree", "add", "--detach", worktree_path, "main"],
+            ["git", "worktree", "add", "--detach", worktree_path, "HEAD"],
             capture_output=True, text=True, timeout=30, cwd=str(root), check=True,
         )
         # Delete stale branch from previous failed attempt if it exists
@@ -932,7 +944,7 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
             pr_result = subprocess.run(
                 [
                     "gh", "pr", "create",
-                    "--base", "main",
+                    "--base", base_branch,
                     "--head", branch_name,
                     "--title", f"[autofix] {description[:80]}",
                     "--body", pr_body,
