@@ -28,6 +28,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dynoslib import (
+    _persistent_project_dir,
     collect_retrospectives,
     load_json,
     now_iso,
@@ -74,11 +75,116 @@ def _load_findings(root: Path) -> list[dict]:
         return []
     if isinstance(data, list):
         return data
+    if isinstance(data, dict) and "findings" in data:
+        findings_list = data["findings"]
+        if isinstance(findings_list, list):
+            return findings_list
     return []
 
 
 def _save_findings(root: Path, findings: list[dict]) -> None:
     write_json(_findings_path(root), findings)
+
+
+def _cleanup_merged_branches(root: Path) -> None:
+    """Delete local and remote autofix branches whose PRs are merged/closed."""
+    if not shutil.which("gh") or not shutil.which("git"):
+        return
+    try:
+        result = subprocess.run(
+            ["git", "branch", "-r"],
+            capture_output=True, text=True, timeout=15, cwd=str(root),
+        )
+        if result.returncode != 0:
+            return
+        remote_branches = [
+            line.strip() for line in result.stdout.splitlines()
+            if "dynos/auto-fix-" in line.strip()
+        ]
+    except (subprocess.TimeoutExpired, OSError):
+        return
+
+    for remote_ref in remote_branches:
+        # remote_ref looks like "origin/dynos/auto-fix-xxx"
+        branch_name = remote_ref.replace("origin/", "", 1)
+        try:
+            pr_result = subprocess.run(
+                ["gh", "pr", "list", "--search", f"{branch_name} in:head",
+                 "--state", "merged", "--json", "number"],
+                capture_output=True, text=True, timeout=30, cwd=str(root),
+            )
+            if pr_result.returncode != 0:
+                continue
+            prs = json.loads(pr_result.stdout) if pr_result.stdout.strip() else []
+            if not isinstance(prs, list) or len(prs) == 0:
+                # Also check closed state
+                closed_result = subprocess.run(
+                    ["gh", "pr", "list", "--search", f"{branch_name} in:head",
+                     "--state", "closed", "--json", "number"],
+                    capture_output=True, text=True, timeout=30, cwd=str(root),
+                )
+                if closed_result.returncode != 0:
+                    continue
+                closed_prs = json.loads(closed_result.stdout) if closed_result.stdout.strip() else []
+                if not isinstance(closed_prs, list) or len(closed_prs) == 0:
+                    continue
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+            continue
+
+        # PR is merged or closed, clean up branches
+        _log(f"Cleaning up merged/closed branch: {branch_name}")
+        try:
+            subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                capture_output=True, text=True, timeout=10, cwd=str(root),
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        try:
+            subprocess.run(
+                ["git", "push", "origin", "--delete", branch_name],
+                capture_output=True, text=True, timeout=15, cwd=str(root),
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
+def _prune_findings(findings: list[dict], max_age_days: int = 30, max_entries: int = 500) -> list[dict]:
+    """Remove stale findings. Never prune 'fixed' or 'issue-opened' entries."""
+    now = datetime.now(timezone.utc)
+    preserved_statuses = {"fixed", "issue-opened"}
+
+    pruned: list[dict] = []
+    for f in findings:
+        status = f.get("status", "")
+        if status in preserved_statuses:
+            pruned.append(f)
+            continue
+        found_at = f.get("found_at", "")
+        if found_at:
+            try:
+                dt = datetime.fromisoformat(found_at.replace("Z", "+00:00"))
+                age_days = (now - dt).total_seconds() / 86400
+                if age_days > max_age_days:
+                    continue  # Skip old entry
+            except (ValueError, TypeError):
+                pass
+        pruned.append(f)
+
+    # If still over max_entries, keep preserved + newest non-preserved
+    if len(pruned) > max_entries:
+        preserved = [f for f in pruned if f.get("status", "") in preserved_statuses]
+        non_preserved = [f for f in pruned if f.get("status", "") not in preserved_statuses]
+        # Sort non-preserved by found_at descending (newest first)
+        def _sort_key(f: dict) -> str:
+            return f.get("found_at", "")
+        non_preserved.sort(key=_sort_key, reverse=True)
+        budget = max_entries - len(preserved)
+        if budget < 0:
+            budget = 0
+        pruned = preserved + non_preserved[:budget]
+
+    return pruned
 
 
 def _description_hash(description: str) -> str:
@@ -395,6 +501,34 @@ def _detect_dead_code(root: Path) -> list[dict]:
                 continue
             # Skip if this is a facade re-export file (dynoslib.py pattern)
             if py_file.name == "dynoslib.py":
+                continue
+            # Check if any other file in the project imports this name from
+            # this module (re-export pattern). The module name is the file
+            # stem (e.g. "utils" for "utils.py").
+            module_name = py_file.stem
+            is_reexport = False
+            for other_file in py_files:
+                if other_file == py_file:
+                    continue
+                other_src = all_source_texts.get(other_file.name, "")
+                if not other_src:
+                    continue
+                # Check for "from {module_name} import ... {name} ..."
+                # or "import {module_name}"
+                if re.search(
+                    rf"from\s+{re.escape(module_name)}\s+import\s+.*\b{re.escape(name)}\b",
+                    other_src,
+                ):
+                    is_reexport = True
+                    break
+                if re.search(
+                    rf"^import\s+{re.escape(module_name)}\b",
+                    other_src,
+                    re.MULTILINE,
+                ):
+                    is_reexport = True
+                    break
+            if is_reexport:
                 continue
             unused_imports.append(name)
 
@@ -744,6 +878,42 @@ def _detect_llm_review(root: Path) -> list[dict]:
 
     # Build the prompt with file contents
     prompt = _HAIKU_REVIEW_PROMPT
+
+    # Append project-specific prevention rules from dynos_patterns.md
+    try:
+        patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
+        if patterns_path.exists():
+            patterns_content = patterns_path.read_text()
+            prevention_text = ""
+            in_prevention = False
+            for pline in patterns_content.splitlines():
+                if "## Prevention Rules" in pline:
+                    in_prevention = True
+                    continue
+                if in_prevention and pline.startswith("##"):
+                    break
+                if in_prevention:
+                    prevention_text += pline + "\n"
+            prevention_text = prevention_text.strip()
+            if prevention_text:
+                prompt += (
+                    f"\n## Project-specific patterns to watch for:\n"
+                    f"{prevention_text}\n"
+                )
+    except OSError:
+        pass
+
+    # Append already-known finding descriptions so Haiku doesn't re-report
+    known_findings = _load_findings(root)
+    if known_findings:
+        known_descs = [f.get("description", "") for f in known_findings if f.get("description")]
+        if known_descs:
+            known_list = "\n".join(f"- {d}" for d in known_descs[:50])
+            prompt += (
+                f"\n## Already known issues (do NOT re-report these):\n"
+                f"{known_list}\n"
+            )
+
     for f in review_files:
         try:
             content = f.read_text()
@@ -1253,6 +1423,18 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
                 return finding
 
             # Create PR
+            # Collect diff stat for PR body
+            diff_stat_text = ""
+            try:
+                diff_stat_result = subprocess.run(
+                    ["git", "diff", "--stat", "HEAD~1..HEAD"],
+                    capture_output=True, text=True, timeout=10, cwd=worktree_path,
+                )
+                if diff_stat_result.returncode == 0 and diff_stat_result.stdout.strip():
+                    diff_stat_text = diff_stat_result.stdout.strip()
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
             # Build a human-readable PR description
             category = finding['category']
             severity = finding['severity']
@@ -1260,6 +1442,13 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
             file_name = evidence.get('file', 'unknown file')
             line_num = evidence.get('line', '')
             location = f"`{file_name}:{line_num}`" if line_num else f"`{file_name}`"
+
+            changes_section = ""
+            if diff_stat_text:
+                changes_section = (
+                    f"## Changes\n\n"
+                    f"```\n{diff_stat_text}\n```\n\n"
+                )
 
             pr_body = (
                 f"## What's wrong\n\n"
@@ -1269,6 +1458,7 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
                 f"## What this PR does\n\n"
                 f"Fixes the issue above. The change was generated by the dynos-work autofix scanner "
                 f"and verified by running the foundry pipeline (spec → plan → execute → audit).\n\n"
+                f"{changes_section}"
                 f"## Evidence\n\n"
                 f"```json\n{evidence_str}\n```\n\n"
                 f"---\n"
@@ -1471,6 +1661,35 @@ def _open_github_issue(finding: dict, root: Path) -> dict:
 # Process a single finding with retry logic (AC 13)
 # ---------------------------------------------------------------------------
 
+def _check_category_health(category: str, findings: list[dict]) -> tuple[str, str]:
+    """Check if a category is healthy. Returns (status, reason).
+
+    status is 'ok' or 'disabled'.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=30)
+    failure_count = 0
+    for f in findings:
+        if f.get("category") != category:
+            continue
+        status = f.get("status", "")
+        if status not in ("failed", "permanently_failed"):
+            continue
+        found_at = f.get("found_at", "")
+        if not found_at:
+            continue
+        try:
+            dt = datetime.fromisoformat(found_at.replace("Z", "+00:00"))
+            if dt >= cutoff:
+                failure_count += 1
+        except (ValueError, TypeError):
+            continue
+    if failure_count >= 3:
+        reason = f"{failure_count} failures in last 30 days"
+        return "disabled", reason
+    return "ok", ""
+
+
 def _process_finding(finding: dict, root: Path) -> dict:
     """Route and process a single finding based on severity."""
     finding["attempt_count"] = finding.get("attempt_count", 0) + 1
@@ -1486,6 +1705,16 @@ def _process_finding(finding: dict, root: Path) -> dict:
         return finding
 
     category = finding.get("category", "")
+
+    # Check category health (rollback memory)
+    existing_findings = _load_findings(root)
+    cat_status, cat_reason = _check_category_health(category, existing_findings)
+    if cat_status == "disabled":
+        finding["status"] = "failed"
+        finding["fail_reason"] = f"category_disabled: {cat_reason}"
+        finding["processed_at"] = now_iso()
+        _log(f"Category '{category}' disabled: {cat_reason}")
+        return finding
 
     # Classify fixability for routing
     fixability = _classify_fixability(finding)
@@ -1544,8 +1773,14 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
 
     _log(f"Starting proactive scan on {root}")
 
+    # Cleanup merged autofix branches
+    _cleanup_merged_branches(root)
+
     # Load existing findings for dedup
     existing_findings = _load_findings(root)
+
+    # Prune old findings
+    existing_findings = _prune_findings(existing_findings)
 
     # Run all four detectors
     new_findings: list[dict] = []
@@ -1639,7 +1874,48 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
                 by_severity[sev] = 0
 
     # Persist all findings (AC 13)
+    # Store category health in findings file
     _save_findings(root, existing_findings)
+
+    # Write category_health to the findings JSON
+    all_categories = set()
+    for f in existing_findings:
+        cat = f.get("category", "")
+        if cat:
+            all_categories.add(cat)
+    category_health: dict[str, dict] = {}
+    for cat in sorted(all_categories):
+        status, reason = _check_category_health(cat, existing_findings)
+        if status == "disabled":
+            category_health[cat] = {"status": status, "reason": reason}
+    # Persist category_health alongside findings
+    findings_path = _findings_path(root)
+    try:
+        raw_data = {"findings": existing_findings, "category_health": category_health}
+        write_json(findings_path, raw_data)
+    except OSError:
+        pass
+
+    # Cost tracking
+    # Count haiku invocations: 1 if llm-review findings were attempted, 0 otherwise
+    haiku_invocations = 1 if any(
+        f.get("category") == "llm-review" for f in new_findings
+    ) else 0
+    # Count fix invocations (autofix calls)
+    fix_invocations = 0
+    opus_fix_invocations = 0
+    for f in all_scan_findings:
+        fixability = f.get("fixability", "")
+        if fixability in ("deterministic", "likely-safe"):
+            fix_invocations += 1
+            if f.get("severity") in ("high", "critical"):
+                opus_fix_invocations += 1
+    default_fix_invocations = fix_invocations - opus_fix_invocations
+    estimated_cost = (
+        haiku_invocations * 0.03
+        + default_fix_invocations * 0.50
+        + opus_fix_invocations * 2.00
+    )
 
     elapsed = time.monotonic() - start_time
     output = {
@@ -1652,6 +1928,11 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
             "fixed": summary_counts["fixed"],
             "issues_opened": summary_counts["issues_opened"],
             "failed": summary_counts["failed"],
+        },
+        "cost": {
+            "haiku_invocations": haiku_invocations,
+            "fix_invocations": fix_invocations,
+            "estimated_cost_usd": round(estimated_cost, 2),
         },
         "scan_duration_seconds": round(elapsed, 2),
     }
