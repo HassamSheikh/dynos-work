@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 from dynoproactive import (
+    _classify_fixability,
     _compute_file_scores,
     _dedup_finding,
     _description_hash,
@@ -23,6 +24,7 @@ from dynoproactive import (
     _make_finding,
     _process_finding,
     _save_scan_coverage,
+    _verify_fix,
     VALID_CATEGORIES,
 )
 
@@ -234,7 +236,7 @@ class TestProcessFindingRouting:
         finding = _make_finding("recurring-1", "medium", "recurring-audit", "desc", {})
         with patch("dynoproactive._open_github_issue") as issue_mock, \
              patch("dynoproactive._autofix_finding") as autofix_mock:
-            issue_mock.side_effect = lambda f: {**f, "status": "issue-opened"}
+            issue_mock.side_effect = lambda f, root: {**f, "status": "issue-opened"}
             result = _process_finding(finding, tmp_project)
         issue_mock.assert_called_once()
         autofix_mock.assert_not_called()
@@ -246,3 +248,142 @@ class TestProcessFindingRouting:
         result = _process_finding(finding, tmp_project)
         assert result["status"] == "permanently_failed"
         assert result["suppressed_until"] is not None
+
+    def test_review_only_opens_issue(self, tmp_project: Path) -> None:
+        """High-severity llm-review findings route to issue, not autofix."""
+        finding = _make_finding("llm-high-1", "high", "llm-review", "critical bug", {})
+        with patch("dynoproactive._open_github_issue") as issue_mock, \
+             patch("dynoproactive._autofix_finding") as autofix_mock:
+            issue_mock.side_effect = lambda f, root: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project)
+        issue_mock.assert_called_once()
+        autofix_mock.assert_not_called()
+        assert result["status"] == "issue-opened"
+        assert result["fixability"] == "review-only"
+
+    def test_dependency_vuln_opens_issue(self, tmp_project: Path) -> None:
+        """Dependency vulns are review-only, route to issue."""
+        finding = _make_finding("dep-1", "medium", "dependency-vuln", "vuln", {})
+        with patch("dynoproactive._open_github_issue") as issue_mock, \
+             patch("dynoproactive._autofix_finding") as autofix_mock:
+            issue_mock.side_effect = lambda f, root: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project)
+        issue_mock.assert_called_once()
+        autofix_mock.assert_not_called()
+        assert result["fixability"] == "review-only"
+
+    def test_architectural_drift_opens_issue(self, tmp_project: Path) -> None:
+        """Architectural drift is review-only, route to issue."""
+        finding = _make_finding("drift-1", "medium", "architectural-drift", "drift", {})
+        with patch("dynoproactive._open_github_issue") as issue_mock, \
+             patch("dynoproactive._autofix_finding") as autofix_mock:
+            issue_mock.side_effect = lambda f, root: {**f, "status": "issue-opened"}
+            result = _process_finding(finding, tmp_project)
+        issue_mock.assert_called_once()
+        autofix_mock.assert_not_called()
+        assert result["fixability"] == "review-only"
+
+
+# ---------------------------------------------------------------------------
+# Fixability classification
+# ---------------------------------------------------------------------------
+
+class TestClassifyFixability:
+    def test_syntax_error_is_deterministic(self) -> None:
+        finding = _make_finding("se-1", "medium", "syntax-error", "desc", {})
+        assert _classify_fixability(finding) == "deterministic"
+
+    def test_dead_code_unused_imports_is_deterministic(self) -> None:
+        finding = _make_finding("dc-1", "low", "dead-code", "desc", {"unused_imports": ["json"]})
+        assert _classify_fixability(finding) == "deterministic"
+
+    def test_dead_code_unreferenced_func_is_likely_safe(self) -> None:
+        finding = _make_finding("dc-2", "low", "dead-code", "desc", {"function": "foo"})
+        assert _classify_fixability(finding) == "likely-safe"
+
+    def test_llm_review_low_is_likely_safe(self) -> None:
+        finding = _make_finding("llm-1", "low", "llm-review", "desc", {})
+        assert _classify_fixability(finding) == "likely-safe"
+
+    def test_llm_review_medium_is_likely_safe(self) -> None:
+        finding = _make_finding("llm-2", "medium", "llm-review", "desc", {})
+        assert _classify_fixability(finding) == "likely-safe"
+
+    def test_llm_review_high_is_review_only(self) -> None:
+        finding = _make_finding("llm-3", "high", "llm-review", "desc", {})
+        assert _classify_fixability(finding) == "review-only"
+
+    def test_llm_review_critical_is_review_only(self) -> None:
+        finding = _make_finding("llm-4", "critical", "llm-review", "desc", {})
+        assert _classify_fixability(finding) == "review-only"
+
+    def test_dependency_vuln_is_review_only(self) -> None:
+        finding = _make_finding("dv-1", "medium", "dependency-vuln", "desc", {})
+        assert _classify_fixability(finding) == "review-only"
+
+    def test_architectural_drift_is_review_only(self) -> None:
+        finding = _make_finding("ad-1", "medium", "architectural-drift", "desc", {})
+        assert _classify_fixability(finding) == "review-only"
+
+    def test_recurring_audit_is_review_only(self) -> None:
+        finding = _make_finding("ra-1", "medium", "recurring-audit", "desc", {})
+        assert _classify_fixability(finding) == "review-only"
+
+
+# ---------------------------------------------------------------------------
+# Post-fix verification
+# ---------------------------------------------------------------------------
+
+class TestVerifyFix:
+    def test_valid_fix_passes(self, tmp_project: Path) -> None:
+        """A small, valid change in scope passes verification."""
+        import subprocess
+        # Create a branch with a valid change
+        worktree = str(tmp_project)
+        (tmp_project / "hooks" / "good.py").write_text("import os\nprint(os.getcwd())\nx = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "test change"], cwd=worktree, capture_output=True)
+        finding = _make_finding("vf-1", "low", "dead-code", "desc", {"file": "hooks/good.py"})
+        ok, reason = _verify_fix(tmp_project, worktree, finding)
+        assert ok is True
+        assert reason == ""
+
+    def test_syntax_error_fails(self, tmp_project: Path) -> None:
+        """A change that introduces a syntax error fails verification."""
+        import subprocess
+        worktree = str(tmp_project)
+        (tmp_project / "hooks" / "good.py").write_text("def foo(\n")
+        subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "break syntax"], cwd=worktree, capture_output=True)
+        finding = _make_finding("vf-2", "low", "dead-code", "desc", {"file": "hooks/good.py"})
+        ok, reason = _verify_fix(tmp_project, worktree, finding)
+        assert ok is False
+        assert "syntax error" in reason
+
+
+# ---------------------------------------------------------------------------
+# Dedup ordering
+# ---------------------------------------------------------------------------
+
+class TestDedupOrdering:
+    def test_permanently_failed_takes_priority_over_generic_match(self) -> None:
+        """permanently_failed should be returned instead of generic ID match."""
+        finding = _make_finding("pf-1", "low", "dead-code", "desc", {})
+        existing = [{"finding_id": "pf-1", "status": "permanently_failed"}]
+        reason = _dedup_finding(finding, existing)
+        assert reason == "permanently_failed"
+
+    def test_fixed_with_pr_takes_priority(self) -> None:
+        """fixed with PR should be returned instead of generic ID match."""
+        finding = _make_finding("fx-1", "low", "dead-code", "desc", {})
+        existing = [{"finding_id": "fx-1", "status": "fixed", "pr_number": 42}]
+        reason = _dedup_finding(finding, existing)
+        assert reason == "fixed with merged PR, permanently suppressed"
+
+    def test_generic_match_still_works(self) -> None:
+        """Non-special statuses still return the generic match."""
+        finding = _make_finding("gm-1", "low", "dead-code", "desc", {})
+        existing = [{"finding_id": "gm-1", "status": "failed"}]
+        reason = _dedup_finding(finding, existing)
+        assert reason is not None
+        assert "exact finding_id" in reason

@@ -16,8 +16,10 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import ast
+import fcntl
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -303,7 +305,7 @@ def _detect_syntax_errors(root: Path) -> list[dict]:
                     "text": (exc.text or "").strip(),
                 },
             ))
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
 
     return findings
@@ -323,12 +325,12 @@ def _detect_dead_code(root: Path) -> list[dict]:
     for py_file in py_files:
         try:
             source = py_file.read_text()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         all_source_texts[py_file.name] = source
         try:
             tree = ast.parse(source, filename=py_file.name)
-        except SyntaxError:
+        except (SyntaxError, UnicodeDecodeError):
             continue
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.FunctionDef):
@@ -338,11 +340,11 @@ def _detect_dead_code(root: Path) -> list[dict]:
     for py_file in py_files:
         try:
             source = py_file.read_text()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         try:
             tree = ast.parse(source, filename=py_file.name)
-        except SyntaxError:
+        except (SyntaxError, UnicodeDecodeError):
             continue
 
         # Gather imports
@@ -762,7 +764,7 @@ def _detect_llm_review(root: Path) -> list[dict]:
             capture_output=True, text=True, timeout=600, cwd=root,
         )
     except subprocess.TimeoutExpired:
-        _log("Haiku review timed out after 120s")
+        _log("Haiku review timed out after 600s")
         return findings
     except OSError as exc:
         _log(f"Haiku review failed: {exc}")
@@ -864,13 +866,19 @@ def _dedup_finding(finding: dict, existing: list[dict]) -> str | None:
         ex_id = ex.get("finding_id", "")
         ex_status = ex.get("status", "")
 
-        # Level 1: exact finding_id match
-        if ex_id == fid:
-            return f"exact finding_id match (status={ex_status})"
+        if ex_id != fid:
+            continue
 
-        # Level 3: permanently_failed -> never retry
-        if ex_status == "permanently_failed" and ex_id == fid:
+        # Level 1a: permanently_failed -> never retry (checked first)
+        if ex_status == "permanently_failed":
             return "permanently_failed"
+
+        # Level 1b: fixed with merged PR -> permanently suppressed
+        if ex_status == "fixed" and ex.get("pr_number"):
+            return "fixed with merged PR, permanently suppressed"
+
+        # Level 1c: generic exact finding_id match
+        return f"exact finding_id match (status={ex_status})"
 
     # Level 2: category + file + description_hash semantic match
     for ex in existing:
@@ -883,11 +891,6 @@ def _dedup_finding(finding: dict, existing: list[dict]) -> str | None:
             if ex_status in ("fixed", "issue-opened", "failed", "permanently_failed"):
                 return f"semantic match (category={cat}, desc_hash={desc_h}, status={ex_status})"
 
-    # Level 3 check: fixed findings whose PR was merged -> permanently suppressed
-    for ex in existing:
-        if ex.get("finding_id") == fid and ex.get("status") == "fixed" and ex.get("pr_number"):
-            return "fixed with merged PR, permanently suppressed"
-
     return None
 
 
@@ -895,14 +898,14 @@ def _dedup_finding(finding: dict, existing: list[dict]) -> str | None:
 # Pre-action checks (AC 16)
 # ---------------------------------------------------------------------------
 
-def _check_existing_pr(finding_id: str) -> bool:
+def _check_existing_pr(finding_id: str, root: Path) -> bool:
     """Return True if a PR already exists for this finding."""
     if not shutil.which("gh"):
         return False
     try:
         result = subprocess.run(
             ["gh", "pr", "list", "--search", f"dynos/auto-fix-{finding_id} in:head", "--json", "number"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, cwd=str(root),
         )
         if result.returncode == 0 and result.stdout.strip():
             prs = json.loads(result.stdout)
@@ -913,14 +916,14 @@ def _check_existing_pr(finding_id: str) -> bool:
     return False
 
 
-def _check_existing_issue(finding_id: str) -> bool:
+def _check_existing_issue(finding_id: str, root: Path) -> bool:
     """Return True if an issue already exists for this finding."""
     if not shutil.which("gh"):
         return False
     try:
         result = subprocess.run(
             ["gh", "issue", "list", "--search", f"{finding_id} label:dynos-autofix", "--json", "number"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, cwd=str(root),
         )
         if result.returncode == 0 and result.stdout.strip():
             issues = json.loads(result.stdout)
@@ -929,6 +932,105 @@ def _check_existing_issue(finding_id: str) -> bool:
     except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
         _log(f"Warning: could not check existing issues: {exc}")
     return False
+
+
+# ---------------------------------------------------------------------------
+# Fixability classification (AC 9a)
+# ---------------------------------------------------------------------------
+
+def _classify_fixability(finding: dict) -> str:
+    """Classify a finding's fixability into deterministic, likely-safe, or review-only."""
+    category = finding.get("category", "")
+    severity = finding.get("severity", "low")
+
+    if category == "syntax-error":
+        return "deterministic"
+
+    if category == "dead-code":
+        # Unused imports are deterministic; unreferenced functions are likely-safe
+        evidence = finding.get("evidence", {})
+        if evidence.get("unused_imports"):
+            return "deterministic"
+        return "likely-safe"
+
+    if category == "llm-review":
+        if severity in ("high", "critical"):
+            return "review-only"
+        return "likely-safe"
+
+    if category in ("architectural-drift", "dependency-vuln", "recurring-audit"):
+        return "review-only"
+
+    return "review-only"
+
+
+# ---------------------------------------------------------------------------
+# Post-fix verification gate (AC 9b)
+# ---------------------------------------------------------------------------
+
+def _verify_fix(root: Path, worktree_path: str, finding: dict) -> tuple[bool, str]:
+    """Verify a fix before push. Returns (ok, reason)."""
+    # 1. Syntax-check every changed .py file
+    try:
+        diff_result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD~1"],
+            capture_output=True, text=True, timeout=10, cwd=worktree_path,
+        )
+        changed_files = [f.strip() for f in diff_result.stdout.splitlines() if f.strip()]
+    except (subprocess.TimeoutExpired, OSError):
+        return False, "could not determine changed files"
+
+    for changed in changed_files:
+        if not changed.endswith(".py"):
+            continue
+        full_path = Path(worktree_path) / changed
+        if not full_path.exists():
+            continue  # File was deleted, that's fine
+        try:
+            source = full_path.read_text()
+            ast.parse(source, filename=changed)
+        except SyntaxError as exc:
+            return False, f"syntax error in {changed} line {exc.lineno}: {exc.msg}"
+        except (OSError, UnicodeDecodeError) as exc:
+            return False, f"could not read {changed}: {exc}"
+
+    # 2. Check diff size: max 500 added+removed lines, max 10 files
+    try:
+        stat_result = subprocess.run(
+            ["git", "diff", "--stat", "HEAD~1"],
+            capture_output=True, text=True, timeout=10, cwd=worktree_path,
+        )
+        stat_lines = stat_result.stdout.strip().splitlines()
+    except (subprocess.TimeoutExpired, OSError):
+        return False, "could not get diff stat"
+
+    if len(changed_files) > 10:
+        return False, f"too many files changed ({len(changed_files)} > 10)"
+
+    # Parse the summary line for insertions/deletions
+    if stat_lines:
+        summary = stat_lines[-1]
+        total_changes = 0
+        for match in re.finditer(r"(\d+) (?:insertion|deletion)", summary):
+            total_changes += int(match.group(1))
+        if total_changes > 500:
+            return False, f"diff too large ({total_changes} lines > 500)"
+
+    # 3. Changed files should be within scope (match finding's evidence.file)
+    evidence_file = finding.get("evidence", {}).get("file", "")
+    if evidence_file and changed_files:
+        # Normalize paths for comparison
+        evidence_dir = str(Path(evidence_file).parent)
+        for changed in changed_files:
+            changed_dir = str(Path(changed).parent)
+            # Allow changes in same directory tree or test directories
+            if (not changed.startswith(evidence_dir)
+                    and not changed.startswith("tests/")
+                    and not changed.startswith("test/")
+                    and changed != evidence_file):
+                return False, f"out-of-scope change: {changed} (expected near {evidence_file})"
+
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -972,7 +1074,7 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
     # The worktree is created from HEAD, not the working tree.
 
     # Check for existing PR (AC 16)
-    if _check_existing_pr(finding_id):
+    if _check_existing_pr(finding_id, root):
         finding["status"] = "already-exists"
         finding["processed_at"] = now_iso()
         _log(f"PR already exists for {finding_id}, skipping")
@@ -1013,6 +1115,13 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
                     base_branch = "main"
     except (subprocess.TimeoutExpired, OSError):
         base_branch = "main"
+
+    # Prune stale worktrees before creating a new one
+    subprocess.run(["git", "worktree", "prune"], capture_output=True, timeout=10, cwd=str(root))
+
+    # Remove existing worktree directory if leftover from crash
+    if Path(worktree_path).exists():
+        shutil.rmtree(worktree_path, ignore_errors=True)
 
     try:
         # Create worktree
@@ -1058,7 +1167,7 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
         claude_cmd = [
             "claude", "-p", prompt,
             "--permission-mode", "auto",
-            "--allowedTools", "Read Edit Write Glob Grep Bash(python*) Bash(pytest*) Bash(git add*) Bash(git commit*) Bash(git diff*) Bash(git status*) Bash(git log*)",
+            "--allowedTools", "Read Edit Write Glob Grep Bash(python3 -m pytest*) Bash(git add*) Bash(git commit*) Bash(git diff*) Bash(git status*) Bash(git log*)",
         ]
         if severity in ("high", "critical"):
             claude_cmd.extend(["--model", "opus"])
@@ -1097,19 +1206,40 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
                 return finding
 
             # Stage and commit if Claude didn't already commit
-            subprocess.run(
+            add_result = subprocess.run(
                 ["git", "add", "-A"],
-                capture_output=True, timeout=10, cwd=worktree_path,
+                capture_output=True, text=True, timeout=10, cwd=worktree_path,
             )
+            if add_result.returncode != 0:
+                finding["status"] = "failed"
+                finding["fail_reason"] = f"git_add_failed: {add_result.stderr.strip()}"
+                finding["processed_at"] = now_iso()
+                _log(f"git add failed for {finding_id}: {add_result.stderr.strip()}")
+                return finding
             subprocess.run(
                 ["git", "diff", "--cached", "--quiet"],
                 capture_output=True, timeout=10, cwd=worktree_path,
             )
-            subprocess.run(
+            commit_result = subprocess.run(
                 ["git", "commit", "-m", f"[autofix] {description[:80]}",
                  "--author", "dynos-autofix <autofix@dynos.fit>"],
                 capture_output=True, text=True, timeout=15, cwd=worktree_path,
             )
+            if commit_result.returncode != 0:
+                finding["status"] = "failed"
+                finding["fail_reason"] = f"git_commit_failed: {commit_result.stderr.strip()}"
+                finding["processed_at"] = now_iso()
+                _log(f"git commit failed for {finding_id}: {commit_result.stderr.strip()}")
+                return finding
+
+            # Post-fix verification gate
+            verify_ok, verify_reason = _verify_fix(root, worktree_path, finding)
+            if not verify_ok:
+                finding["status"] = "failed"
+                finding["fail_reason"] = f"verification_failed: {verify_reason}"
+                finding["processed_at"] = now_iso()
+                _log(f"Verification failed for {finding_id}: {verify_reason}")
+                return finding
 
             # Push branch to remote
             push_result = subprocess.run(
@@ -1236,6 +1366,9 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
             _log(f"Cleaned up worktree {worktree_path}")
         except (subprocess.TimeoutExpired, OSError) as exc:
             _log(f"Warning: worktree cleanup failed: {exc}")
+            if Path(worktree_path).exists():
+                shutil.rmtree(worktree_path, ignore_errors=True)
+            subprocess.run(["git", "worktree", "prune"], capture_output=True, timeout=10, cwd=str(root))
 
     return finding
 
@@ -1244,7 +1377,7 @@ def _autofix_finding(finding: dict, root: Path) -> dict:
 # Risk-based routing: GitHub issue for high/critical (AC 10)
 # ---------------------------------------------------------------------------
 
-def _open_github_issue(finding: dict) -> dict:
+def _open_github_issue(finding: dict, root: Path) -> dict:
     """Open a GitHub issue for findings that aren't actionable code fixes (e.g., recurring patterns)."""
     finding_id = finding["finding_id"]
     description = finding["description"]
@@ -1258,7 +1391,7 @@ def _open_github_issue(finding: dict) -> dict:
         return finding
 
     # Check for existing issue (AC 16)
-    if _check_existing_issue(finding_id):
+    if _check_existing_issue(finding_id, root):
         finding["status"] = "already-exists"
         finding["processed_at"] = now_iso()
         _log(f"Issue already exists for {finding_id}, skipping")
@@ -1304,7 +1437,7 @@ def _open_github_issue(finding: dict) -> dict:
                 "--body", issue_body,
                 "--label", "dynos-autofix",
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, cwd=str(root),
         )
         if result.returncode == 0:
             issue_url = result.stdout.strip()
@@ -1354,11 +1487,19 @@ def _process_finding(finding: dict, root: Path) -> dict:
 
     category = finding.get("category", "")
 
+    # Classify fixability for routing
+    fixability = _classify_fixability(finding)
+    finding["fixability"] = fixability
+
     # Recurring audit findings are not actionable code fixes — open issue only
     if category == "recurring-audit":
-        return _open_github_issue(finding)
+        return _open_github_issue(finding, root)
 
-    # All other findings go through autofix. High/critical use Opus.
+    # Route based on fixability classification
+    if fixability == "review-only":
+        return _open_github_issue(finding, root)
+
+    # "deterministic" and "likely-safe" go through autofix
     return _autofix_finding(finding, root)
 
 
@@ -1378,6 +1519,27 @@ def cmd_scan(args: argparse.Namespace) -> int:
             "error": "claude CLI not found. Install it: https://docs.anthropic.com/en/docs/claude-code",
         }))
         return 1
+
+    # Acquire exclusive scan lock to prevent concurrent scans
+    lock_path = root / ".dynos" / "scan.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(json.dumps({"error": "scan already running"}))
+        lock_fd.close()
+        return 1
+
+    try:
+        return _cmd_scan_locked(root, max_findings)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+
+
+def _cmd_scan_locked(root: Path, max_findings: int) -> int:
+    """Scan logic, called while holding the scan lock."""
     start_time = time.monotonic()
 
     _log(f"Starting proactive scan on {root}")
