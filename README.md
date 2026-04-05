@@ -25,6 +25,19 @@ That's it. The plugin handles the rest: discovers what's needed, writes a spec, 
 
 You approve twice (spec and plan), then it runs.
 
+## Commands
+
+```
+/dynos-work:start [task]       start a new task
+/dynos-work:execute            execute the approved plan
+/dynos-work:audit              audit, repair, and finish
+/dynos-work:status             check where your task is
+/dynos-work:resume             continue after interruption
+/dynos-work:investigate [bug]  deep bug investigation
+/dynos-work:autofix on         enable background code scanning
+/dynos-work:autofix off        disable it
+```
+
 ## What it does
 
 **Builds better.** Every task goes through spec, plan, execute, audit. Nothing ships without independent verification.
