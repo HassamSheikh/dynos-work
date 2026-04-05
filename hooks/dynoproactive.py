@@ -166,7 +166,8 @@ def _detect_dependency_vulns(root: Path) -> list[dict]:
             if result.stdout.strip():
                 try:
                     data = json.loads(result.stdout)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    _log(f"pip-audit output: invalid JSON: {exc}")
                     data = {}
                 vulns = data.get("dependencies", []) if isinstance(data, dict) else data if isinstance(data, list) else []
                 for vuln in vulns:
@@ -211,7 +212,8 @@ def _detect_dependency_vulns(root: Path) -> list[dict]:
             if result.stdout.strip():
                 try:
                     data = json.loads(result.stdout)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    _log(f"npm audit output: invalid JSON: {exc}")
                     data = {}
                 if isinstance(data, dict):
                     advisories = data.get("advisories", {})
