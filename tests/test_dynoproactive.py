@@ -14,8 +14,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 from dynoproactive import (
+    _check_category_health,
     _classify_fixability,
     _compute_pr_quality_score,
+    _cleanup_merged_branches,
     _compute_file_scores,
     _dedup_finding,
     _description_hash,
@@ -28,6 +30,7 @@ from dynoproactive import (
     _process_finding,
     _rate_limit_reason,
     _recompute_category_confidence,
+    _prune_findings,
     _save_scan_coverage,
     _suppression_reason,
     _sync_outcomes,
@@ -500,3 +503,200 @@ class TestDedupOrdering:
         reason = _dedup_finding(finding, existing)
         assert reason is not None
         assert "exact finding_id" in reason
+
+
+# ---------------------------------------------------------------------------
+# Prune findings (Improvement 2)
+# ---------------------------------------------------------------------------
+
+class TestPruneFindings:
+    def test_removes_old_entries(self) -> None:
+        """Entries older than max_age_days are removed."""
+        from datetime import datetime, timezone, timedelta
+        old_date = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        recent_date = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        findings = [
+            {"status": "new", "found_at": old_date, "description": "old"},
+            {"status": "new", "found_at": recent_date, "description": "recent"},
+        ]
+        result = _prune_findings(findings, max_age_days=30)
+        assert len(result) == 1
+        assert result[0]["description"] == "recent"
+
+    def test_preserves_fixed_entries(self) -> None:
+        """Entries with status 'fixed' are never pruned regardless of age."""
+        from datetime import datetime, timezone, timedelta
+        old_date = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        findings = [
+            {"status": "fixed", "found_at": old_date, "description": "old fixed"},
+            {"status": "new", "found_at": old_date, "description": "old new"},
+        ]
+        result = _prune_findings(findings, max_age_days=30)
+        assert len(result) == 1
+        assert result[0]["status"] == "fixed"
+
+    def test_preserves_issue_opened_entries(self) -> None:
+        """Entries with status 'issue-opened' are never pruned."""
+        from datetime import datetime, timezone, timedelta
+        old_date = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+        findings = [
+            {"status": "issue-opened", "found_at": old_date, "description": "old issue"},
+        ]
+        result = _prune_findings(findings, max_age_days=30)
+        assert len(result) == 1
+
+    def test_caps_at_max_entries(self) -> None:
+        """When over max_entries after age pruning, keeps newest non-preserved."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        findings = []
+        for i in range(10):
+            findings.append({
+                "status": "new",
+                "found_at": (now - timedelta(hours=i)).isoformat(),
+                "description": f"finding-{i}",
+            })
+        result = _prune_findings(findings, max_age_days=30, max_entries=5)
+        assert len(result) == 5
+        # Should keep the 5 newest (hours 0-4)
+        descs = [f["description"] for f in result]
+        assert "finding-0" in descs
+        assert "finding-4" in descs
+
+    def test_empty_list(self) -> None:
+        result = _prune_findings([])
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Dead code re-export false positive (Improvement 1)
+# ---------------------------------------------------------------------------
+
+class TestDeadCodeReexport:
+    def test_reexport_not_flagged(self, tmp_path: Path) -> None:
+        """An import that is used by another file (re-export) should not be flagged."""
+        import subprocess
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        # module_a imports json but doesn't use it locally (re-export)
+        (hooks / "module_a.py").write_text("import json\nx = 1\n")
+        # module_b imports json from module_a
+        (hooks / "module_b.py").write_text("from module_a import json\nprint(json.dumps({}))\n")
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "t@t.com"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+        findings = _detect_dead_code(tmp_path)
+        # json should NOT be flagged as unused in module_a since module_b imports it
+        unused_in_a = [f for f in findings
+                       if "module_a" in f.get("evidence", {}).get("file", "")
+                       and "unused" in f["description"].lower()
+                       and "json" in f.get("evidence", {}).get("unused_imports", [])]
+        assert len(unused_in_a) == 0
+
+
+# ---------------------------------------------------------------------------
+# Category health (Improvement 5)
+# ---------------------------------------------------------------------------
+
+class TestCategoryHealth:
+    def test_healthy_category(self) -> None:
+        """A category with few failures is healthy."""
+        findings = [
+            _make_finding("f1", "low", "dead-code", "desc", {}),
+        ]
+        findings[0]["status"] = "fixed"
+        status, reason = _check_category_health("dead-code", findings)
+        assert status == "ok"
+        assert reason == ""
+
+    def test_disabled_category(self) -> None:
+        """A category with 3+ recent failures is disabled."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        findings = []
+        for i in range(4):
+            f = _make_finding(f"fail-{i}", "low", "dead-code", f"desc-{i}", {})
+            f["status"] = "failed"
+            f["found_at"] = (now - timedelta(days=i)).isoformat()
+            findings.append(f)
+        status, reason = _check_category_health("dead-code", findings)
+        assert status == "disabled"
+        assert "4 failures" in reason
+
+    def test_old_failures_ignored(self) -> None:
+        """Failures older than 30 days don't count."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        findings = []
+        for i in range(5):
+            f = _make_finding(f"old-fail-{i}", "low", "dead-code", f"desc-{i}", {})
+            f["status"] = "failed"
+            f["found_at"] = (now - timedelta(days=60 + i)).isoformat()
+            findings.append(f)
+        status, reason = _check_category_health("dead-code", findings)
+        assert status == "ok"
+
+    def test_disabled_category_blocks_processing(self, tmp_project: Path) -> None:
+        """When a category is disabled, _process_finding marks finding as failed."""
+        from datetime import datetime, timezone, timedelta
+        # Create 3+ recent failures in the findings file
+        now = datetime.now(timezone.utc)
+        existing = []
+        for i in range(3):
+            f = _make_finding(f"prev-fail-{i}", "low", "dead-code", f"prev-{i}", {})
+            f["status"] = "failed"
+            f["found_at"] = (now - timedelta(days=i)).isoformat()
+            existing.append(f)
+        from dynoproactive import _save_findings
+        _save_findings(tmp_project, existing)
+
+        finding = _make_finding("new-dc", "low", "dead-code", "new dead code", {})
+        result = _process_finding(finding, tmp_project)
+        assert result["status"] == "failed"
+        assert "category_disabled" in result.get("fail_reason", "")
+
+
+# ---------------------------------------------------------------------------
+# Cost tracking (Improvement 7)
+# ---------------------------------------------------------------------------
+
+class TestCostTracking:
+    def test_scan_output_has_cost_field(self, tmp_project: Path) -> None:
+        """cmd_scan output JSON includes the cost field."""
+        import io
+        from unittest.mock import patch
+        from dynoproactive import _cmd_scan_locked
+        with patch("dynoproactive._detect_llm_review", return_value=[]), \
+             patch("dynoproactive._detect_dependency_vulns", return_value=[]), \
+             patch("dynoproactive._detect_recurring_audit", return_value=[]), \
+             patch("dynoproactive._detect_architectural_drift", return_value=[]), \
+             patch("dynoproactive._cleanup_merged_branches"):
+            captured = io.StringIO()
+            with patch("sys.stdout", captured):
+                _cmd_scan_locked(tmp_project, max_findings=3)
+            output = json.loads(captured.getvalue())
+        assert "cost" in output
+        assert "haiku_invocations" in output["cost"]
+        assert "fix_invocations" in output["cost"]
+        assert "estimated_cost_usd" in output["cost"]
+        assert output["cost"]["haiku_invocations"] == 0  # LLM review was mocked out
+
+
+# ---------------------------------------------------------------------------
+# Findings persistence with dict format
+# ---------------------------------------------------------------------------
+
+class TestFindingsDictFormat:
+    def test_load_dict_format(self, tmp_path: Path) -> None:
+        """_load_findings handles the new dict format with category_health."""
+        (tmp_path / ".dynos").mkdir()
+        data = {
+            "findings": [{"finding_id": "x", "status": "new"}],
+            "category_health": {"dead-code": {"status": "disabled", "reason": "test"}},
+        }
+        (tmp_path / ".dynos" / "proactive-findings.json").write_text(json.dumps(data))
+        findings = _load_findings(tmp_path)
+        assert len(findings) == 1
+        assert findings[0]["finding_id"] == "x"
