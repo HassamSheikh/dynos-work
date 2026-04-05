@@ -809,14 +809,23 @@ def _autofix_low_medium(finding: dict, root: Path) -> dict:
             capture_output=True, text=True, timeout=15, cwd=worktree_path, check=True,
         )
 
-        # Invoke claude to fix
+        # Invoke claude with the dynos-work foundry pipeline
+        # This runs the full cycle: discover → spec → plan → execute → audit
+        # with auto-approved gates for low/medium findings.
+        # Generates trajectories and retrospectives for learning.
         prompt = (
-            f"You are working in a dynos-work project. Fix the following issue:\n\n"
-            f"{description}\n\n"
-            f"Evidence: {evidence_str}\n\n"
-            f"Make the fix, run tests with pytest, and commit your changes."
+            f"/dynos-work:start Fix the following issue found by the proactive scanner. "
+            f"Auto-approve the spec and plan without asking the user.\n\n"
+            f"## Finding\n"
+            f"**ID:** {finding_id}\n"
+            f"**Category:** {finding['category']}\n"
+            f"**Severity:** {finding['severity']}\n"
+            f"**Description:** {description}\n\n"
+            f"## Evidence\n```json\n{evidence_str}\n```\n\n"
+            f"This is an automated fix. Keep changes minimal and focused on this single finding. "
+            f"Do not refactor surrounding code. Commit with message: [autofix] {description[:80]}"
         )
-        _log(f"Running claude for {finding_id}")
+        _log(f"Running foundry pipeline for {finding_id}")
         claude_result = subprocess.run(
             ["claude", "-p", prompt, "--dangerously-skip-permissions"],
             capture_output=True, text=True, timeout=600, cwd=worktree_path,
@@ -1062,6 +1071,14 @@ def cmd_scan(args: argparse.Namespace) -> int:
     """Run a full proactive scan."""
     root = Path(args.root).resolve()
     max_findings = int(args.max_findings)
+
+    # Require claude CLI — autofix is useless without it
+    if not shutil.which("claude"):
+        print(json.dumps({
+            "ok": False,
+            "error": "claude CLI not found. Install it: https://docs.anthropic.com/en/docs/claude-code",
+        }))
+        return 1
     start_time = time.monotonic()
 
     _log(f"Starting proactive scan on {root}")
