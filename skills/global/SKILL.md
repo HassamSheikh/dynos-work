@@ -1,6 +1,6 @@
 ---
 name: global
-description: "Manage the global cross-project sweeper daemon."
+description: "Internal dynos-work skill. Manage the global cross-project sweeper daemon."
 ---
 
 # dynos-work: Global

@@ -1,6 +1,6 @@
 ---
 name: plan
-description: "Power user: Re-run planning on an existing task. Use when you need to regenerate the plan after spec changes, or if the task was started externally. Runs PLANNING → PLAN_REVIEW → PLAN_AUDIT with deterministic artifact validation."
+description: "Internal dynos-work skill. Re-run planning on an existing task. Use when you need to regenerate the plan after spec changes, or if the task was started externally. Runs PLANNING → PLAN_REVIEW → PLAN_AUDIT with deterministic artifact validation."
 ---
 
 # dynos-work: Plan

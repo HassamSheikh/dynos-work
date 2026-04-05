@@ -1,6 +1,6 @@
 ---
 name: init
-description: "Set up the current project: register with dynos-work and start the local daemon."
+description: "Internal dynos-work skill. Set up the current project: register with dynos-work and start the local daemon."
 ---
 
 # dynos-work: Init

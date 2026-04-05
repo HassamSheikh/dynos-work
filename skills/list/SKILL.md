@@ -1,6 +1,6 @@
 ---
 name: list
-description: "List all registered dynos-work projects."
+description: "Internal dynos-work skill. List all registered dynos-work projects."
 ---
 
 # dynos-work: List

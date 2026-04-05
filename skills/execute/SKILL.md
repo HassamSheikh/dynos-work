@@ -1,6 +1,6 @@
 ---
 name: execute
-description: "Internal dynos-work skill. Orchestrates execution graph segments through specialized executor agents, including dependency management and error recovery."
+description: "Execute the approved plan. Orchestrates execution graph segments through specialized executor agents, including dependency management and error recovery."
 ---
 
 # dynos-work: Execute Skill

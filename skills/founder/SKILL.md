@@ -1,6 +1,6 @@
 ---
 name: founder
-description: "Foundry strategic design-review service. Uses sandbox simulations and targeted checks to vet high-risk architecture options before human approval."
+description: "Internal dynos-work skill. Foundry strategic design-review service. Uses sandbox simulations and targeted checks to vet high-risk architecture options before human approval."
 ---
 
 # dynos-work: Founder (Design Review Engine)

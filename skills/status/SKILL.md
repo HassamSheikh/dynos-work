@@ -1,6 +1,6 @@
 ---
 name: status
-description: "Power user: Show current task state, lifecycle stage, audit results, and open gaps."
+description: "Show current task state, lifecycle stage, audit results, and open gaps."
 ---
 
 # dynos-work: Status

@@ -1,6 +1,6 @@
 ---
 name: investigate
-description: "Power user: Deep bug investigation. Pass a short description of the problem — error message, unexpected behavior, or failing test. Returns structured root cause analysis with evidence and fix recommendation."
+description: "Deep bug investigation. Pass a short description of the problem — error message, unexpected behavior, or failing test. Returns structured root cause analysis with evidence and fix recommendation."
 ---
 
 # dynos-work: investigate

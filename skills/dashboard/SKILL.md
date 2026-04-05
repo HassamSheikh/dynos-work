@@ -1,6 +1,6 @@
 ---
 name: dashboard
-description: "Start the global dashboard server showing all registered projects."
+description: "Internal dynos-work skill. Start the global dashboard server showing all registered projects."
 ---
 
 # dynos-work: Dashboard

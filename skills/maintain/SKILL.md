@@ -1,6 +1,6 @@
 ---
 name: maintain
-description: "Autonomous maintenance worker. Periodically scans the repo for technical debt, security anti-patterns, and architectural drift. If issues are found, it automatically creates a repair branch, implements the fix, verifies with audits/tests, and opens a Pull Request."
+description: "Internal dynos-work skill. Autonomous maintenance worker. Periodically scans the repo for technical debt, security anti-patterns, and architectural drift. If issues are found, it automatically creates a repair branch, implements the fix, verifies with audits/tests, and opens a Pull Request."
 ---
 
 # dynos-work: Maintain (The Autonomous Backend)

@@ -1,6 +1,6 @@
 ---
 name: audit
-description: "Power user: Run checkpoint audit, repair any findings, then reach DONE — all in one shot. Use after /dynos-work:execute."
+description: "Run checkpoint audit, repair any findings, then reach DONE — all in one shot. Use after /dynos-work:execute."
 ---
 
 # dynos-work: Audit

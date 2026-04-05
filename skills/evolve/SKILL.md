@@ -1,6 +1,6 @@
 ---
 name: evolve
-description: "Evolutionary agent management. Generates learned agents, maintains Agent Routing, prunes underperforming agents, and manages auditor mode transitions. Also performs proactive repo-wide pattern analysis."
+description: "Internal dynos-work skill. Evolutionary agent management. Generates learned agents, maintains Agent Routing, prunes underperforming agents, and manages auditor mode transitions. Also performs proactive repo-wide pattern analysis."
 ---
 
 # dynos-work: Evolve

@@ -1,6 +1,6 @@
 ---
 name: start
-description: "Unified Foundry entry point. Drives discovery, design review, spec normalization, plan generation, deterministic artifact validation, and mandatory human approval before execution."
+description: "Start a new task. Give it a description and it handles discovery, spec, plan, execution, and audit."
 ---
 
 # dynos-work: Unified Foundry Start

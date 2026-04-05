@@ -1,6 +1,6 @@
 ---
 name: autofix
-description: "Run the autofix scanner: detect technical debt, open PRs for low-risk fixes, open issues for high-risk findings."
+description: "Internal dynos-work skill. Run the autofix scanner: detect technical debt, open PRs for low-risk fixes, open issues for high-risk findings."
 ---
 
 # dynos-work: Autofix

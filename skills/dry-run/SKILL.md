@@ -1,6 +1,6 @@
 ---
 name: dry-run
-description: "Validate contract.json chaining across the skill pipeline. Checks that output_schema of each pipeline stage covers the required input_schema fields of the next stage."
+description: "Internal dynos-work skill. Validate contract.json chaining across the skill pipeline. Checks that output_schema of each pipeline stage covers the required input_schema fields of the next stage."
 ---
 
 # dynos-work: Dry Run

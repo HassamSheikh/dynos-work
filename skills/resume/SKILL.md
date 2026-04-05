@@ -1,6 +1,6 @@
 ---
 name: resume
-description: "Power user: Resume an interrupted task from .dynos/ state. Use after session restart or context compression."
+description: "Resume an interrupted task from .dynos/ state. Use after session restart or context compression."
 ---
 
 # dynos-work: Resume
