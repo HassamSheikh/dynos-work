@@ -1717,36 +1717,38 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
     finding["branch_name"] = branch_name
     category_stats["proposed"] = int(category_stats.get("proposed", 0) or 0) + 1
 
-    # Detect current branch for PR base
+    # Detect the repo's default branch (not the user's current branch).
+    # Autofix PRs always target the default branch regardless of what
+    # the user is working on.
+    base_branch = "main"
     try:
-        base_result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True, timeout=5, cwd=str(root),
+        # Try gh api first — most reliable way to get the default branch
+        gh_result = subprocess.run(
+            ["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
+            capture_output=True, text=True, timeout=10, cwd=str(root),
         )
-        base_branch = base_result.stdout.strip() if base_result.returncode == 0 else ""
-        if not base_branch or base_branch == "HEAD":
-            # Detached HEAD — find the default branch
+        if gh_result.returncode == 0 and gh_result.stdout.strip():
+            base_branch = gh_result.stdout.strip()
+        else:
+            # Fallback: git symbolic-ref
             default_result = subprocess.run(
                 ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
                 capture_output=True, text=True, timeout=5, cwd=str(root),
             )
             if default_result.returncode == 0:
-                # refs/remotes/origin/main → main
                 base_branch = default_result.stdout.strip().split("/")[-1]
             else:
-                # Last resort: check if main or master exists
+                # Last resort: check if main or master exists on remote
                 for candidate in ("main", "master"):
                     check = subprocess.run(
-                        ["git", "rev-parse", "--verify", candidate],
+                        ["git", "rev-parse", "--verify", f"origin/{candidate}"],
                         capture_output=True, timeout=5, cwd=str(root),
                     )
                     if check.returncode == 0:
                         base_branch = candidate
                         break
-                else:
-                    base_branch = "main"
     except (subprocess.TimeoutExpired, OSError):
-        base_branch = "main"
+        pass
 
     # Prune stale worktrees before creating a new one
     subprocess.run(["git", "worktree", "prune"], capture_output=True, timeout=10, cwd=str(root))
