@@ -2118,6 +2118,12 @@ def _open_github_issue(finding: dict, root: Path, policy: dict | None = None) ->
     )
 
     try:
+        # Ensure label exists (create if missing, ignore if already exists)
+        subprocess.run(
+            ["gh", "label", "create", "dynos-autofix", "--color", "0E8A16",
+             "--description", "Automated fix by dynos-work autofix scanner", "--force"],
+            capture_output=True, text=True, timeout=10, cwd=str(root),
+        )
         result = subprocess.run(
             [
                 "gh", "issue", "create",
