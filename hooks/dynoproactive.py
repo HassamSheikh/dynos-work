@@ -2091,32 +2091,77 @@ def _open_github_issue(finding: dict, root: Path, policy: dict | None = None) ->
     category = finding['category']
     severity = finding['severity']
     evidence = finding.get('evidence', {})
-    file_name = evidence.get('file', 'unknown file')
+    file_name = evidence.get('file', '')
     line_num = evidence.get('line', '')
-    location = f"`{file_name}:{line_num}`" if line_num else f"`{file_name}`"
 
-    # Map category to plain English
-    category_labels = {
-        "recurring-audit": "Recurring pattern",
-        "dependency-vuln": "Dependency vulnerability",
-        "dead-code": "Dead code",
-        "architectural-drift": "Architectural drift",
-        "syntax-error": "Syntax error",
-        "llm-review": "Code review finding",
-    }
-    category_label = category_labels.get(category, category)
+    if category == "recurring-audit":
+        # Recurring pattern — summarize the trend, list affected tasks, suggest action
+        audit_cat = evidence.get("category", "unknown")
+        rate = evidence.get("occurrence_rate", 0)
+        task_ids = evidence.get("task_ids", [])
+        issue_body = (
+            f"## Recurring `{audit_cat}` findings\n\n"
+            f"The `{audit_cat}` auditor found issues in **{len(task_ids)}** of the last "
+            f"**{max(len(task_ids), int(len(task_ids) / rate)) if rate else '?'}** tasks "
+            f"({rate:.0%} occurrence rate).\n\n"
+            f"This suggests a systemic pattern — not a one-off issue.\n\n"
+            f"### Affected tasks\n\n"
+        )
+        for tid in task_ids:
+            issue_body += f"- `{tid}`\n"
+        issue_body += (
+            f"\n### Suggested actions\n\n"
+            f"1. Review the `{audit_cat}` findings across these tasks for common root causes\n"
+            f"2. Add a prevention rule if a pattern is clear\n"
+            f"3. Consider updating code standards or linting rules to catch this earlier\n"
+        )
+    elif category == "dependency-vuln":
+        pkg = evidence.get("package", evidence.get("name", "unknown"))
+        vuln_id = evidence.get("vuln_id", evidence.get("advisory", ""))
+        issue_body = (
+            f"## Dependency vulnerability: `{pkg}`\n\n"
+            f"{description}\n\n"
+        )
+        if vuln_id:
+            issue_body += f"**Advisory:** {vuln_id}\n"
+        issue_body += (
+            f"**Severity:** {severity}\n\n"
+            f"### Suggested actions\n\n"
+            f"1. Update `{pkg}` to a patched version\n"
+            f"2. If no patch exists, evaluate whether the vulnerability affects your usage\n"
+            f"3. Consider adding the package to a monitoring list\n"
+        )
+    else:
+        # Code finding (llm-review, dead-code, syntax-error, architectural-drift)
+        location = f"`{file_name}:{line_num}`" if line_num else (f"`{file_name}`" if file_name else "unknown location")
+        cat_detail = evidence.get("category_detail", "")
+        reviewer = evidence.get("reviewer", "")
 
-    issue_body = (
-        f"## {category_label}\n\n"
-        f"{description}\n\n"
-        f"**Where:** {location}\n"
-        f"**Severity:** {severity}\n\n"
-        f"## Why this needs human review\n\n"
-        f"This was flagged as **{severity}** severity, which means the autofix scanner "
-        f"won't attempt an automated fix. A human should review and decide how to address it.\n\n"
-        f"## Evidence\n\n"
-        f"```json\n{evidence_str}\n```\n\n"
-        f"---\n"
+        issue_body = f"## {description}\n\n"
+        issue_body += f"**File:** {location}\n"
+        issue_body += f"**Severity:** {severity}\n"
+        if cat_detail:
+            issue_body += f"**Category:** {cat_detail}\n"
+        if reviewer:
+            issue_body += f"**Detected by:** {reviewer}\n"
+        issue_body += "\n"
+
+        # Add context based on what failed
+        fail_reason = finding.get("fail_reason", "")
+        if "attempt" in str(finding.get("attempt_count", 0)) or finding.get("attempt_count", 0) > 1:
+            issue_body += (
+                f"### Why this is an issue (not a PR)\n\n"
+                f"The autofix scanner attempted to fix this automatically "
+                f"({finding.get('attempt_count', 0)} attempts) but could not produce a clean fix. "
+                f"This needs manual attention.\n\n"
+            )
+        issue_body += (
+            f"### Suggested fix\n\n"
+            f"Review the code at {location} and address the finding described above.\n"
+        )
+
+    issue_body += (
+        f"\n---\n"
         f"*Flagged by [dynos-work](https://github.com/dynos-fit/dynos-work) proactive scanner.*"
     )
 
