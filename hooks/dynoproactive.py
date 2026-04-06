@@ -108,8 +108,8 @@ def _default_category_policy(category: str) -> dict:
 
 def _default_autofix_policy() -> dict:
     return {
-        "max_prs_per_day": 3,
-        "max_open_prs": 5,
+        "max_prs_per_day": 100,
+        "max_open_prs": 100,
         "cooldown_after_failures": 2,
         "allow_dependency_file_changes": False,
         "suppressions": [],
