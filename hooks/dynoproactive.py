@@ -1840,32 +1840,50 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
                 _log(f"Claude produced no changes for {finding_id}")
                 return finding
 
-            # Stage and commit if Claude didn't already commit
-            add_result = subprocess.run(
-                ["git", "add", "-A"],
+            # Check if Claude already committed (common with --permission-mode auto)
+            log_check_2 = subprocess.run(
+                ["git", "log", f"{base_branch}..HEAD", "--oneline"],
                 capture_output=True, text=True, timeout=10, cwd=worktree_path,
             )
-            if add_result.returncode != 0:
-                finding["status"] = "failed"
-                finding["fail_reason"] = f"git_add_failed: {add_result.stderr.strip()}"
-                finding["processed_at"] = now_iso()
-                _log(f"git add failed for {finding_id}: {add_result.stderr.strip()}")
-                return finding
-            subprocess.run(
-                ["git", "diff", "--cached", "--quiet"],
-                capture_output=True, timeout=10, cwd=worktree_path,
-            )
-            commit_result = subprocess.run(
-                ["git", "commit", "-m", f"[autofix] {description[:80]}",
-                 "--author", "dynos-autofix <autofix@dynos.fit>"],
-                capture_output=True, text=True, timeout=15, cwd=worktree_path,
-            )
-            if commit_result.returncode != 0:
-                finding["status"] = "failed"
-                finding["fail_reason"] = f"git_commit_failed: {commit_result.stderr.strip()}"
-                finding["processed_at"] = now_iso()
-                _log(f"git commit failed for {finding_id}: {commit_result.stderr.strip()}")
-                return finding
+            already_committed = bool(log_check_2.stdout.strip())
+
+            if not already_committed:
+                # Stage and commit — Claude left uncommitted changes
+                add_result = subprocess.run(
+                    ["git", "add", "-A"],
+                    capture_output=True, text=True, timeout=10, cwd=worktree_path,
+                )
+                if add_result.returncode != 0:
+                    finding["status"] = "failed"
+                    finding["fail_reason"] = f"git_add_failed: {add_result.stderr.strip()}"
+                    finding["processed_at"] = now_iso()
+                    _log(f"git add failed for {finding_id}: {add_result.stderr.strip()}")
+                    return finding
+                # Check if anything was actually staged
+                staged_check_2 = subprocess.run(
+                    ["git", "diff", "--cached", "--quiet"],
+                    capture_output=True, timeout=10, cwd=worktree_path,
+                )
+                if staged_check_2.returncode == 0:
+                    # Nothing staged after add — Claude made changes but they vanished
+                    finding["status"] = "failed"
+                    finding["fail_reason"] = "claude_no_changes"
+                    finding["processed_at"] = now_iso()
+                    _log(f"Nothing staged after git add for {finding_id}")
+                    return finding
+                commit_result = subprocess.run(
+                    ["git", "commit", "-m", f"[autofix] {description[:80]}",
+                     "--author", "dynos-autofix <autofix@dynos.fit>"],
+                    capture_output=True, text=True, timeout=15, cwd=worktree_path,
+                )
+                if commit_result.returncode != 0:
+                    finding["status"] = "failed"
+                    finding["fail_reason"] = f"git_commit_failed: {commit_result.stderr.strip()}"
+                    finding["processed_at"] = now_iso()
+                    _log(f"git commit failed for {finding_id}: {commit_result.stderr.strip()}")
+                    return finding
+            else:
+                _log(f"Claude already committed for {finding_id}, skipping commit step")
 
             # Post-fix verification gate
             verify_ok, verify_reason, verify_report = _verify_fix(root, worktree_path, finding, policy)
