@@ -27,7 +27,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from dynoslib import (
+from dynoslib_core import (
     _persistent_project_dir,
     collect_retrospectives,
     load_json,

@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Event bus drain runner for dynos-work.
+
+Processes events emitted by pipelines. Each handler wraps an existing
+subprocess call. Handlers emit follow-on events, which the drain loop
+picks up on the next iteration. All errors are swallowed (matching the
+previous || true behavior).
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from dynoslib_events import (
+    cleanup_old_events,
+    consume_events,
+    emit_event,
+    mark_processed,
+)
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------------------
+# Handler functions
+# ---------------------------------------------------------------------------
+
+def _run(cmd: list[str], root: Path) -> bool:
+    """Run a subprocess. Returns True on success, False on failure."""
+    env = {**os.environ, "PYTHONPATH": f"{SCRIPT_DIR}:{os.environ.get('PYTHONPATH', '')}"}
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout per handler
+        )
+        if result.returncode != 0 and result.stderr:
+            print(f"  [warn] {cmd[0]}: {result.stderr[:200]}", file=sys.stderr)
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError) as e:
+        print(f"  [warn] {cmd[0]}: {e}", file=sys.stderr)
+        return False
+
+
+def run_learn(root: Path, _payload: dict) -> bool:
+    """Aggregate retrospectives into project memory."""
+    # Use claude CLI to invoke the learn skill (same as old hook)
+    return _run(["claude", "-p", "Run /dynos-work:learn for the most recently completed task"], root)
+
+
+def run_trajectory(root: Path, _payload: dict) -> bool:
+    """Rebuild trajectory store from all retrospectives."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynostrajectory.py"), "rebuild", "--root", str(root)],
+        root,
+    )
+
+
+def run_evolve(root: Path, _payload: dict) -> bool:
+    """Deterministic learned agent generation."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynoevolve.py"), "auto", "--root", str(root)],
+        root,
+    )
+
+
+def run_patterns(root: Path, _payload: dict) -> bool:
+    """Refresh patterns file from live runtime state."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynopatterns.py"), "--root", str(root)],
+        root,
+    )
+
+
+def run_postmortem(root: Path, _payload: dict) -> bool:
+    """Generate automatic postmortem."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynopostmortem.py"), "generate", "--root", str(root)],
+        root,
+    )
+
+
+def run_improve(root: Path, _payload: dict) -> bool:
+    """Run improvement cycle (project-local only)."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynopostmortem.py"), "improve", "--root", str(root)],
+        root,
+    )
+
+
+def run_benchmark(root: Path, _payload: dict) -> bool:
+    """Auto-benchmark shadow challengers."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynoauto.py"), "run", "--root", str(root)],
+        root,
+    )
+
+
+def run_dashboard(root: Path, _payload: dict) -> bool:
+    """Refresh live dashboard artifacts."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynodashboard.py"), "generate", "--root", str(root)],
+        root,
+    )
+
+
+def run_register(root: Path, _payload: dict) -> bool:
+    """Mark project active in global registry."""
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynoregistry.py"), "set-active", str(root)],
+        root,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Handler registry
+# ---------------------------------------------------------------------------
+# Each event type maps to a list of (consumer_name, handler_fn).
+# Follow-on events are defined separately in the FOLLOW_ON dict.
+
+HandlerEntry = tuple[str, Callable[[Path, dict], bool]]
+
+HANDLERS: dict[str, list[HandlerEntry]] = {
+    "task-completed": [
+        ("learn", run_learn),
+        ("trajectory", run_trajectory),
+    ],
+    "learn-completed": [
+        ("evolve", run_evolve),
+        ("patterns", run_patterns),
+    ],
+    "evolve-completed": [
+        ("postmortem", run_postmortem),
+        ("improve", run_improve),
+        ("benchmark", run_benchmark),
+    ],
+    "benchmark-completed": [
+        ("dashboard", run_dashboard),
+        ("register", run_register),
+    ],
+}
+
+# Maps event type to the follow-on event emitted when handlers complete
+FOLLOW_ON: dict[str, str] = {
+    "task-completed": "learn-completed",
+    "learn-completed": "evolve-completed",
+    "evolve-completed": "benchmark-completed",
+}
+
+
+# ---------------------------------------------------------------------------
+# Drain loop
+# ---------------------------------------------------------------------------
+
+def drain(root: Path, max_iterations: int = 10) -> dict:
+    """Process all pending events until the queue is drained.
+
+    Returns a summary dict of what ran.
+    """
+    summary: dict[str, list[str]] = {}
+    emitted_follow_ons: set[str] = set()
+    iteration = 0
+
+    while iteration < max_iterations:
+        iteration += 1
+        processed_any = False
+
+        for event_type, handlers in HANDLERS.items():
+            for consumer_name, handler_fn in handlers:
+                events = consume_events(root, event_type, consumer_name)
+                for event_path, event_data in events:
+                    processed_any = True
+                    payload = event_data.get("payload", {})
+
+                    # Run handler, swallow errors (|| true semantics)
+                    try:
+                        success = handler_fn(root, payload)
+                    except Exception as e:
+                        print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
+                        success = False
+
+                    # Mark as processed regardless of success
+                    mark_processed(event_path, consumer_name)
+
+                    # Track in summary
+                    status = "ok" if success else "failed"
+                    summary.setdefault(event_type, []).append(f"{consumer_name}:{status}")
+
+            # After all handlers for this event type complete, emit follow-on
+            # (only if events were processed and follow-on not already emitted)
+            if event_type in summary and event_type in FOLLOW_ON:
+                follow_on = FOLLOW_ON[event_type]
+                if follow_on not in emitted_follow_ons:
+                    emit_event(root, follow_on, "eventbus")
+                    emitted_follow_ons.add(follow_on)
+
+        if not processed_any:
+            break
+
+    # Cleanup old events
+    cleanup_old_events(root)
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def cmd_drain(args) -> int:
+    """Drain all pending events."""
+    root = Path(args.root).resolve()
+    summary = drain(root, max_iterations=args.max_iterations)
+
+    if summary:
+        for event_type, results in summary.items():
+            for result in results:
+                print(f"  {event_type}: {result}")
+    else:
+        print("  No events to process")
+
+    return 0
+
+
+def build_parser():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    drain_p = sub.add_parser("drain", help="Process all pending events")
+    drain_p.add_argument("--root", default=".")
+    drain_p.add_argument("--max-iterations", type=int, default=10)
+    drain_p.set_defaults(func=cmd_drain)
+
+    return parser
+
+
+if __name__ == "__main__":
+    from dyno_cli_base import cli_main
+    raise SystemExit(cli_main(build_parser))

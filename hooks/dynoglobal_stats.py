@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from dynoslib import collect_retrospectives, now_iso, write_json
+from dynoslib_core import collect_retrospectives, now_iso, write_json
 
 
 def extract_project_stats(project_root: Path) -> dict:

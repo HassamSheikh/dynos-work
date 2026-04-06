@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 
-from dynoslib import collect_retrospectives
+from dynoslib_core import collect_retrospectives
 
 
 TEXT_EXTENSIONS = {

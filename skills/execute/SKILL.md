@@ -9,6 +9,16 @@ Manages the parallel execution of the implementation plan via the execution grap
 
 ## What you do
 
+### Step 0 — Contract validation
+
+Validate that all required inputs from the start skill are present:
+
+```text
+python3 hooks/dynosctl.py validate-contract --skill execute --task-dir .dynos/task-{id}
+```
+
+If validation fails with missing required inputs, print the errors and stop. Do not proceed with execution.
+
 ### Step 1 — Review the Plan
 
 Read `spec.md`, `plan.md`, and `execution-graph.json`. Ensure you understand the dependency chain.
@@ -159,6 +169,20 @@ Deterministically verify before completion:
 Append to log:
 ```
 {timestamp} [DONE] execute — all segments complete and tested
+```
+
+### Handoff — Write handoff record
+
+After Step 5, write `.dynos/task-{id}/handoff-execute-audit.json`:
+
+```json
+{
+  "from_skill": "execute",
+  "to_skill": "audit",
+  "handoff_at": "{ISO timestamp}",
+  "contract_version": "1.0.0",
+  "manifest_stage": "{current stage}"
+}
 ```
 
 ## Hard Rules

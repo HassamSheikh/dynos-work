@@ -91,13 +91,15 @@ Create any missing directories. The `.staging/` directory holds new agents enter
 
 Maintain the `## Agent Routing` section in `dynos_patterns.md`, but treat `.dynos/learned-agents/registry.json` plus `hooks/dynoroute.py` as the live routing source of truth.
 
-#### 2a -- Compute routing composite
+#### 2a -- Routing composites (deterministic)
 
-For each `(role, task_type, source)` combination present in the Effectiveness Scores, compute a routing composite score:
+Routing composite scores are computed by the Python runtime. Do not compute them inline. To inspect current composites:
 
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynopatterns.py" effectiveness --root "${PROJECT_ROOT}"
 ```
-routing_composite = 0.6 * quality_ema + 0.25 * efficiency_ema + 0.15 * cost_ema
-```
+
+The `routing_composites` field in the output contains `{role:task_type:source -> score}` using weights `0.6 * quality + 0.25 * efficiency + 0.15 * cost`.
 
 #### 2b -- Write Agent Routing table
 

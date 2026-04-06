@@ -8,7 +8,7 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib import (
+from dynoslib_core import (
     collect_retrospectives,
     load_json,
     now_iso,

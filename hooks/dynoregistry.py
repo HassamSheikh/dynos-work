@@ -19,7 +19,7 @@ from dynoglobal import (
     set_project_status,
     unregister_project,
 )
-from dynoslib import now_iso
+from dynoslib_core import now_iso
 
 
 # ---------------------------------------------------------------------------

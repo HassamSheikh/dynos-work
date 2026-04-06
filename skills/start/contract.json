@@ -1,4 +1,5 @@
 {
+  "version": "1.0.0",
   "skill": "start",
   "description": "Primary entry point. Runs discovery, design, classification, spec normalization, spec review, planning, plan review, and spec coverage audit.",
   "input_schema": {

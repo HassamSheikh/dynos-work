@@ -9,17 +9,10 @@ import json
 import subprocess
 from pathlib import Path
 
-from dynoslib import (
-    benchmark_policy_config,
-    entry_is_stale,
-    ensure_automation_queue,
-    ensure_learned_registry,
-    matching_fixtures_for_registry_entry,
-    now_iso,
-    queue_identity,
-    replace_automation_queue,
-    tasks_since,
-)
+from dynoslib_core import benchmark_policy_config, now_iso, tasks_since
+from dynoslib_registry import ensure_learned_registry, entry_is_stale
+from dynoslib_benchmark import matching_fixtures_for_registry_entry
+from dynoslib_queue import ensure_automation_queue, queue_identity, replace_automation_queue
 
 
 def _run_python(script: Path, *args: str) -> subprocess.CompletedProcess[str]:

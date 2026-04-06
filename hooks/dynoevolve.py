@@ -8,13 +8,8 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib import (
-    collect_retrospectives,
-    ensure_learned_registry,
-    register_learned_agent,
-    now_iso,
-    _persistent_project_dir,
-)
+from dynoslib_core import collect_retrospectives, now_iso, _persistent_project_dir
+from dynoslib_registry import ensure_learned_registry, register_learned_agent
 
 
 def _matching_retrospectives(

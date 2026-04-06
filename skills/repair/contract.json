@@ -1,4 +1,5 @@
 {
+  "version": "1.0.0",
   "skill": "repair",
   "description": "Manually repair a specific finding from an audit report without running the full audit pipeline.",
   "input_schema": {

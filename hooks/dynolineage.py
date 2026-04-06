@@ -8,7 +8,8 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib import ensure_benchmark_history, ensure_benchmark_index, ensure_learned_registry
+from dynoslib_registry import ensure_learned_registry
+from dynoslib_benchmark import ensure_benchmark_history, ensure_benchmark_index
 
 
 def build_lineage(root: Path) -> dict:

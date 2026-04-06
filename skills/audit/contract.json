@@ -1,6 +1,7 @@
 {
+  "version": "1.0.0",
   "skill": "audit",
-  "description": "Run checkpoint audit, two-phase repair loop, reflect, learn, then reach DONE.",
+  "description": "Run checkpoint audit, two-phase repair loop, reflect, then reach DONE. Post-completion processing (learn, evolve) runs via event bus.",
   "input_schema": {
     "manifest.json": {
       "type": "object",
@@ -58,10 +59,6 @@
     "completion.json": {
       "type": "object",
       "description": "Task completion record"
-    },
-    "dynos_patterns.md": {
-      "type": "string",
-      "description": "Updated learned patterns file in project memory directory"
     },
     "execution-log.md": {
       "type": "string",

@@ -8,7 +8,8 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
-from dynoslib import collect_retrospectives, now_iso, register_learned_agent
+from dynoslib_core import collect_retrospectives, now_iso
+from dynoslib_registry import register_learned_agent
 
 
 def build_body(root: Path, role: str, task_type: str, source_tasks: list[str]) -> str:

@@ -14,9 +14,16 @@ from dynoslib_core import (
     tasks_since,
     write_json,
 )
-from dynoslib_benchmark import compute_benchmark_summary
-
 MAX_REGISTRY_BENCHMARKS: int = 200
+
+# Static empty summary — avoids cross-domain import from dynoslib_benchmark.
+_EMPTY_BENCHMARK_SUMMARY: dict = {
+    "sample_count": 0,
+    "mean_quality": 0.0,
+    "mean_cost": 0.0,
+    "mean_efficiency": 0.0,
+    "mean_composite": 0.0,
+}
 
 
 def ensure_learned_registry(root: Path) -> dict:
@@ -73,7 +80,7 @@ def register_learned_agent(
         "generated_at": now_iso(),
         "mode": "shadow",
         "status": "active",
-        "benchmark_summary": compute_benchmark_summary([]),
+        "benchmark_summary": dict(_EMPTY_BENCHMARK_SUMMARY),
     }
     if existing:
         existing.update(record)

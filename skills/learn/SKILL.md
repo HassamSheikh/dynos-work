@@ -151,72 +151,34 @@ Analyzed {N} task retrospective(s).
 
 After writing the core sections (Steps 1-4), compute effectiveness scores and derive policies from retrospectives that contain reward data (`quality_score`, `cost_score`, `efficiency_score`, `model_used_by_agent`). Append four new sections to `dynos_patterns.md` after the existing Spawn Efficiency section. All existing sections remain unchanged.
 
-#### 5a -- Extract reward data
+#### 5a-5d -- Deterministic policy computation
 
-From all collected retrospectives, select those that contain a `quality_score` field. These retrospectives also contain `cost_score`, `efficiency_score`, `model_used_by_agent` (object mapping agent name to model string), `task_type`, and optionally `agent_source` (object mapping agent name to source string). The `agent_source` field is written by the audit skill and read by the learn skill. Each value is either `"generic"` or `"learned:{agent-name}"` indicating which agent definition was used. Retrospectives without `quality_score` are excluded from EMA computation but remain included in Steps 1-4 aggregations.
+All EMA computation, Model Policy derivation, Skip Policy derivation, and effectiveness scoring are handled by the Python runtime. Do not compute these inline.
 
-**Backward compatibility:** Retrospectives that lack an `agent_source` field (older format) are treated as if every agent in `model_used_by_agent` has source `"generic"`.
+Run:
 
-**Input validation:** For each selected retrospective, validate reward fields before use:
-- `quality_score`, `cost_score`, `efficiency_score` must each be a number in `[0.0, 1.0]`. If a field is not a number, is `null`, or is outside `[0.0, 1.0]`, skip that entire retrospective and log: `{timestamp} [WARN] invalid reward field in {task_id} -- skipping retrospective`
-- `model_used_by_agent` must be an object (not null, not a string, not an array). If invalid, skip the retrospective.
-- Each value in `model_used_by_agent` must be one of `haiku`, `sonnet`, `opus`, or `null`. Agents with `null` are skipped. Agents with any other value are skipped (do not propagate unknown model names into EMA).
-- `task_type` must be a non-empty string. If missing or not a string, skip the retrospective.
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynopatterns.py" --root "${PROJECT_ROOT}"
+```
 
-Sort validated retrospectives by task ID ascending (chronological replay) to ensure deterministic EMA results.
+This command:
+- Extracts reward data from retrospectives (quality_score, cost_score, efficiency_score, model_used_by_agent, agent_source)
+- Validates inputs (skips retrospectives with invalid fields)
+- Computes EMA effectiveness scores per (role, model, task_type, source) quad with alpha=0.3
+- Handles regression detection (2+ consecutive quality drops blend toward baseline)
+- Derives Model Policy (composite scoring with tie-breaking, security-auditor monotonicity)
+- Derives Skip Policy (skip-exempt enforcement, threshold from quality EMA)
+- Enforces cold-start gate (no policies until 5+ scored retrospectives)
+- Writes `dynos_patterns.md` with all sections
+- Writes `model-policy.json`, `skip-policy.json`, `route-policy.json`
 
-For each validated retrospective, derive per-agent quads: for each agent in `model_used_by_agent`, the quad key is `(role=agent_name, model=model_used_by_agent[agent_name], task_type=task_type, source=agent_source[agent_name])`. The `source` value is `"generic"` when no `agent_source` mapping exists for the agent (backward compatibility). The scores applied to each quad are the task-level scores: `quality_score`, `cost_score`, `efficiency_score`. Agents whose model value is `null` or invalid are skipped.
+The model does NOT perform any of these calculations. The Python runtime handles all arithmetic deterministically.
 
-#### 5b -- Compute Effectiveness Scores via EMA
+To inspect the computed scores without writing files:
 
-For each unique `(role, model, task_type, source)` quad derived in Step 5a (processed in chronological task order):
-
-1. **Initialize:** On the first observation for a quad (cold-start), use `alpha = 1.0`:
-   - `quality_ema = quality_score`
-   - `cost_ema = cost_score`
-   - `efficiency_ema = efficiency_score`
-   - `sample_count = 1`
-
-2. **Update:** On subsequent observations, use `alpha = 0.3`:
-   - `quality_ema = 0.3 * quality_score + 0.7 * old_quality_ema`
-   - `cost_ema = 0.3 * cost_score + 0.7 * old_cost_ema`
-   - `efficiency_ema = 0.3 * efficiency_score + 0.7 * old_efficiency_ema`
-   - Increment `sample_count`.
-
-3. **Regression detection:** Track per-quad whether `quality_score` dropped compared to the previous observation for 2+ consecutive tasks. If so, blend toward baseline:
-   - `quality_ema = 0.3 * baseline_quality + 0.7 * quality_ema`
-   - `cost_ema = 0.3 * baseline_cost + 0.7 * cost_ema`
-   - `efficiency_ema = 0.3 * baseline_efficiency + 0.7 * efficiency_ema`
-   - Print warning: `{timestamp} [WARN] regression detected -- blending toward baseline: ({role}, {model}, {task_type}, {source})`
-
-4. **Meta-validator bounds:** Clamp all EMA values to `[0, 1]`. If any value was out of bounds, print warning: `{timestamp} [WARN] meta-validator clamped EMA from {raw} to {clamped} for ({role}, {model}, {task_type}, {source})`
-
-5. **Row cap:** Keep at most 50 rows in the Effectiveness Scores table. If exceeded, evict rows with the oldest `Updated` timestamp until at 50.
-
-#### 5c -- Derive Model Policy
-
-For each unique `(role, task_type)` pair present in the Effectiveness Scores (aggregate across all `source` values -- Model Policy is source-agnostic):
-
-1. Compute a composite score per model: `composite = 0.5 * quality_ema + 0.3 * cost_ema + 0.2 * efficiency_ema`.
-2. Ignore any row whose model is not one of `{haiku, sonnet, opus}`. Clamp and warn if needed: `{timestamp} [WARN] meta-validator clamped model from {raw} to {clamped} for ({role}, {task_type})`
-3. Rank eligible models deterministically:
-   - higher `composite` wins
-   - if composite scores are within `0.03`, higher `quality_ema` wins
-   - if still tied, higher `efficiency_ema` wins
-   - if still tied, the cheaper model wins in the order `haiku < sonnet < opus`
-   - if still tied, sort alphabetically
-4. Confidence = `min(1, quality_ema * min(1, sample_count / 5))` for the winning model. This rewards observed quality and refuses to overstate confidence on thin data.
-5. **Monotonicity:** `security-auditor` must never be assigned a model below `opus`. If the derived model is not `opus`, override to `opus` and print warning: `{timestamp} [WARN] monotonicity override: security-auditor forced to opus for task_type={task_type}`
-6. Confidence must be in `[0, 1]`. Clamp and warn if out of bounds: `{timestamp} [WARN] meta-validator clamped confidence from {raw} to {clamped} for ({role}, {task_type})`
-
-#### 5d -- Derive Skip Policy
-
-For each unique auditor present in the Effectiveness Scores:
-
-1. **Skip-exempt auditors:** `security-auditor`, `spec-completion-auditor`, and `code-quality-auditor` must never appear in the Skip Policy. If found, remove and print warning: `{timestamp} [WARN] skip-exempt auditor {auditor} removed from Skip Policy`
-2. For eligible auditors, compute skip threshold: `round(3 + 2 * (1 - quality_ema))` where `quality_ema` is the auditor's average quality EMA across all its quads. Set `confidence` to the `quality_ema` value used in this computation.
-3. **Cold-start default:** If no quality data, threshold = 3 and confidence = 0.
-4. **Meta-validator bounds:** Threshold must be an integer in `[1, 10]`. Clamp and warn if out of bounds: `{timestamp} [WARN] meta-validator clamped skip threshold from {raw} to {clamped} for {auditor}`
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynopatterns.py" effectiveness --root "${PROJECT_ROOT}"
+```
 
 #### 5e -- Baseline Policy management
 
@@ -283,11 +245,11 @@ No effectiveness data yet -- no retrospectives contain reward data.
 
 And omit `## Model Policy`, `## Skip Policy`, and `## Baseline Policy`.
 
-### Step 6 -- Success Hand-off
-
-If the learn task has completed successfully, call the **evolve** skill to process these updated patterns into agent routing and generation.
+### Step 6 -- Done
 
 Print:
 ```
-dynos-work: Policy and aggregation complete. Handing off to /dynos-work:evolve.
+dynos-work: Policy and aggregation complete.
 ```
+
+Evolve, benchmarks, and dashboard refresh are handled by the event bus when learn runs as part of the `task-completed` hook. When invoked manually, learn is standalone and does not trigger evolve.

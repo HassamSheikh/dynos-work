@@ -20,7 +20,8 @@ from dynoglobal import (
     sweeps_log_path,
 )
 from dynoglobal_stats import extract_project_stats
-from dynoslib import _persistent_project_dir, now_iso, validate_generated_html, write_json
+from dynoslib_core import _persistent_project_dir, now_iso, write_json
+from dynoslib_validate import validate_generated_html
 
 
 # ---------------------------------------------------------------------------

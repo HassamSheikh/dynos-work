@@ -10,17 +10,18 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import json
+import math
 from pathlib import Path
 
-from dynoslib import (
+from dynoslib_core import (
     _persistent_project_dir,
     _safe_float,
     collect_retrospectives,
-    ensure_learned_registry,
     load_json,
     now_iso,
     project_policy,
 )
+from dynoslib_registry import ensure_learned_registry
 
 
 # ---------------------------------------------------------------------------
@@ -47,17 +48,121 @@ def _read_policy_json(root: Path, filename: str, key: str) -> dict | None:
     return None
 
 
+COMPOSITE_WEIGHTS = (0.5, 0.3, 0.2)  # quality, cost, efficiency
+DEFAULT_UCB_C = 0.5
+COLD_START_MINIMUM = 5
+
+
+def _parse_effectiveness_scores(
+    path: Path, role: str, task_type: str,
+) -> list[dict]:
+    """Parse the Effectiveness Scores table for a given role and task_type.
+
+    Returns a list of dicts with keys: model, quality, cost, efficiency, samples.
+    Aggregates across source values (generic + learned) per model.
+    """
+    rows: dict[str, dict] = {}  # keyed by model
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+
+    in_table = False
+    for line in text.splitlines():
+        if "## Effectiveness Scores" in line:
+            in_table = True
+            continue
+        if in_table and line.startswith("## "):
+            break
+        if not in_table or not line.startswith("|") or "---" in line or "Role" in line:
+            continue
+        parts = [p.strip() for p in line.split("|") if p.strip()]
+        # Columns: Role, Model, Task Type, Source, Quality EMA, Cost EMA, Efficiency EMA, Sample Count, Updated
+        if len(parts) < 8:
+            continue
+        if parts[0] != role or parts[2] != task_type:
+            continue
+
+        m = parts[1]
+        try:
+            quality = float(parts[4])
+            cost = float(parts[5])
+            efficiency = float(parts[6])
+            samples = int(float(parts[7]))
+        except (ValueError, IndexError):
+            continue
+
+        if m in rows:
+            # Aggregate: weighted average by sample count
+            existing = rows[m]
+            total = existing["samples"] + samples
+            if total > 0:
+                w_old = existing["samples"] / total
+                w_new = samples / total
+                existing["quality"] = existing["quality"] * w_old + quality * w_new
+                existing["cost"] = existing["cost"] * w_old + cost * w_new
+                existing["efficiency"] = existing["efficiency"] * w_old + efficiency * w_new
+                existing["samples"] = total
+        else:
+            rows[m] = {
+                "model": m,
+                "quality": quality,
+                "cost": cost,
+                "efficiency": efficiency,
+                "samples": max(samples, 1),
+            }
+
+    return list(rows.values())
+
+
+def _ucb_select_model(
+    candidates: list[dict], exploration_c: float,
+) -> dict | None:
+    """Select the best model using UCB1.
+
+    Each candidate has: model, quality, cost, efficiency, samples.
+    Returns the winning candidate dict with added ucb_score and exploration_bonus,
+    or None if no candidates.
+    """
+    if not candidates:
+        return None
+
+    total_pulls = sum(c["samples"] for c in candidates)
+    if total_pulls < COLD_START_MINIMUM:
+        return None
+
+    best = None
+    best_ucb = -1.0
+
+    for c in candidates:
+        wq, wc, we = COMPOSITE_WEIGHTS
+        composite = wq * c["quality"] + wc * c["cost"] + we * c["efficiency"]
+
+        if c["samples"] > 0 and total_pulls > 0:
+            exploration = exploration_c * math.sqrt(math.log(total_pulls) / c["samples"])
+        else:
+            exploration = float("inf")  # untried arm gets maximum exploration
+
+        ucb_score = composite + exploration
+
+        if ucb_score > best_ucb:
+            best_ucb = ucb_score
+            best = {**c, "ucb_score": round(ucb_score, 4), "exploration_bonus": round(exploration, 4)}
+
+    return best
+
+
 def resolve_model(root: Path, role: str, task_type: str) -> dict:
     """Determine which model an agent should use.
 
     Priority order:
       1. policy.json model_overrides  -> source: "explicit_policy"
-      2. model-policy.json            -> source: "learned_history"
-      3. dynos_patterns.md markdown   -> source: "learned_history"
+      2. UCB1 over effectiveness scores -> source: "ucb"
+      3. model-policy.json fallback   -> source: "learned_history"
       4. no match                     -> source: "default"
       5. security floor enforcement   -> source: "security_floor"
 
-    Returns {"model": str|None, "source": str}.
+    Returns {"model": str|None, "source": str, "ucb_score": float?, "exploration_bonus": float?}.
     """
     policy = project_policy(root)
     key = f"{role}:{task_type}"
@@ -66,36 +171,52 @@ def resolve_model(root: Path, role: str, task_type: str) -> dict:
     model_overrides = policy.get("model_overrides", {})
     model = model_overrides.get(key) or model_overrides.get(role)
     if model:
-        source = "explicit_policy"
-    else:
-        source = "default"
+        return {"model": model, "source": "explicit_policy"}
 
-        # 2. JSON policy file (learned history)
-        entry = _read_policy_json(root, "model-policy.json", key)
-        if entry and isinstance(entry, dict) and entry.get("model"):
-            model = entry["model"]
-            source = "learned_history"
+    # 2. UCB1 over effectiveness scores
+    patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
+    if patterns_path.exists():
+        candidates = _parse_effectiveness_scores(patterns_path, role, task_type)
+        if candidates:
+            exploration_c = float(policy.get("ucb_exploration_constant", DEFAULT_UCB_C))
+            winner = _ucb_select_model(candidates, exploration_c)
+            if winner:
+                model = winner["model"]
+                source = "ucb"
+                result = {"model": model, "source": source,
+                          "ucb_score": winner["ucb_score"],
+                          "exploration_bonus": winner["exploration_bonus"]}
+                # Security floor: security-auditor never below opus
+                if role == "security-auditor" and model in ("haiku", "sonnet"):
+                    result["model"] = SECURITY_FLOOR_MODEL
+                    result["source"] = "security_floor"
+                return result
 
-        # 3. Markdown fallback
-        if not model:
-            patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
-            if patterns_path.exists():
-                try:
-                    model = _parse_model_from_patterns(patterns_path, role, task_type)
-                    if model and model != "default":
-                        source = "learned_history"
-                    else:
-                        model = None
-                except (OSError, ValueError):
-                    pass
+    # 3. model-policy.json fallback (backward compat for pre-UCB projects)
+    entry = _read_policy_json(root, "model-policy.json", key)
+    if entry and isinstance(entry, dict) and entry.get("model"):
+        model = entry["model"]
+        # Security floor
+        if role == "security-auditor" and model in ("haiku", "sonnet"):
+            return {"model": SECURITY_FLOOR_MODEL, "source": "security_floor"}
+        return {"model": model, "source": "learned_history"}
 
-    # Security floor: security-auditor never below opus
+    # 4. Model Policy markdown table fallback (oldest format)
+    if patterns_path.exists():
+        try:
+            model = _parse_model_from_patterns(patterns_path, role, task_type)
+            if model and model != "default":
+                if role == "security-auditor" and model in ("haiku", "sonnet"):
+                    return {"model": SECURITY_FLOOR_MODEL, "source": "security_floor"}
+                return {"model": model, "source": "learned_history"}
+        except (OSError, ValueError):
+            pass
+
+    # 5. No data — default
     if role == "security-auditor":
-        if not model or model in ("haiku", "sonnet"):
-            model = SECURITY_FLOOR_MODEL
-            source = "security_floor"
+        return {"model": SECURITY_FLOOR_MODEL, "source": "security_floor"}
 
-    return {"model": model, "source": source}
+    return {"model": DEFAULT_MODEL, "source": "default"}
 
 
 def _parse_model_from_patterns(path: Path, role: str, task_type: str) -> str | None:
@@ -264,7 +385,7 @@ def resolve_route(root: Path, role: str, task_type: str) -> dict:
                 "composite_score": composite,
                 "source": f"learned agent file not found: {agent_path}",
             }
-            agent_path = str(full_path)
+        agent_path = str(full_path)
 
     return {
         "mode": mode,

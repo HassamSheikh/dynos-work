@@ -8,7 +8,8 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib import ensure_learned_registry, synthesize_fixture_for_entry
+from dynoslib_registry import ensure_learned_registry
+from dynoslib_benchmark import synthesize_fixture_for_entry
 
 
 def _find_entry(root: Path, agent_name: str, role: str, task_type: str, item_kind: str) -> dict:

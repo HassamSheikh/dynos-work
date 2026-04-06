@@ -8,7 +8,7 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib import rebuild_trajectory_store, search_trajectories
+from dynoslib_trajectory import rebuild_trajectory_store, search_trajectories
 
 
 def cmd_rebuild(args: argparse.Namespace) -> int:

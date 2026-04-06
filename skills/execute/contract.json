@@ -1,4 +1,5 @@
 {
+  "version": "1.0.0",
   "skill": "execute",
   "description": "Snapshot, run all executor segments in dependency order, then run the test suite.",
   "input_schema": {
@@ -44,6 +45,10 @@
     "execution-log.md": {
       "type": "string",
       "description": "Appended log entries for PRE_EXECUTION_SNAPSHOT, EXECUTION, TEST_EXECUTION stages"
+    },
+    "handoff-execute-audit.json": {
+      "type": "object",
+      "description": "Handoff record confirming execute outputs are valid for audit consumption"
     }
   }
 }

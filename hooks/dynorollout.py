@@ -9,7 +9,9 @@ import json
 from pathlib import Path
 
 from dynobench import load_fixture, run_fixture
-from dynoslib import append_benchmark_run, apply_evaluation_to_registry, now_iso, upsert_fixture_trace
+from dynoslib_core import now_iso
+from dynoslib_registry import apply_evaluation_to_registry
+from dynoslib_benchmark import append_benchmark_run, upsert_fixture_trace
 
 
 def validate_rollout_fixture(fixture: dict) -> None:

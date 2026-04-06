@@ -12,12 +12,12 @@ import tempfile
 import time
 from pathlib import Path
 
-from dynoslib import (
+from dynoslib_core import now_iso
+from dynoslib_registry import apply_evaluation_to_registry
+from dynoslib_benchmark import (
     append_benchmark_run,
-    apply_evaluation_to_registry,
     benchmark_fixture_score,
     evaluate_candidate,
-    now_iso,
     upsert_fixture_trace,
 )
 ALLOWED_COMMAND_PREFIXES = (

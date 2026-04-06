@@ -1,4 +1,5 @@
 {
+  "version": "1.0.0",
   "skill": "register",
   "description": "Register the current project with the dynos-work global registry at ~/.dynos/.",
   "input_schema": {},

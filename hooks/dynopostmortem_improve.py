@@ -12,15 +12,15 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dynoslib import (
+from dynoslib_core import (
     _persistent_project_dir,
     _safe_float,
     collect_retrospectives,
     load_json,
     now_iso,
+    project_dir,
     write_json,
 )
-from dynoslib_core import project_dir
 
 
 # Token budgets by (risk_level, task_type)

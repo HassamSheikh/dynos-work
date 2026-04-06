@@ -1,4 +1,5 @@
 {
+  "version": "1.0.0",
   "skill": "learn",
   "description": "Aggregate task retrospectives into project memory. Computes effectiveness scores, derives Model Policy and Skip Policy, generates learned agents, maintains Agent Routing, and prunes underperforming agents.",
   "input_schema": {

@@ -11,7 +11,7 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 import sys
 from pathlib import Path
 
-from dynoslib import validate_task_artifacts
+from dynoslib_validate import validate_task_artifacts
 
 
 def main() -> int:

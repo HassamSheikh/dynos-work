@@ -8,14 +8,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from dynoslib import (
-    check_segment_ownership,
-    find_active_tasks,
-    load_json,
-    next_command_for_stage,
-    transition_task,
-    validate_task_artifacts,
-)
+from dynoslib_core import find_active_tasks, load_json, next_command_for_stage, transition_task
+from dynoslib_validate import check_segment_ownership, validate_task_artifacts
 
 
 def cmd_validate_task(args: argparse.Namespace) -> int:
@@ -74,6 +68,71 @@ def cmd_check_ownership(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_repair_plan(args: argparse.Namespace) -> int:
+    import json as _json
+    import sys as _sys
+    from dynoslib_qlearn import build_repair_plan
+    findings = _json.load(_sys.stdin)
+    if isinstance(findings, dict):
+        findings = findings.get("findings", [])
+    result = build_repair_plan(Path(args.root).resolve(), findings, args.task_type)
+    print(_json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_repair_update(args: argparse.Namespace) -> int:
+    import json as _json
+    import sys as _sys
+    from dynoslib_qlearn import update_from_outcomes
+    data = _json.load(_sys.stdin)
+    outcomes = data.get("outcomes", []) if isinstance(data, dict) else data
+    result = update_from_outcomes(Path(args.root).resolve(), outcomes, args.task_type)
+    print(_json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_compute_reward(args: argparse.Namespace) -> int:
+    import json
+    from dynoslib_validate import compute_reward
+    task_dir = Path(args.task_dir).resolve()
+    result = compute_reward(task_dir)
+    if args.write:
+        from dynoslib_core import write_json
+        write_json(task_dir / "task-retrospective.json", result)
+        print(f"Written to {task_dir / 'task-retrospective.json'}")
+    else:
+        print(json.dumps(result, indent=2))
+    return 0
+
+
+def cmd_validate_contract(args: argparse.Namespace) -> int:
+    import json
+    from dynoslib_contracts import validate_inputs, validate_outputs
+    task_dir = Path(args.task_dir).resolve()
+    project_root = Path(args.root).resolve() if args.root else task_dir.parent.parent
+
+    if args.direction == "input":
+        errors = validate_inputs(args.skill, task_dir, project_root, strict=args.strict)
+    elif args.direction == "output":
+        errors = validate_outputs(args.skill, task_dir)
+    else:
+        errors = validate_inputs(args.skill, task_dir, project_root, strict=args.strict)
+        errors.extend(validate_outputs(args.skill, task_dir))
+
+    result = {"skill": args.skill, "valid": len(errors) == 0, "errors": errors}
+    print(json.dumps(result, indent=2))
+    return 1 if errors else 0
+
+
+def cmd_validate_chain(args: argparse.Namespace) -> int:
+    import json
+    from dynoslib_contracts import validate_chain
+    errors = validate_chain()
+    result = {"valid": len(errors) == 0, "errors": errors}
+    print(json.dumps(result, indent=2))
+    return 1 if errors else 0
+
+
 def cmd_list_pending(args: argparse.Namespace) -> int:
     from dynopostmortem import cmd_list_pending as _list_pending
     return _list_pending(args)
@@ -112,6 +171,32 @@ def build_parser() -> argparse.ArgumentParser:
     ownership_parser.add_argument("segment_id")
     ownership_parser.add_argument("files", nargs="+")
     ownership_parser.set_defaults(func=cmd_check_ownership)
+
+    rp_parser = subparsers.add_parser("repair-plan", help="Q-learning repair plan (reads findings from stdin)")
+    rp_parser.add_argument("--root", default=".")
+    rp_parser.add_argument("--task-type", dest="task_type", required=True)
+    rp_parser.set_defaults(func=cmd_repair_plan)
+
+    ru_parser = subparsers.add_parser("repair-update", help="Update Q-tables from repair outcomes (reads from stdin)")
+    ru_parser.add_argument("--root", default=".")
+    ru_parser.add_argument("--task-type", dest="task_type", required=True)
+    ru_parser.set_defaults(func=cmd_repair_update)
+
+    reward_parser = subparsers.add_parser("compute-reward", help="Deterministically compute reward scores from task artifacts")
+    reward_parser.add_argument("task_dir")
+    reward_parser.add_argument("--write", action="store_true", help="Write task-retrospective.json")
+    reward_parser.set_defaults(func=cmd_compute_reward)
+
+    contract_parser = subparsers.add_parser("validate-contract", help="Validate skill contract inputs/outputs")
+    contract_parser.add_argument("--skill", required=True, help="Skill name (e.g. execute, audit)")
+    contract_parser.add_argument("--task-dir", dest="task_dir", required=True, help="Task directory")
+    contract_parser.add_argument("--root", default=None, help="Project root (default: inferred from task dir)")
+    contract_parser.add_argument("--direction", choices=["input", "output", "both"], default="input")
+    contract_parser.add_argument("--strict", action="store_true")
+    contract_parser.set_defaults(func=cmd_validate_contract)
+
+    chain_parser = subparsers.add_parser("validate-chain", help="Validate contract chain across the pipeline")
+    chain_parser.set_defaults(func=cmd_validate_chain)
 
     pending_parser = subparsers.add_parser("list-pending", help="List unapplied improvement proposals")
     pending_parser.add_argument("--root", default=".")

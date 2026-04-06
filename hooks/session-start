@@ -14,7 +14,7 @@ PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}" python3 -c "
 import json, sys
 sys.path.insert(0, '${SCRIPT_DIR}')
 from dynorouter import load_prevention_rules
-from dynoslib import project_policy, _persistent_project_dir
+from dynoslib_core import project_policy, _persistent_project_dir
 from pathlib import Path
 root = Path('${PROJECT_ROOT}')
 policy = project_policy(root)

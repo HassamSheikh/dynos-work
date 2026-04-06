@@ -390,6 +390,151 @@ def validate_retrospective(task_dir: Path) -> list[str]:
     return errors
 
 
+RISK_BUDGETS: dict[str, int] = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}
+
+
+def compute_reward(task_dir: Path) -> dict:
+    """Deterministically compute reward scores from task artifacts.
+
+    Reads audit reports, repair-log, token-usage, execution-log, and manifest.
+    Returns the full task-retrospective dict ready to be written to disk.
+    """
+    task_dir = Path(task_dir)
+    task_id = task_dir.name
+
+    # --- 1. Scan audit reports ---
+    findings_by_auditor: dict[str, int] = {}
+    findings_by_category: dict[str, int] = {}
+    total_findings = 0
+    reports_dir = task_dir / "audit-reports"
+    if reports_dir.exists():
+        for report_path in sorted(reports_dir.glob("*.json")):
+            try:
+                report = load_json(report_path)
+            except (json.JSONDecodeError, OSError):
+                continue
+            findings = report.get("findings", [])
+            auditor = report.get("auditor_name", report_path.stem)
+            count = len(findings)
+            findings_by_auditor[auditor] = findings_by_auditor.get(auditor, 0) + count
+            total_findings += count
+            for finding in findings:
+                fid = finding.get("id", "")
+                category = fid.split("-")[0] if "-" in fid else fid
+                if category:
+                    findings_by_category[category] = findings_by_category.get(category, 0) + 1
+
+    # --- 2. Repair log ---
+    executor_repair_frequency: dict[str, int] = {}
+    repair_cycle_count = 0
+    repair_log_path = task_dir / "repair-log.json"
+    if repair_log_path.exists():
+        try:
+            repair_log = load_json(repair_log_path)
+            repair_cycle_count = int(repair_log.get("repair_cycle", 0))
+            for batch in repair_log.get("batches", []):
+                for task in batch.get("tasks", []):
+                    executor = task.get("assigned_executor", "")
+                    if executor:
+                        executor_repair_frequency[executor] = executor_repair_frequency.get(executor, 0) + 1
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # --- 3. Spec review iterations ---
+    spec_review_iterations = 0
+    log_path = task_dir / "execution-log.md"
+    if log_path.exists():
+        try:
+            for line in log_path.read_text().splitlines():
+                if "[HUMAN] SPEC_REVIEW" in line:
+                    spec_review_iterations += 1
+        except OSError:
+            pass
+
+    # --- 4. Classification from manifest ---
+    manifest = load_json(task_dir / "manifest.json")
+    classification = manifest.get("classification", {})
+    task_type = classification.get("type", "feature")
+    task_domains = ",".join(classification.get("domains", []))
+    task_risk_level = classification.get("risk_level", "medium")
+
+    # --- 5. Token and model tracking ---
+    token_usage_by_agent: dict[str, int] = {}
+    total_token_usage = 0
+    token_path = task_dir / "token-usage.json"
+    if token_path.exists():
+        try:
+            token_data = load_json(token_path)
+            token_usage_by_agent = token_data.get("agents", {})
+            total_token_usage = token_data.get("total", 0)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # --- 6. Spawn/waste tracking ---
+    subagent_spawn_count = 0
+    if log_path.exists():
+        try:
+            for line in log_path.read_text().splitlines():
+                if "[SPAWN]" in line:
+                    subagent_spawn_count += 1
+        except OSError:
+            pass
+
+    wasted_spawns = 0
+    if reports_dir.exists():
+        for report_path in sorted(reports_dir.glob("*.json")):
+            try:
+                report = load_json(report_path)
+                if len(report.get("findings", [])) == 0:
+                    wasted_spawns += 1
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    # --- 7. Reward vector ---
+    # quality_score
+    if total_findings == 0:
+        quality_score = 0.9
+    else:
+        surviving = sum(findings_by_auditor.values())
+        quality_score = 1.0 - (surviving / total_findings)
+
+    # cost_score
+    budget = RISK_BUDGETS.get(task_risk_level, 12000)
+    if subagent_spawn_count == 0 or total_token_usage == 0:
+        cost_score = 1.0
+    else:
+        avg_tokens = total_token_usage / subagent_spawn_count
+        cost_score = 1.0 / (1.0 + (avg_tokens / budget))
+
+    # efficiency_score
+    efficiency_score = 1.0 - (repair_cycle_count / 3.0) - (max(0, spec_review_iterations - 1) * 0.1)
+
+    # Clamp all to [0, 1]
+    quality_score = max(0.0, min(1.0, quality_score))
+    cost_score = max(0.0, min(1.0, cost_score))
+    efficiency_score = max(0.0, min(1.0, efficiency_score))
+
+    return {
+        "task_id": task_id,
+        "task_outcome": "DONE",
+        "task_type": task_type,
+        "task_domains": task_domains,
+        "task_risk_level": task_risk_level,
+        "findings_by_auditor": findings_by_auditor,
+        "findings_by_category": findings_by_category,
+        "executor_repair_frequency": executor_repair_frequency,
+        "spec_review_iterations": spec_review_iterations,
+        "repair_cycle_count": repair_cycle_count,
+        "subagent_spawn_count": subagent_spawn_count,
+        "wasted_spawns": wasted_spawns,
+        "token_usage_by_agent": token_usage_by_agent,
+        "total_token_usage": total_token_usage,
+        "quality_score": round(quality_score, 4),
+        "cost_score": round(cost_score, 4),
+        "efficiency_score": round(efficiency_score, 4),
+    }
+
+
 def check_segment_ownership(task_dir: Path, segment_id: str, files: Iterable[str]) -> list[str]:
     """Check that files are owned by the specified segment."""
     graph = load_json(task_dir / "execution-graph.json")

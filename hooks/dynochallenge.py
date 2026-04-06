@@ -9,7 +9,8 @@ import json
 from pathlib import Path
 
 from dynorollout import cmd_run as rollout_cmd_run
-from dynoslib import ensure_learned_registry, load_json, now_iso
+from dynoslib_core import load_json, now_iso
+from dynoslib_registry import ensure_learned_registry
 
 
 def _find_entry(root: Path, agent_name: str, role: str, task_type: str, item_kind: str) -> dict:

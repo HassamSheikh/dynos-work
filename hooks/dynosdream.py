@@ -11,7 +11,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from dynoslib import now_iso, search_trajectories
+from dynoslib_core import now_iso
+from dynoslib_trajectory import search_trajectories
 from dynostate import encode_state
 
 

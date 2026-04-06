@@ -12,7 +12,7 @@ from pathlib import Path
 
 from dynolineage import build_lineage
 from dynoreport import build_report
-from dynoslib import validate_generated_html
+from dynoslib_validate import validate_generated_html
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>

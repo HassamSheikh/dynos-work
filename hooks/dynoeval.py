@@ -8,7 +8,8 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib import apply_evaluation_to_registry, evaluate_candidate
+from dynoslib_registry import apply_evaluation_to_registry
+from dynoslib_benchmark import evaluate_candidate
 
 
 def cmd_evaluate(args: argparse.Namespace) -> int:

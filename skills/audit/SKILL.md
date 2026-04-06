@@ -9,6 +9,16 @@ Runs the full audit-to-done pipeline: audit → repair loop → DONE.
 
 ## What you do
 
+### Step 0 — Contract validation
+
+After finding the active task, validate that all required inputs from the execute skill are present:
+
+```text
+python3 hooks/dynosctl.py validate-contract --skill audit --task-dir .dynos/task-{id}
+```
+
+If validation fails with missing required inputs (evidence files, snapshot SHA), print the errors and stop.
+
 ### Step 1 — Find active task
 
 Find the most recent active task in `.dynos/`. Read `manifest.json`.
@@ -101,6 +111,18 @@ Update stage to `REPAIR_PLANNING`. Append to log:
 {timestamp} [STAGE] → REPAIR_PLANNING
 ```
 
+**Q-learning repair plan (deterministic):** Before spawning the repair coordinator, get executor and model assignments from the Q-learning planner:
+
+```bash
+echo '{"findings": [{finding objects}]}' | python3 "${PLUGIN_HOOKS}/dynosctl.py" repair-plan --root . --task-type {task_type}
+```
+
+If the response has `"source": "q-learning"`, pass the assignments to the repair coordinator as constraints: "Use these executor and model assignments for the listed findings." The coordinator still decides batch ordering, instructions, and file lists — but executor and model choices come from the Q-table.
+
+If `"source": "default"` (Q-learning disabled), the repair coordinator uses its own heuristic rules as before.
+
+Log: `{timestamp} [REPAIR-PLAN] source={source} assignments={N}`
+
 Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports. Produce a repair plan for the given findings. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
 
 Wait for completion. Update stage to `REPAIR_EXECUTION`. Append to log:
@@ -132,6 +154,16 @@ After all batches complete, append to log:
 
 **Late-finding conflict resolution:** All findings from auditors that complete while phase 1 is running are queued for phase 2, regardless of file overlap.
 
+**Q-learning update (after phase 1 repair):** After executors complete but before re-audit, build outcomes from the repair results and update Q-tables:
+
+```bash
+echo '{"outcomes": [{outcome objects}]}' | python3 "${PLUGIN_HOOKS}/dynosctl.py" repair-update --root . --task-type {task_type}
+```
+
+Each outcome includes: finding_id, state (from repair-plan), executor, model, resolved (from re-audit), new_findings count, tokens_used. Set `next_state` to the encoded state for the next retry cycle if unresolved, or `null` if resolved/terminal.
+
+This is a no-op if Q-learning is disabled. Log: `{timestamp} [Q-UPDATE] {N} outcomes, avg reward={avg}`
+
 **Phase 1 re-audit (domain-aware, incremental scope):** Compute the repair-modified file list by unioning `repair-log.json` task file lists with `git diff --name-only` against the pre-repair commit. Scope re-audit to only these files (not the full Step 2 diff). Exception: `spec-completion-auditor` always gets the original full diff scope. All re-audit auditors receive previous reports for context. Spawn only: `spec-completion-auditor` (full scope), `security-auditor` (repair files), and auditors whose findings appear in this phase's repair-log (repair files). Skip domain-unrelated auditors. New findings from re-audit are added to the phase 2 queue.
 
 **Phase 2 — Late findings and re-audit findings repair:**
@@ -160,38 +192,24 @@ After phase 2 repairs complete, run a phase 2 re-audit using the same domain-awa
 
 Read all audit reports. Write `audit-summary.json`.
 
-**Reflect (inline -- no subagent):**
+**Reflect (deterministic reward computation):**
 
-Before writing `completion.json`, generate `task-retrospective.json` in the task directory. This runs inline as part of the DONE gate.
+Before writing `completion.json`, generate `task-retrospective.json` using the deterministic reward calculator:
 
-1. Scan `.dynos/task-{id}/audit-reports/*.json`. For each file, attempt to parse it as JSON. If parsing fails or the file is unreadable, skip it silently.
-2. From successfully parsed audit reports, extract:
-   - **Finding counts by auditor:** For each report, count the number of entries in the `findings` array. Key by `auditor_name`.
-   - **Finding counts by category:** For each finding, use the finding ID prefix (the part before the hyphen-number, e.g. `sec` from `sec-001`) as the category. Count findings per category.
-3. If `.dynos/task-{id}/repair-log.json` exists and is valid JSON:
-   - **Executor repair frequency:** Iterate all tasks across all batches. Count how many repair tasks were assigned to each `assigned_executor` value.
-   - **Repair cycle count:** Read the `repair_cycle` field (integer).
-   - If the file is missing or malformed, set executor repair frequency to `{}` and repair cycle count to `0`.
-4. Scan `.dynos/task-{id}/execution-log.md`. Count lines matching the pattern `[HUMAN] SPEC_REVIEW`. This is the **spec review iteration count**. If the file is missing, set to `0`.
-5. Read `manifest.json`. Flatten the `classification` object into scalar fields: `task_type` (string), `task_domains` (comma-separated string, e.g. "ui,backend"), `task_risk_level` (string). Set **task outcome** to `DONE` (this gate only runs for successful completion).
-6. Compute token and model tracking:
-   - `token_usage_by_agent`: Read `.dynos/task-{id}/token-usage.json`. Use its `agents` dict directly. If the file is missing (token capture failed), fall back to `{}`.
-   - `total_token_usage`: Read the `total` field from `token-usage.json`. If the file is missing, set to `0`.
+```bash
+python3 "${PLUGIN_HOOKS}/dynosctl.py" compute-reward .dynos/task-{id} --write
+```
+
+This reads audit reports, repair-log, token-usage, execution-log, and manifest, then computes quality_score, cost_score, and efficiency_score deterministically. The model does NOT compute these scores — the Python runtime does.
+
+After the command writes the retrospective, the model adds the following fields that require model judgment (not arithmetic):
    - `model_used_by_agent`: map agent name to actual model used at spawn time (null if unavailable).
    - `agent_source`: map agent name to routing source: `"generic"`, `"learned:{prompt-name}"`, or for alongside mode both `"{name}": "generic"` and `"{name}:learned": "learned:{prompt-name}"`.
-7. Compute alongside overlap (only for alongside-mode auditors):
-   - Compare generic vs learned finding sets using dedup keys `{file}:{line}:{category}`.
-   - Record per-auditor: `generic_finding_keys`, `learned_finding_keys`, `learned_is_superset` (boolean), `alongside_task_count` (incremented from prior retrospective, or 1).
-   - Empty `{}` if no alongside auditors ran.
-8. Compute spawn/waste tracking:
-   - `subagent_spawn_count`: count `[SPAWN]` lines in execution-log.md (0 if missing).
-   - `wasted_spawns`: count auditor reports with empty findings arrays.
-   - `auditor_zero_finding_streaks`: per-auditor streaks from prior retrospective. Spawned + zero findings = increment; spawned + findings = reset to 0; skipped = carry forward. If prior retro missing or uses old format, treat prior streaks as 0.
-   - `executor_zero_repair_streak`: consecutive most-recent executor segments with zero repair tasks (0 if repair-log missing).
-9. Compute reward vector (each score clamped to `[0, 1]`):
-   - `quality_score`: `1 - (surviving_findings / total_findings)`. If total is 0, use `0.9` (not 1.0 -- zero findings may indicate auditor gaps).
-   - `cost_score`: `1 / (1 + (avg_tokens_per_spawn / budget))` where budget varies by risk (low=8K, med=12K, high=18K, critical=25K). `1.0` if no tokens/spawns. Apply `-0.05` penalty if all agents are generic (cold-start).
-   - `efficiency_score`: `1 - (repair_cycles / 3) - (max(0, spec_reviews - 1) * 0.1)`.
+   - `alongside_overlap`: for alongside-mode auditors, compare generic vs learned finding sets using dedup keys `{file}:{line}:{category}`. Record per-auditor: `generic_finding_keys`, `learned_finding_keys`, `learned_is_superset` (boolean), `alongside_task_count`. Empty `{}` if no alongside auditors ran.
+   - `auditor_zero_finding_streaks`: per-auditor streaks from prior retrospective. Spawned + zero findings = increment; spawned + findings = reset to 0; skipped = carry forward.
+   - `executor_zero_repair_streak`: consecutive most-recent executor segments with zero repair tasks.
+
+Read the written `task-retrospective.json`, merge these fields into it, and write it back.
 10. Write `.dynos/task-{id}/task-retrospective.json` as a flat JSON object (no nesting beyond one level):
 
 ```json
@@ -228,15 +246,7 @@ Append to log:
 {timestamp} [DONE] reflect — task-retrospective.json written
 ```
 
-**Learn (inline -- no subagent):** After writing the retrospective, aggregate all `.dynos/task-*/task-retrospective.json` files following `skills/learn/SKILL.md`. Write `dynos_patterns.md` to the project memory directory. Skip silently if no retrospectives found. Log: `{timestamp} [DONE] learn — dynos_patterns.md updated ({N} tasks aggregated)`.
-
-**Trajectory rebuild (inline):**
-
-```bash
-python3 "${PLUGIN_HOOKS}/dynostrajectory.py" rebuild --root "${PROJECT_ROOT}"
-```
-
-Postmortems and improvement cycles are NOT run per-task. They accumulate and run in batch during the next maintenance cycle (via the background daemon or manual `dynomaintain.py run-once`). This keeps each task completion fast and batches improvements across multiple tasks for better signal.
+**Post-completion processing:** Learn, trajectory rebuild, evolve, postmortems, and dashboard refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.
 
 Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `dynoslib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:
 ```

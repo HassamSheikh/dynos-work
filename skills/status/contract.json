@@ -1,4 +1,5 @@
 {
+  "version": "1.0.0",
   "skill": "status",
   "description": "Show current task state, lifecycle stage, audit results, and open gaps.",
   "input_schema": {

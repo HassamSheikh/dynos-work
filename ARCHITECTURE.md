@@ -344,14 +344,15 @@ Preferred pattern:
 For contributors, the best order is:
 
 1. `README.md`
-2. `UNDER_THE_HOOD.md`
-3. `skills/start/SKILL.md`
-4. `skills/execute/SKILL.md`
-5. `skills/audit/SKILL.md`
-6. `hooks/dynoslib.py`
-7. `hooks/dynoauto.py`
-8. `hooks/dynodashboard.py`
-9. `tests/test_learning_runtime.py`
+2. `PIPELINES.md`
+3. `UNDER_THE_HOOD.md`
+4. `skills/start/SKILL.md`
+5. `skills/execute/SKILL.md`
+6. `skills/audit/SKILL.md`
+7. `hooks/dynoslib.py`
+8. `hooks/dynoauto.py`
+9. `hooks/dynodashboard.py`
+10. `tests/test_learning_runtime.py`
 
 ## Contributor Principle
 

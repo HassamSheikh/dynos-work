@@ -16,8 +16,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from dynoslib import load_json, now_iso, write_json
-from dynoslib_core import project_dir, is_pid_running
+from dynoslib_core import load_json, now_iso, write_json, project_dir, is_pid_running
 
 # ---------------------------------------------------------------------------
 # Paths

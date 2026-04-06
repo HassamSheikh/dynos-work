@@ -96,7 +96,19 @@ Warnings: NN
 Result: PASS (or FAIL if any required field is missing/mismatched)
 ```
 
-### Step 5 -- Exit
+### Step 5 -- Runtime validation (optional)
+
+If an active or completed task exists in `.dynos/`, run the runtime contract validator against it to verify real artifacts match the declared contracts:
+
+```text
+python3 hooks/dynosctl.py validate-contract --skill start --task-dir .dynos/task-{id} --direction both --strict
+python3 hooks/dynosctl.py validate-contract --skill execute --task-dir .dynos/task-{id} --direction both --strict
+python3 hooks/dynosctl.py validate-contract --skill audit --task-dir .dynos/task-{id} --direction both --strict
+```
+
+Report any mismatches between declared contracts and actual artifacts. This catches drift between what contracts promise and what skills actually produce.
+
+### Step 6 -- Exit
 
 If all required chain links pass, print:
 ```

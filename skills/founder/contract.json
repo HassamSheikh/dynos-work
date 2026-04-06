@@ -1,4 +1,5 @@
 {
+  "version": "1.0.0",
   "skill": "founder",
   "description": "Design-review engine for discovery questions, sandbox architecture playouts, and machine-readable design certificates.",
   "input_schema": {

@@ -8,7 +8,7 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib import resolve_registry_route
+from dynoslib_registry import resolve_registry_route
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:

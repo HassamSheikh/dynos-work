@@ -1,4 +1,5 @@
 {
+  "version": "1.0.0",
   "skill": "dashboard",
   "description": "Display a terminal report summarizing learned policies, finding trends, and executor reliability from task retrospectives.",
   "input_schema": {

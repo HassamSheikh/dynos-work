@@ -99,6 +99,7 @@ For autofix PRs: `gh` (GitHub CLI). For autofix code fixes: `claude` CLI.
 
 ## Links
 
+- [Pipelines](PIPELINES.md)
 - [Internals & CLI reference](INTERNALS.md)
 - [Architecture](ARCHITECTURE.md)
 - [Under the hood](UNDER_THE_HOOD.md)
