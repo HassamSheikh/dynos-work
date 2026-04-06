@@ -352,7 +352,8 @@ def cmd_ensure(args: argparse.Namespace) -> int:
     if current_pid(root) is not None:
         print(json.dumps({"status": "already_running", "pid": current_pid(root)}, indent=2))
         return 0
-    start_args = argparse.Namespace(root=str(root), poll_seconds=policy["maintainer_poll_seconds"])
+    autofix_enabled = (root / ".dynos" / "maintenance" / "autofix.enabled").exists()
+    start_args = argparse.Namespace(root=str(root), poll_seconds=policy["maintainer_poll_seconds"], autofix=autofix_enabled)
     return cmd_start(start_args)
 
 
