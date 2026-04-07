@@ -74,7 +74,7 @@ ALLOWED_STAGE_TRANSITIONS: dict[str, set[str]] = {
     "TEST_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
     "CHECKPOINT_AUDIT": {"REPAIR_PLANNING", "DONE", "FAILED"},
     "REPAIR_PLANNING": {"REPAIR_EXECUTION", "FAILED"},
-    "REPAIR_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "DONE", "FAILED"},
+    "REPAIR_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
     "FINAL_AUDIT": {"CHECKPOINT_AUDIT", "DONE", "FAILED"},
     "EXECUTION_GRAPH_BUILD": {"PRE_EXECUTION_SNAPSHOT", "EXECUTION", "FAILED"},
     "DONE": set(),
@@ -156,22 +156,26 @@ def require(path: Path) -> str:
 def _persistent_project_dir(root: Path) -> Path:
     """Returns ~/.dynos/projects/{slug}/ for persistent project state.
 
-    Stores accumulated intelligence: trajectories, patterns, learned agents,
-    benchmarks, policy. Survives repo .dynos/ cleanup.
-
-    Refuses to create directories for /tmp/ paths to prevent autofix
-    worktrees from polluting persistent storage.
+    Pure path resolution — NO side effects. Does NOT create directories.
+    Callers that need the directory to exist should call
+    ensure_persistent_project_dir() instead.
     """
     resolved = str(root.resolve())
     if os.environ.get("DYNOS_AUTOFIX_WORKTREE") == "1" and resolved.startswith("/tmp/"):
-        # Autofix worktrees are ephemeral — don't pollute ~/.dynos/projects/
-        ephemeral = root.resolve() / ".dynos" / "ephemeral-project"
-        ephemeral.mkdir(parents=True, exist_ok=True)
-        return ephemeral
+        return root.resolve() / ".dynos" / "ephemeral-project"
 
     dynos_home = Path(os.environ.get("DYNOS_HOME", str(Path.home() / ".dynos")))
     slug = resolved.strip("/").replace("/", "-")
-    d = dynos_home / "projects" / slug
+    return dynos_home / "projects" / slug
+
+
+def ensure_persistent_project_dir(root: Path) -> Path:
+    """Returns ~/.dynos/projects/{slug}/, creating it if needed.
+
+    Use this when you need to WRITE to the persistent directory.
+    Use _persistent_project_dir() for read-only path resolution.
+    """
+    d = _persistent_project_dir(root)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -272,13 +276,146 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
         raise ValueError(f"Unknown stage: {next_stage}")
     if not force and next_stage not in ALLOWED_STAGE_TRANSITIONS.get(current_stage, set()):
         raise ValueError(f"Illegal stage transition: {current_stage} -> {next_stage}")
+    # ---- Receipt-based transition gates (unmissable) ----
+    if not force:
+        from dynoslib_receipts import read_receipt, validate_chain
+        gate_errors: list[str] = []
+
+        # EXECUTION requires plan-validated receipt
+        if next_stage == "EXECUTION":
+            if read_receipt(task_dir, "plan-validated") is None:
+                gate_errors.append("receipt: plan-validated (plan was never validated)")
+
+        # CHECKPOINT_AUDIT requires executor-routing receipt
+        if next_stage == "CHECKPOINT_AUDIT":
+            if read_receipt(task_dir, "executor-routing") is None:
+                gate_errors.append("receipt: executor-routing (executor routing was never recorded)")
+
+        # DONE requires everything
+        if next_stage == "DONE":
+            if not (task_dir / "task-retrospective.json").exists():
+                gate_errors.append("task-retrospective.json (run /dynos-work:audit to generate)")
+            if not list(task_dir.glob("audit-reports/*.json")):
+                gate_errors.append("audit-reports/ (no audit reports found — audit was never run)")
+            if read_receipt(task_dir, "retrospective") is None:
+                gate_errors.append("receipt: retrospective (reward was never computed via receipts)")
+            if read_receipt(task_dir, "post-completion") is None:
+                gate_errors.append("receipt: post-completion (post-completion pipeline never ran)")
+
+        if gate_errors:
+            raise ValueError(
+                f"Cannot transition to {next_stage} — missing required artifacts:\n"
+                + "\n".join(f"  - {e}" for e in gate_errors)
+            )
+
     manifest["stage"] = next_stage
     if next_stage == "DONE":
         manifest["completion_at"] = now_iso()
     if next_stage == "FAILED" and manifest.get("blocked_reason") is None:
         manifest["blocked_reason"] = "transitioned to FAILED"
     write_json(manifest_path, manifest)
+
+    # ---- Auto-append to execution-log.md ----
+    _auto_log(task_dir, current_stage, next_stage, force)
+
+    # ---- Log stage transition to events.jsonl ----
+    from dynoslib_log import log_event
+    log_event(
+        task_dir.parent.parent,
+        "stage_transition",
+        task=manifest["task_id"],
+        from_stage=current_stage,
+        to_stage=next_stage,
+        forced=force,
+    )
+
+    # ---- Auto-emit stage-transition event to per-task token ledger ----
+    try:
+        from dynoslib_tokens import record_tokens, phase_for_stage
+        record_tokens(
+            task_dir=task_dir,
+            agent="transition_task",
+            model="none",
+            input_tokens=0,
+            output_tokens=0,
+            phase=phase_for_stage(next_stage),
+            stage=next_stage,
+            event_type="stage-transition",
+            detail=f"{current_stage} → {next_stage}" + (" (forced)" if force else ""),
+        )
+    except Exception:
+        pass  # Never block a stage transition for a logging failure
+
+    # ---- Fire post-completion pipeline on DONE ----
+    if next_stage == "DONE":
+        _fire_task_completed(task_dir)
+
     return current_stage, manifest
+
+
+def append_execution_log(task_dir: Path, message: str) -> None:
+    """Append a timestamped line to the task's execution-log.md.
+
+    This is the ONLY function that should write to execution-log.md.
+    Format: {ISO timestamp} {message}\n
+    """
+    try:
+        log_path = task_dir / "execution-log.md"
+        line = f"{now_iso()} {message}\n"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass  # Never block pipeline for log write failure
+
+
+def _auto_log(task_dir: Path, from_stage: str, to_stage: str, forced: bool) -> None:
+    """Auto-append stage transition to execution-log.md. Called by transition_task()."""
+    force_tag = " (forced)" if forced else ""
+    if to_stage == "DONE":
+        append_execution_log(task_dir, f"[ADVANCE] {from_stage} → DONE{force_tag}")
+    elif to_stage == "FAILED":
+        append_execution_log(task_dir, f"[FAILED] {from_stage} → FAILED{force_tag}")
+    else:
+        append_execution_log(task_dir, f"[STAGE] → {to_stage}{force_tag}")
+
+
+def _fire_task_completed(task_dir: Path) -> None:
+    """Run the post-completion pipeline: event emit → drain (learn, postmortem, evolve, etc).
+
+    This is the ONLY place that fires the pipeline. Never swallow errors silently
+    — print them but don't block the transition.
+    """
+    import subprocess
+
+    root = task_dir.parent.parent  # .dynos/task-xxx -> repo root
+    hooks_dir = root / "hooks"
+    env_path = f"{hooks_dir}:{__import__('os').environ.get('PYTHONPATH', '')}"
+
+    # Step 1: Emit task-completed event
+    try:
+        subprocess.run(
+            ["python3", str(hooks_dir / "dynoslib_events.py"), "emit",
+             "--root", str(root), "--type", "task-completed", "--source", "task"],
+            env={**__import__("os").environ, "PYTHONPATH": env_path},
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as exc:
+        print(f"[dynos] event emit failed: {exc}")
+
+    # Step 2: Drain all events (learn → trajectory → evolve → postmortem → improve)
+    try:
+        result = subprocess.run(
+            ["python3", str(hooks_dir / "dynoeventbus.py"), "drain",
+             "--root", str(root)],
+            env={**__import__("os").environ, "PYTHONPATH": env_path},
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.stdout.strip():
+            print(f"[dynos] post-completion pipeline: {result.stdout.strip()}")
+        if result.returncode != 0 and result.stderr.strip():
+            print(f"[dynos] pipeline warning: {result.stderr.strip()}")
+    except Exception as exc:
+        print(f"[dynos] event drain failed: {exc}")
 
 
 def next_command_for_stage(stage: str) -> str:

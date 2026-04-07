@@ -13,8 +13,51 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from dynoslib_core import now_iso
+from dynoslib_core import now_iso, append_execution_log
 from dynoslib_log import log_event
+
+# Map receipt steps to human-readable execution-log entries
+_LOG_MESSAGES: dict[str, str] = {
+    "plan-routing": "[ROUTE] plan-skill → {route_mode} agent={agent_name}",
+    "spec-validated": "[DONE] spec validated — {criteria_count} acceptance criteria",
+    "plan-validated": "[DONE] plan validated — {segment_count} segments, criteria {criteria_coverage}",
+    "executor-routing": "[ROUTE] executor plan — {n_segments} segments routed",
+    "audit-routing": "[ROUTE] audit plan — {n_auditors} auditors routed",
+    "retrospective": "[DONE] retrospective — quality={quality_score} cost={cost_score} efficiency={efficiency_score}",
+    "post-completion": "[DONE] post-completion — {n_handlers} handlers, postmortem={postmortem_written}",
+    "planner-discovery": "[DONE] planner discovery — tokens={tokens_used}",
+    "planner-spec": "[DONE] planner spec — tokens={tokens_used}",
+    "planner-plan": "[DONE] planner plan — tokens={tokens_used}",
+    "plan-audit-check": "[DONE] plan audit — tokens={tokens_used}",
+    "tdd-tests": "[DONE] TDD tests — tokens={tokens_used}",
+}
+
+
+def _record_tokens(task_dir: Path, agent: str, model: str, tokens: int) -> None:
+    """Record token usage to token-usage.json. Called by receipt writers."""
+    try:
+        from dynoslib_tokens import record_tokens
+        record_tokens(
+            task_dir=task_dir,
+            agent=agent,
+            model=model,
+            input_tokens=tokens // 2,  # rough split since we only have total
+            output_tokens=tokens - tokens // 2,
+            phase="receipt",
+            stage="receipt",
+            event_type="receipt-record",
+            detail=f"auto-recorded via receipt for {agent}",
+        )
+    except Exception:
+        # Fallback: write directly if dynoslib_tokens isn't available
+        try:
+            token_path = task_dir / "token-usage.json"
+            data = json.loads(token_path.read_text()) if token_path.exists() else {"agents": {}, "total": 0}
+            data["agents"][agent] = data.get("agents", {}).get(agent, 0) + tokens
+            data["total"] = sum(v for v in data["agents"].values() if isinstance(v, (int, float)))
+            token_path.write_text(json.dumps(data, indent=2))
+        except Exception:
+            pass
 
 
 def _receipts_dir(task_dir: Path) -> Path:
@@ -39,10 +82,33 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
     receipt_path = receipts / f"{step_name}.json"
     receipt_path.write_text(json.dumps(receipt, indent=2, default=str))
 
-    # Log the receipt write
+    # Log the receipt write to events.jsonl
     root = task_dir.parent.parent
     task_id = task_dir.name
     log_event(root, "receipt_written", task=task_id, step=step_name)
+
+    # Auto-append to execution-log.md
+    template = _LOG_MESSAGES.get(step_name)
+    if template:
+        try:
+            fmt_data = {**payload}
+            # Add computed fields for formatting
+            if "segments" in payload:
+                fmt_data["n_segments"] = len(payload["segments"])
+            if "auditors" in payload:
+                fmt_data["n_auditors"] = len(payload["auditors"])
+            if "handlers_run" in payload:
+                fmt_data["n_handlers"] = len(payload["handlers_run"])
+            msg = template.format(**{k: v for k, v in fmt_data.items() if isinstance(v, (str, int, float, bool, list))})
+            append_execution_log(task_dir, msg)
+        except (KeyError, TypeError):
+            append_execution_log(task_dir, f"[RECEIPT] {step_name}")
+    elif step_name.startswith("executor-seg"):
+        agent = payload.get("agent_name", "generic")
+        injected = payload.get("learned_agent_injected", False)
+        append_execution_log(task_dir, f"[DONE] {step_name} — executor={payload.get('executor_type','')} agent={'learned:' + agent if injected else 'generic'} tokens={payload.get('tokens_used','?')}")
+    elif step_name.startswith("audit-") and step_name != "audit-routing":
+        append_execution_log(task_dir, f"[DONE] {step_name} — findings={payload.get('finding_count',0)} blocking={payload.get('blocking_count',0)}")
 
     return receipt_path
 
@@ -185,6 +251,20 @@ def receipt_plan_routing(
     )
 
 
+def receipt_spec_validated(
+    task_dir: Path,
+    criteria_count: int,
+    validation_passed: bool = True,
+) -> Path:
+    """Write receipt proving spec passed deterministic validation."""
+    return write_receipt(
+        task_dir,
+        "spec-validated",
+        criteria_count=criteria_count,
+        validation_passed=validation_passed,
+    )
+
+
 def receipt_plan_validated(
     task_dir: Path,
     segment_count: int,
@@ -223,7 +303,15 @@ def receipt_executor_done(
     evidence_path: str | None,
     tokens_used: int | None,
 ) -> Path:
-    """Write receipt proving an executor segment completed with learned agent injection."""
+    """Write receipt proving an executor segment completed with learned agent injection.
+
+    Also records token usage to token-usage.json — this is the ONLY reliable
+    path for token recording since receipts are enforced by gates.
+    """
+    # Record tokens deterministically
+    if tokens_used and tokens_used > 0:
+        _record_tokens(task_dir, f"{executor_type}-{segment_id}", model_used or "default", tokens_used)
+
     return write_receipt(
         task_dir,
         f"executor-{segment_id}",
@@ -258,7 +346,12 @@ def receipt_audit_done(
     report_path: str | None,
     tokens_used: int | None,
 ) -> Path:
-    """Write receipt proving an auditor completed."""
+    """Write receipt proving an auditor completed.
+
+    Also records token usage — same enforcement path as executor receipts.
+    """
+    if tokens_used and tokens_used > 0:
+        _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
     return write_receipt(
         task_dir,
         f"audit-{auditor_name}",
@@ -303,6 +396,72 @@ def receipt_post_completion(
         handlers_run=handlers_run,
         postmortem_written=postmortem_written,
         patterns_updated=patterns_updated,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Start skill spawn receipts (planner, plan-audit, TDD)
+# ---------------------------------------------------------------------------
+
+
+def receipt_planner_spawn(
+    task_dir: Path,
+    phase: str,  # "discovery", "spec", or "plan"
+    tokens_used: int | None,
+    model_used: str | None = None,
+    learned_agent_injected: bool = False,
+    agent_name: str | None = None,
+) -> Path:
+    """Write receipt proving a planner subagent completed. Also records tokens."""
+    step_name = f"planner-{phase}"
+    if tokens_used and tokens_used > 0:
+        _record_tokens(task_dir, f"planner-{phase}", model_used or "default", tokens_used)
+    return write_receipt(
+        task_dir,
+        step_name,
+        phase=phase,
+        tokens_used=tokens_used,
+        model_used=model_used,
+        learned_agent_injected=learned_agent_injected,
+        agent_name=agent_name,
+    )
+
+
+def receipt_plan_audit(
+    task_dir: Path,
+    tokens_used: int | None,
+    finding_count: int = 0,
+    model_used: str | None = None,
+) -> Path:
+    """Write receipt proving plan audit (spec-completion check) ran. Also records tokens."""
+    if tokens_used and tokens_used > 0:
+        _record_tokens(task_dir, "plan-audit-check", model_used or "default", tokens_used)
+    return write_receipt(
+        task_dir,
+        "plan-audit-check",
+        tokens_used=tokens_used,
+        finding_count=finding_count,
+        model_used=model_used,
+    )
+
+
+def receipt_tdd_tests(
+    task_dir: Path,
+    tokens_used: int | None,
+    test_count: int = 0,
+    criteria_covered: list[int] | None = None,
+    model_used: str | None = None,
+) -> Path:
+    """Write receipt proving TDD test generation ran. Also records tokens."""
+    if tokens_used and tokens_used > 0:
+        _record_tokens(task_dir, "tdd-testing-executor", model_used or "default", tokens_used)
+    return write_receipt(
+        task_dir,
+        "tdd-tests",
+        tokens_used=tokens_used,
+        test_count=test_count,
+        criteria_covered=criteria_covered or [],
+        model_used=model_used,
     )
 
 

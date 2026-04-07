@@ -13,6 +13,33 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dynoslib_defaults import (
+    CHURN_WINDOW_DAYS,
+    COMPLEXITY_LINE_CAP,
+    COOLDOWN_BONUS_CLEAN,
+    COOLDOWN_PENALTY_1DAY,
+    COOLDOWN_PENALTY_3DAY,
+    COOLDOWN_PENALTY_7DAY,
+    COOLDOWN_THRESHOLD_1DAY,
+    COOLDOWN_THRESHOLD_3DAY,
+    COOLDOWN_THRESHOLD_7DAY,
+    FRESHNESS_NORM_DAYS,
+    GIT_LOG_CHURN_TIMEOUT,
+    GIT_LOG_PERFILE_TIMEOUT,
+    GIT_LSFILES_TIMEOUT,
+    GIT_REVPARSE_TIMEOUT,
+    MAX_NEIGHBOR_FILES,
+    MAX_NEIGHBOR_LINES,
+    MAX_SCAN_TARGET_FILES,
+    PAGERANK_DAMPING,
+    PAGERANK_ITERATIONS,
+    WEIGHT_CHANGE_VELOCITY,
+    WEIGHT_COMPLEXITY,
+    WEIGHT_FINDING_HISTORY,
+    WEIGHT_FRESHNESS,
+    WEIGHT_PAGERANK,
+)
+
 # ---------------------------------------------------------------------------
 # Generated file detection
 # ---------------------------------------------------------------------------
@@ -198,8 +225,8 @@ def _find_existing_file(root: Path, module_path: str) -> str | None:
 
 def _compute_pagerank(
     adjacency: dict[str, set[str]],
-    damping: float = 0.85,
-    iterations: int = 20,
+    damping: float = PAGERANK_DAMPING,
+    iterations: int = PAGERANK_ITERATIONS,
 ) -> dict[str, float]:
     """Compute reverse PageRank on an import adjacency graph.
 
@@ -243,7 +270,7 @@ def _get_origin_main_sha(root: Path) -> str | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "origin/main"],
-            capture_output=True, text=True, timeout=10, cwd=root,
+            capture_output=True, text=True, timeout=GIT_REVPARSE_TIMEOUT, cwd=root,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -253,7 +280,7 @@ def _get_origin_main_sha(root: Path) -> str | None:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=10, cwd=root,
+            capture_output=True, text=True, timeout=GIT_REVPARSE_TIMEOUT, cwd=root,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -321,7 +348,7 @@ def build_import_graph(root: Path) -> dict:
     try:
         result = subprocess.run(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
-            capture_output=True, text=True, timeout=15, cwd=root,
+            capture_output=True, text=True, timeout=GIT_LSFILES_TIMEOUT, cwd=root,
         )
         if result.returncode != 0:
             return {"nodes": [], "edges": [], "pagerank": {}}
@@ -417,7 +444,7 @@ def build_import_graph(root: Path) -> dict:
             reverse[tgt].add(src)
 
     # Compute PageRank
-    pagerank = _compute_pagerank(reverse, damping=0.85, iterations=20)
+    pagerank = _compute_pagerank(reverse, damping=PAGERANK_DAMPING, iterations=PAGERANK_ITERATIONS)
 
     graph = {
         "nodes": sorted(source_files),
@@ -441,7 +468,7 @@ def build_import_graph(root: Path) -> dict:
 
 
 def get_neighbor_file_contents(
-    root: Path, file_path: str, max_files: int = 5, max_lines: int = 100
+    root: Path, file_path: str, max_files: int = MAX_NEIGHBOR_FILES, max_lines: int = MAX_NEIGHBOR_LINES
 ) -> list[dict]:
     """Return content of files neighboring *file_path* in the import graph.
 
@@ -496,7 +523,7 @@ def get_neighbor_file_contents(
 
 def compute_scan_targets(
     root: Path,
-    max_files: int = 10,
+    max_files: int = MAX_SCAN_TARGET_FILES,
     coverage: dict | None = None,
     findings: list | None = None,
 ) -> list[tuple[Path, float]]:
@@ -537,8 +564,8 @@ def compute_scan_targets(
     churn: dict[str, int] = {}
     try:
         result = subprocess.run(
-            ["git", "log", "--since=30.days.ago", "--name-only", "--pretty=format:"],
-            capture_output=True, text=True, timeout=15, cwd=root,
+            ["git", "log", f"--since={CHURN_WINDOW_DAYS}.days.ago", "--name-only", "--pretty=format:"],
+            capture_output=True, text=True, timeout=GIT_LOG_CHURN_TIMEOUT, cwd=root,
         )
         if result.returncode == 0:
             for line in result.stdout.splitlines():
@@ -558,14 +585,14 @@ def compute_scan_targets(
         try:
             result = subprocess.run(
                 ["git", "log", "-1", "--format=%ct", "--", f],
-                capture_output=True, text=True, timeout=5, cwd=root,
+                capture_output=True, text=True, timeout=GIT_LOG_PERFILE_TIMEOUT, cwd=root,
             )
             if result.returncode == 0 and result.stdout.strip():
                 file_mtime[f] = float(result.stdout.strip())
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
 
-    max_age_days = 365.0  # normalize against 1 year
+    max_age_days = FRESHNESS_NORM_DAYS
     now = datetime.now(timezone.utc)
     file_coverage = coverage.get("files", {})
 
@@ -602,7 +629,7 @@ def compute_scan_targets(
             line_count = len(file_path.read_text(encoding="utf-8", errors="replace").splitlines())
         except OSError:
             line_count = 0
-        complexity = min(line_count / 1000.0, 1.0)
+        complexity = min(line_count / COMPLEXITY_LINE_CAP, 1.0)
 
         # Cooldown
         cooldown = 0.0
@@ -612,23 +639,23 @@ def compute_scan_targets(
             try:
                 scanned_dt = datetime.fromisoformat(last_scanned.replace("Z", "+00:00"))
                 days_since = (now - scanned_dt).total_seconds() / 86400.0
-                if days_since < 1:
-                    cooldown = 100.0
-                elif days_since < 3:
-                    cooldown = 30.0
-                elif days_since < 7:
-                    cooldown = 10.0
+                if days_since < COOLDOWN_THRESHOLD_1DAY:
+                    cooldown = COOLDOWN_PENALTY_1DAY
+                elif days_since < COOLDOWN_THRESHOLD_3DAY:
+                    cooldown = COOLDOWN_PENALTY_3DAY
+                elif days_since < COOLDOWN_THRESHOLD_7DAY:
+                    cooldown = COOLDOWN_PENALTY_7DAY
             except (ValueError, TypeError):
                 pass
         if info.get("last_result") == "clean":
-            cooldown += 5.0
+            cooldown += COOLDOWN_BONUS_CLEAN
 
         composite = (
-            pr_score * 30
-            + freshness * 25
-            + finding_history * 20
-            + change_velocity * 15
-            + complexity * 10
+            pr_score * WEIGHT_PAGERANK
+            + freshness * WEIGHT_FRESHNESS
+            + finding_history * WEIGHT_FINDING_HISTORY
+            + change_velocity * WEIGHT_CHANGE_VELOCITY
+            + complexity * WEIGHT_COMPLEXITY
             - cooldown
         )
 

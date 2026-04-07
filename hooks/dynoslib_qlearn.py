@@ -16,6 +16,22 @@ import random
 from pathlib import Path
 
 from dynoslib_core import _persistent_project_dir, load_json, now_iso, project_policy, write_json
+from dynoslib_defaults import (
+    EFFICIENCY_CLAMP,
+    EFFICIENCY_WEIGHT,
+    ESCALATION_RETRY_THRESHOLD,
+    QLEARN_ALPHA,
+    QLEARN_EPSILON,
+    QLEARN_GAMMA,
+    QVALUE_PRECISION,
+    REWARD_FAILURE,
+    REWARD_MAX,
+    REWARD_MIN,
+    REWARD_PARTIAL,
+    REWARD_PENALTY_PER_NEW_FINDING,
+    REWARD_SUCCESS,
+    TOKEN_BUDGETS,
+)
 
 # Lazy import to avoid circular dependency — dynorouter imports dynoslib_core too
 _router = None
@@ -31,9 +47,9 @@ def _get_router():
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_ALPHA = 0.1      # learning rate
-DEFAULT_GAMMA = 0.9      # discount factor
-DEFAULT_EPSILON = 0.15   # exploration rate
+DEFAULT_ALPHA = QLEARN_ALPHA      # learning rate
+DEFAULT_GAMMA = QLEARN_GAMMA      # discount factor
+DEFAULT_EPSILON = QLEARN_EPSILON  # exploration rate
 
 VALID_EXECUTORS = [
     "backend-executor",
@@ -47,7 +63,7 @@ VALID_EXECUTORS = [
 
 VALID_MODELS = [None, "haiku", "sonnet", "opus"]
 
-TOKEN_BUDGETS = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}
+# TOKEN_BUDGETS imported from dynoslib_defaults
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +234,7 @@ def update_q_value(
 
     # Q-learning update
     new_value = old_value + alpha * (reward + gamma * future_value - old_value)
-    state_q[action] = round(new_value, 6)
+    state_q[action] = round(new_value, QVALUE_PRECISION)
 
     return new_value
 
@@ -239,19 +255,19 @@ def compute_repair_reward(
     """
     # Base reward
     if finding_resolved and new_findings_introduced == 0:
-        reward = 1.0
+        reward = REWARD_SUCCESS
     elif finding_resolved:
-        reward = max(0.0, 0.5 - 0.1 * new_findings_introduced)
+        reward = max(0.0, REWARD_PARTIAL - REWARD_PENALTY_PER_NEW_FINDING * new_findings_introduced)
     else:
-        reward = -0.5
+        reward = REWARD_FAILURE
 
     # Token efficiency bonus/penalty
     if token_budget > 0 and tokens_used > 0:
-        efficiency = 0.2 * (1.0 - tokens_used / token_budget)
-        efficiency = max(-0.2, min(0.2, efficiency))
+        efficiency = EFFICIENCY_WEIGHT * (1.0 - tokens_used / token_budget)
+        efficiency = max(-EFFICIENCY_CLAMP, min(EFFICIENCY_CLAMP, efficiency))
         reward += efficiency
 
-    return max(-1.0, min(1.0, reward))
+    return max(REWARD_MIN, min(REWARD_MAX, reward))
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +315,7 @@ def build_repair_plan(
 
         # --- Decision 2: Model selection ---
         # Hard constraints first
-        if retry_count >= 2:
+        if retry_count >= ESCALATION_RETRY_THRESHOLD:
             model = "opus"
             model_source = "escalation"
             model_q_val = None

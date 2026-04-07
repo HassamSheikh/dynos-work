@@ -36,7 +36,17 @@ Append to log:
 
 ### Step 3 — Execute segments (Optimized Scheduler)
 
-**Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. Read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
+**Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. However, you MUST still run the router and apply learned agent rules before executing:
+
+1. Run the executor plan router: `python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
+2. Write the executor-routing receipt (required for stage transitions).
+3. If the plan returns `route_mode: "replace"` or `"alongside"` with a non-null `agent_path`, read the learned agent file and follow its rules during your inline execution.
+4. Run `inject-prompt` with your base prompt to get the complete prompt with learned rules and prevention rules. Apply those rules to your own work.
+5. Log the routing decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
+
+Then read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
+
+Skipping the router in inline mode silently ignores learned agents and breaks the self-learning feedback loop.
 
 **Normal execution (fast_track is false or >1 segment):**
 
@@ -94,35 +104,144 @@ After preflight validation, perform the following execution optimizations:
 PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
 ```
 
-This returns a JSON object with model, route mode, and agent path for each segment. Use these decisions directly:
-- `model`: pass as the model parameter when spawning the agent (null = use default)
-- `route_mode`: "generic" = use built-in agent, "learned" or "alongside" = read learned agent from `agent_path`
-- Log each decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
+This returns a JSON object with model, route mode, and agent path for each segment.
+
+Log each decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
+
+**Receipt: executor-routing (MANDATORY):** Immediately after building the executor plan, write the routing receipt:
+
+```bash
+python3 -c "
+from pathlib import Path
+from dynoslib_receipts import receipt_executor_routing
+import json
+plan = json.loads('''${EXECUTOR_PLAN_JSON}''')
+receipt_executor_routing(Path('.dynos/task-{id}'), plan['segments'])
+"
+```
+
+This receipt is required by `transition_task()` before the task can reach CHECKPOINT_AUDIT. If you skip it, the audit transition will be blocked.
 
 Do NOT read dynos_patterns.md tables manually. The router handles model policy, agent routing, and security floors deterministically.
 
-**TDD-First Awareness:** Check if `.dynos/task-{id}/evidence/tdd-tests.md` exists. If it does, include this instruction to every executor: "A TDD test suite has already been committed. Your implementation must make those tests pass. Do NOT write new tests or modify existing test files."
+**Learned Agent Injection (MANDATORY — NOT OPTIONAL):** For every segment, you MUST build the executor prompt using the deterministic prompt builder. This is not a suggestion. This is an enforcement gate. For each segment in the executor plan:
+
+```bash
+echo "{your base prompt for this segment}" | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 hooks/dynorouter.py inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id}
+```
+
+This command:
+1. Reads the base prompt from stdin
+2. Looks up the routing decision for this segment (model, route_mode, agent_path)
+3. If `route_mode` is `replace` or `alongside`, reads the learned agent `.md` file and appends its rules to the prompt
+4. Appends prevention rules from the project's history
+5. Logs a `learned_agent_injected` event to `.dynos/events.jsonl`
+6. Prints the complete prompt to stdout
+
+**Use the OUTPUT of this command as the prompt for the Agent tool spawn.** Do NOT construct the executor prompt yourself. Do NOT skip this step. If you spawn an executor without running inject-prompt first, the learned agent is silently ignored and the whole self-learning system is broken.
+
+If `inject-prompt` is not available (command not found), fall back to manually reading the `agent_path` file from the executor plan and appending its contents to the prompt. But this should never happen in this repo.
+
+**Model selection:** Pass the `model` field from the executor plan as the model parameter when spawning the agent. If `model` is null, use default (omit the model parameter).
+
+**TDD-First Awareness:** Check if `.dynos/task-{id}/evidence/tdd-tests.md` exists. If it does, include this instruction in the base prompt (before piping through inject-prompt): "A TDD test suite has already been committed. Your implementation must make those tests pass. Do NOT write new tests or modify existing test files."
 
 Spawn the prioritized batch of non-cached executor agents in parallel.
 
 Executor agents by type:
 - `ui-executor`, `backend-executor`, `ml-executor`, `db-executor`, `refactor-executor`, `testing-executor`, `integration-executor`.
 
-Each executor receives:
+The base prompt for each executor (before inject-prompt) must include:
 1. Its specific segment object from `execution-graph.json`
 2. The full text of each acceptance criterion referenced by the segment's `criteria_ids` field, extracted from `spec.md`
 3. Evidence files from dependency segments: for each segment ID in the executor's `depends_on` list, read `.dynos/task-{id}/evidence/{dependency-segment-id}.md` and include its contents
 4. Instruction to write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
-5. **Prevention rules and gold standard:** The router's executor-plan output (called above) and the planner's `policy-packet.json` (generated via `dynoplanner.py task-policy`) include prevention rules filtered by executor type and gold standard references for the current task type. Pass the relevant entries from these outputs to each executor's spawn instructions. Do not read `dynos_patterns.md` tables manually.
 
 Do NOT pass the full `spec.md` or `plan.md` to executors.
 
-After each batch (or cached resolution) completes:
+**Receipt: executor-{seg-id} (MANDATORY):** After each executor completes, write its receipt:
+
+```python
+from dynoslib_receipts import receipt_executor_done
+receipt_executor_done(
+    task_dir=Path(".dynos/task-{id}"),
+    segment_id="{seg-id}",
+    executor_type="{executor from plan}",
+    model_used="{model from plan or null}",
+    learned_agent_injected={True if route_mode was replace/alongside else False},
+    agent_name="{agent_name from plan or None}",
+    evidence_path=".dynos/task-{id}/evidence/{seg-id}.md",
+    tokens_used={total_tokens from Agent result or None},
+)
+```
+
+This proves the segment completed with the correct routing. The receipt is checked by `validate-receipts`.
+
+After each batch (or cached resolution) completes, record events and verify:
+
+- **Token capture (executor spawn):** After each executor returns:
+  ```bash
+  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+    --task-dir .dynos/task-{id} \
+    --agent "{executor_name}-{segment-id}" \
+    --model "{model_name}" \
+    --input-tokens {input_tokens} \
+    --output-tokens {output_tokens} \
+    --phase execution \
+    --stage "EXECUTION" \
+    --type spawn \
+    --segment "{segment-id}" \
+    --detail "{what the executor implemented}"
+  ```
+- **Token capture (deterministic checks):** After file ownership and evidence verification:
+  ```bash
+  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+    --task-dir .dynos/task-{id} \
+    --agent "dynosctl-check-ownership" \
+    --model "none" \
+    --input-tokens 0 \
+    --output-tokens 0 \
+    --phase execution \
+    --stage "EXECUTION" \
+    --type deterministic \
+    --segment "{segment-id}" \
+    --detail "Verified file ownership and evidence — {pass|fail}"
+  ```
+- Also record the **router decision** before each batch:
+  ```bash
+  PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+    --task-dir .dynos/task-{id} \
+    --agent "dynorouter-executor-plan" \
+    --model "none" \
+    --input-tokens 0 \
+    --output-tokens 0 \
+    --phase execution \
+    --stage "EXECUTION" \
+    --type deterministic \
+    --detail "Router: {executor}={model} route={route_mode}"
+  ```
 - Deterministically verify that only files from the segment's `files_expected` were modified. If available in this repo, use `python3 hooks/dynosctl.py check-ownership .dynos/task-{id} {segment-id} {files...}`. If extra files changed, fail the segment and route it to repair instead of accepting the evidence.
 - Deterministically verify that the segment wrote its evidence file.
 - Update `manifest.json` execution_progress.
 - Append to log: `{timestamp} [DONE] {segment-id} — complete`.
 - Find next unblocked batch (ordered by Depth) and spawn.
+
+**For inline fast-track execution** (no subagent spawn), record with `--type inline`:
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+  --task-dir .dynos/task-{id} \
+  --agent "inline-executor" \
+  --model "none" \
+  --input-tokens 0 \
+  --output-tokens 0 \
+  --phase execution \
+  --stage "EXECUTION" \
+  --type inline \
+  --segment "seg-1" \
+  --detail "Fast-track inline execution (no subagent spawn)"
+```
+
+**Test execution** (Step 4): Record test runner events with `--phase execution --stage TEST_EXECUTION`.
 
 Repeat until all segments have evidence files.
 

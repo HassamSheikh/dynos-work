@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from dynoslib_core import load_json, now_iso, _persistent_project_dir
+from dynoslib_log import log_event
 
 
 def maintenance_dir(root: Path) -> Path:
@@ -110,6 +111,7 @@ def run_python(root: Path, script_name: str, *args: str) -> tuple[subprocess.Com
 
 
 def maintenance_cycle(root: Path) -> dict:
+    cycle_start = time.monotonic()
     lock_file = maintenance_dir(root) / "cycle.lock"
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     lock_fd = open(lock_file, "w")
@@ -129,6 +131,7 @@ def maintenance_cycle(root: Path) -> dict:
         for script_name, args in (
             ("dynostrajectory.py", ("rebuild", "--root", str(root))),
             ("dynopatterns.py", ("--root", str(root))),
+            ("dynoevolve.py", ("auto", "--root", str(root))),
             ("dynopostmortem.py", ("generate-all", "--root", str(root))),
             ("dynopostmortem.py", ("improve", "--root", str(root))),
             ("dynofixture.py", ("sync", "--root", str(root))),
@@ -153,6 +156,14 @@ def maintenance_cycle(root: Path) -> dict:
             "failed_steps": [a["name"] for a in actions if a["returncode"] != 0],
             "duration_steps": len(actions),
         }
+        log_event(
+            root,
+            "maintenance_cycle",
+            ok=cycle["ok"],
+            failed_steps=cycle.get("failed_steps", []),
+            step_count=cycle.get("duration_steps", 0),
+            duration_s=round(time.monotonic() - cycle_start, 3),
+        )
         lp = log_path(root)
         lp.parent.mkdir(parents=True, exist_ok=True)
         with open(lp, "a") as f:

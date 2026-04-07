@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from dynoslib_log import log_event
 from dynoslib_core import (
     _persistent_project_dir,
     collect_retrospectives,
@@ -35,6 +36,71 @@ from dynoslib_core import (
     now_iso,
     project_policy,
     write_json,
+)
+from dynoslib_defaults import (
+    # Category confidence
+    CONF_AUTOFIX_BASE,
+    CONF_DEAD_CODE,
+    CONF_ISSUE_ONLY,
+    CONF_LLM_REVIEW,
+    CONF_SYNTAX_ERROR,
+    MIN_CONF_AUTOFIX,
+    # Finding confidence filtering
+    HIGH_CONFIDENCE_THRESHOLD,
+    MIN_FINDING_CONFIDENCE,
+    # PR throttling
+    COOLDOWN_AFTER_FAILURES,
+    MAX_OPEN_PRS,
+    MAX_PRS_PER_DAY,
+    # Limits
+    FINDING_MAX_AGE_DAYS,
+    MAX_ATTEMPTS,
+    MAX_FINDINGS_ENTRIES,
+    RECENT_PRS_COUNT,
+    # Timeouts
+    GH_API_TIMEOUT,
+    GIT_BRANCH_TIMEOUT,
+    GIT_DELETE_TIMEOUT,
+    GIT_LSFILES_TIMEOUT,
+    GIT_LOG_CHURN_TIMEOUT,
+    GIT_PUSH_TIMEOUT,
+    LLM_INVOCATION_TIMEOUT,
+    NPM_AUDIT_TIMEOUT,
+    PIP_AUDIT_TIMEOUT,
+    RESCAN_TIMEOUT,
+    SCAN_TIMEOUT_SECONDS,
+    # File scoring
+    FILE_SCORE_CHURN_MAX,
+    FILE_SCORE_CHURN_WEIGHT,
+    FILE_SCORE_COMPLEXITY_DIVISOR,
+    FILE_SCORE_COMPLEXITY_MAX,
+    FILE_SCORE_COMPLEXITY_WEIGHT,
+    FILE_SCORE_NO_TEST_BOOST,
+    FILE_SCORE_PENALTY_CLEAN_SCAN,
+    FILE_SCORE_PENALTY_SCANNED_3DAYS,
+    FILE_SCORE_PENALTY_SCANNED_7DAYS,
+    FILE_SCORE_PENALTY_SCANNED_TODAY,
+    LLM_REVIEW_FILE_TRUNCATION,
+    LLM_REVIEW_MAX_FILES,
+    # Verification scoring
+    VERIFY_DIFF_PENALTY_CAP,
+    VERIFY_DIFF_PENALTY_DIVISOR,
+    VERIFY_FILE_PENALTY,
+    VERIFY_FILE_PENALTY_CAP,
+    VERIFY_LARGE_DIFF_PENALTY,
+    # Q-learning
+    QLEARN_EPSILON,
+    AUTOFIX_REWARD_GIT_COMMIT_FAILED,
+    AUTOFIX_REWARD_ISSUE_OPENED,
+    AUTOFIX_REWARD_NO_CHANGES,
+    AUTOFIX_REWARD_PR_MERGED,
+    AUTOFIX_REWARD_PR_OPENED,
+    AUTOFIX_REWARD_SKIP,
+    AUTOFIX_REWARD_VERIFICATION_FAILED,
+    PR_FEEDBACK_REWARD_CLOSED,
+    PR_FEEDBACK_REWARD_MERGED,
+    # Batch fixes
+    BATCH_MIN_GROUP_SIZE,
 )
 from dynoslib_crawler import (
     _is_generated_file,
@@ -60,8 +126,7 @@ from dynopatterns import local_patterns_path
 # Constants
 # ---------------------------------------------------------------------------
 
-SCAN_TIMEOUT_SECONDS = 600
-MAX_ATTEMPTS = 2
+# SCAN_TIMEOUT_SECONDS and MAX_ATTEMPTS imported from dynoslib_defaults
 VALID_SEVERITIES = {"low", "medium", "high", "critical"}
 VALID_CATEGORIES = {"recurring-audit", "dependency-vuln", "dead-code", "architectural-drift", "syntax-error", "llm-review"}
 VALID_STATUSES = {
@@ -98,20 +163,20 @@ def _autofix_benchmarks_path(root: Path) -> Path:
 
 def _default_category_policy(category: str) -> dict:
     mode = "autofix"
-    base_confidence = 0.75
+    base_confidence = CONF_AUTOFIX_BASE
     if category == "syntax-error":
-        base_confidence = 0.95
+        base_confidence = CONF_SYNTAX_ERROR
     elif category == "dead-code":
-        base_confidence = 0.88
+        base_confidence = CONF_DEAD_CODE
     elif category == "llm-review":
-        base_confidence = 0.70
+        base_confidence = CONF_LLM_REVIEW
     elif category in {"dependency-vuln", "architectural-drift", "recurring-audit"}:
         mode = "issue-only"
-        base_confidence = 0.35
+        base_confidence = CONF_ISSUE_ONLY
     return {
         "enabled": True,
         "mode": mode,
-        "min_confidence_autofix": 0.65,
+        "min_confidence_autofix": MIN_CONF_AUTOFIX,
         "confidence": base_confidence,
         "stats": {
             "proposed": 0,
@@ -126,9 +191,9 @@ def _default_category_policy(category: str) -> dict:
 
 def _default_autofix_policy() -> dict:
     return {
-        "max_prs_per_day": 100,
-        "max_open_prs": 100,
-        "cooldown_after_failures": 100,
+        "max_prs_per_day": MAX_PRS_PER_DAY,
+        "max_open_prs": MAX_OPEN_PRS,
+        "cooldown_after_failures": COOLDOWN_AFTER_FAILURES,
         "allow_dependency_file_changes": False,
         "suppressions": [],
         "categories": {
@@ -230,7 +295,7 @@ def _cleanup_merged_branches(root: Path) -> None:
     try:
         result = subprocess.run(
             ["git", "branch", "-r"],
-            capture_output=True, text=True, timeout=15, cwd=str(root),
+            capture_output=True, text=True, timeout=GIT_BRANCH_TIMEOUT, cwd=str(root),
         )
         if result.returncode != 0:
             return
@@ -248,7 +313,7 @@ def _cleanup_merged_branches(root: Path) -> None:
             pr_result = subprocess.run(
                 ["gh", "pr", "list", "--search", f"{branch_name} in:head",
                  "--state", "merged", "--json", "number"],
-                capture_output=True, text=True, timeout=30, cwd=str(root),
+                capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
             )
             if pr_result.returncode != 0:
                 continue
@@ -258,7 +323,7 @@ def _cleanup_merged_branches(root: Path) -> None:
                 closed_result = subprocess.run(
                     ["gh", "pr", "list", "--search", f"{branch_name} in:head",
                      "--state", "closed", "--json", "number"],
-                    capture_output=True, text=True, timeout=30, cwd=str(root),
+                    capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
                 )
                 if closed_result.returncode != 0:
                     continue
@@ -273,20 +338,20 @@ def _cleanup_merged_branches(root: Path) -> None:
         try:
             subprocess.run(
                 ["git", "branch", "-D", branch_name],
-                capture_output=True, text=True, timeout=10, cwd=str(root),
+                capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=str(root),
             )
         except (subprocess.TimeoutExpired, OSError):
             pass
         try:
             subprocess.run(
                 ["git", "push", "origin", "--delete", branch_name],
-                capture_output=True, text=True, timeout=15, cwd=str(root),
+                capture_output=True, text=True, timeout=GIT_PUSH_TIMEOUT, cwd=str(root),
             )
         except (subprocess.TimeoutExpired, OSError):
             pass
 
 
-def _prune_findings(findings: list[dict], max_age_days: int = 30, max_entries: int = 500) -> list[dict]:
+def _prune_findings(findings: list[dict], max_age_days: int = FINDING_MAX_AGE_DAYS, max_entries: int = MAX_FINDINGS_ENTRIES) -> list[dict]:
     """Remove stale findings. Never prune 'fixed' or 'issue-opened' entries."""
     now = datetime.now(timezone.utc)
     preserved_statuses = {"fixed", "issue-opened"}
@@ -421,7 +486,7 @@ def _detect_dependency_vulns(root: Path) -> list[dict]:
         try:
             result = subprocess.run(
                 ["pip-audit", "--format=json"],
-                capture_output=True, text=True, timeout=120, cwd=str(root),
+                capture_output=True, text=True, timeout=PIP_AUDIT_TIMEOUT, cwd=str(root),
             )
             if result.stdout.strip():
                 try:
@@ -476,7 +541,7 @@ def _detect_dependency_vulns(root: Path) -> list[dict]:
         try:
             result = subprocess.run(
                 ["npm", "audit", "--json"],
-                capture_output=True, text=True, timeout=120, cwd=str(root),
+                capture_output=True, text=True, timeout=NPM_AUDIT_TIMEOUT, cwd=str(root),
             )
             if result.stdout.strip():
                 try:
@@ -891,7 +956,7 @@ def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]
     try:
         result = subprocess.run(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
-            capture_output=True, text=True, timeout=15, cwd=root,
+            capture_output=True, text=True, timeout=GIT_LSFILES_TIMEOUT, cwd=root,
         )
         if result.returncode == 0:
             seen: set[str] = set()
@@ -924,7 +989,7 @@ def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]
     try:
         result = subprocess.run(
             ["git", "log", "--since=30 days ago", "--name-only", "--pretty=format:"],
-            capture_output=True, text=True, timeout=15, cwd=root,
+            capture_output=True, text=True, timeout=GIT_LOG_CHURN_TIMEOUT, cwd=root,
         )
         if result.returncode == 0:
             for line in result.stdout.splitlines():
@@ -965,19 +1030,19 @@ def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]
 
         # Churn score (0-10, normalized)
         file_churn = churn.get(rel, 0)
-        score += min(file_churn, 10) * 3  # max 30
+        score += min(file_churn, FILE_SCORE_CHURN_MAX) * FILE_SCORE_CHURN_WEIGHT  # max 30
 
         # Complexity score (line count, rough proxy)
         try:
             line_count = len(f.read_text().splitlines())
         except OSError:
             line_count = 0
-        score += min(line_count / 50, 10) * 2  # max 20 (1000+ lines = max)
+        score += min(line_count / FILE_SCORE_COMPLEXITY_DIVISOR, FILE_SCORE_COMPLEXITY_MAX) * FILE_SCORE_COMPLEXITY_WEIGHT  # max 20 (1000+ lines = max)
 
         # No test file
         stem = f.stem
         if f"test_{stem}" not in test_files:
-            score += 5
+            score += FILE_SCORE_NO_TEST_BOOST
 
         # Previous findings boost
         if rel in prev_findings:
@@ -991,17 +1056,17 @@ def _compute_file_scores(root: Path, coverage: dict) -> list[tuple[Path, float]]
                 scanned_dt = datetime.fromisoformat(last_scanned.replace("Z", "+00:00"))
                 days_since = (now - scanned_dt).total_seconds() / 86400
                 if days_since < 1:
-                    score -= 100  # scanned today, skip
+                    score -= FILE_SCORE_PENALTY_SCANNED_TODAY  # scanned today, skip
                 elif days_since < 3:
-                    score -= 30  # scanned recently, deprioritize
+                    score -= FILE_SCORE_PENALTY_SCANNED_3DAYS  # scanned recently, deprioritize
                 elif days_since < 7:
-                    score -= 10  # mild deprioritization
+                    score -= FILE_SCORE_PENALTY_SCANNED_7DAYS  # mild deprioritization
             except (ValueError, TypeError):
                 pass
 
         # Last scan was clean? Minor deprioritization
         if file_info.get("last_result") == "clean":
-            score -= 5
+            score -= FILE_SCORE_PENALTY_CLEAN_SCAN
 
         scored.append((f, score))
 
@@ -1021,7 +1086,7 @@ def _detect_llm_review(root: Path) -> list[dict]:
     # Load scan coverage and compute scores using import-graph-aware targets
     coverage = _load_scan_coverage(root)
     findings_list = _load_findings(root)
-    scored_files = compute_scan_targets(root, max_files=10, coverage=coverage, findings=findings_list)
+    scored_files = compute_scan_targets(root, max_files=LLM_REVIEW_MAX_FILES, coverage=coverage, findings=findings_list)
 
     if not scored_files:
         return findings
@@ -1032,14 +1097,14 @@ def _detect_llm_review(root: Path) -> list[dict]:
         if score < 0:
             continue
         review_files.append(root / f)
-        if len(review_files) >= 10:
+        if len(review_files) >= LLM_REVIEW_MAX_FILES:
             break
 
     if not review_files:
         _log("All files recently scanned, skipping LLM review this cycle")
         return findings
 
-    _log(f"File scores (top 10): {[(str(f.relative_to(root)), round(s, 1)) for f, s in scored_files[:10]]}")
+    _log(f"File scores (top 10): {[(str(f), round(s, 1)) for f, s in scored_files[:10]]}")
 
     # Build the prompt with file contents
     prompt = _HAIKU_REVIEW_PROMPT
@@ -1083,10 +1148,10 @@ def _detect_llm_review(root: Path) -> list[dict]:
         try:
             content = f.read_text()
             rel = str(f.relative_to(root))
-            # Truncate very large files to first 200 lines
+            # Truncate very large files to first N lines
             lines = content.splitlines()
-            if len(lines) > 200:
-                content = "\n".join(lines[:200]) + f"\n... (truncated, {len(lines)} total lines)"
+            if len(lines) > LLM_REVIEW_FILE_TRUNCATION:
+                content = "\n".join(lines[:LLM_REVIEW_FILE_TRUNCATION]) + f"\n... (truncated, {len(lines)} total lines)"
             prompt += f"\n--- {rel} ---\n{content}\n"
         except OSError:
             continue
@@ -1096,10 +1161,10 @@ def _detect_llm_review(root: Path) -> list[dict]:
     try:
         result = subprocess.run(
             ["claude", "-p", prompt, "--model", "haiku"],
-            capture_output=True, text=True, timeout=600, cwd=root,
+            capture_output=True, text=True, timeout=LLM_INVOCATION_TIMEOUT, cwd=root,
         )
     except subprocess.TimeoutExpired:
-        _log("Haiku review timed out after 600s")
+        _log(f"Haiku review timed out after {LLM_INVOCATION_TIMEOUT}s")
         return findings
     except OSError as exc:
         _log(f"Haiku review failed: {exc}")
@@ -1142,7 +1207,7 @@ def _detect_llm_review(root: Path) -> list[dict]:
         if not isinstance(issue, dict):
             continue
         conf = float(issue.get("confidence", 0.5))
-        if conf < 0.7:
+        if conf < MIN_FINDING_CONFIDENCE:
             _log(f"Filtering low-confidence finding (confidence={conf}): {issue.get('description', '')[:60]}")
             continue
         issue["_confidence_score"] = conf
@@ -1150,9 +1215,9 @@ def _detect_llm_review(root: Path) -> list[dict]:
 
     # AC 18: Confidence degeneration warning
     if len(filtered_issues) > 0 and all(
-        float(i.get("_confidence_score", i.get("confidence", 0))) >= 0.9 for i in filtered_issues
+        float(i.get("_confidence_score", i.get("confidence", 0))) >= HIGH_CONFIDENCE_THRESHOLD for i in filtered_issues
     ):
-        _log("WARNING: All findings in this batch have confidence >= 0.9. "
+        _log(f"WARNING: All findings in this batch have confidence >= {HIGH_CONFIDENCE_THRESHOLD}. "
              "Possible confidence degeneration (model may be over-confident).")
 
     for issue in filtered_issues:
@@ -1302,9 +1367,9 @@ def _rate_limit_snapshot(policy: dict, findings: list[dict]) -> dict:
         "prs_today": prs_today,
         "open_prs": open_prs,
         "recent_failures": recent_failures,
-        "max_prs_per_day": int(policy.get("max_prs_per_day", 3) or 3),
-        "max_open_prs": int(policy.get("max_open_prs", 5) or 5),
-        "cooldown_after_failures": int(policy.get("cooldown_after_failures", 2) or 2),
+        "max_prs_per_day": int(policy.get("max_prs_per_day", MAX_PRS_PER_DAY) or MAX_PRS_PER_DAY),
+        "max_open_prs": int(policy.get("max_open_prs", MAX_OPEN_PRS) or MAX_OPEN_PRS),
+        "cooldown_after_failures": int(policy.get("cooldown_after_failures", COOLDOWN_AFTER_FAILURES) or COOLDOWN_AFTER_FAILURES),
     }
 
 
@@ -1398,7 +1463,7 @@ def _build_autofix_benchmarks(root: Path, findings: list[dict], policy: dict) ->
     benchmarks = {
         "generated_at": now_iso(),
         "categories": categories,
-        "recent_prs": recent_prs[:10],
+        "recent_prs": recent_prs[:RECENT_PRS_COUNT],
         "policy": {
             "max_prs_per_day": policy.get("max_prs_per_day"),
             "max_open_prs": policy.get("max_open_prs"),
@@ -1459,7 +1524,7 @@ def _check_existing_pr(finding_id: str, root: Path) -> bool:
     try:
         result = subprocess.run(
             ["gh", "pr", "list", "--search", f"dynos/auto-fix-{finding_id} in:head", "--json", "number"],
-            capture_output=True, text=True, timeout=30, cwd=str(root),
+            capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
         )
         if result.returncode == 0 and result.stdout.strip():
             prs = json.loads(result.stdout)
@@ -1477,7 +1542,7 @@ def _check_existing_issue(finding_id: str, root: Path) -> bool:
     try:
         result = subprocess.run(
             ["gh", "issue", "list", "--search", f"{finding_id} label:dynos-autofix", "--json", "number"],
-            capture_output=True, text=True, timeout=30, cwd=str(root),
+            capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
         )
         if result.returncode == 0 and result.stdout.strip():
             issues = json.loads(result.stdout)
@@ -1598,7 +1663,7 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict, policy: dict | No
     try:
         diff_result = subprocess.run(
             ["git", "diff", "--name-only", "HEAD~1"],
-            capture_output=True, text=True, timeout=10, cwd=worktree_path,
+            capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
         )
         changed_files = [f.strip() for f in diff_result.stdout.splitlines() if f.strip()]
     except (subprocess.TimeoutExpired, OSError):
@@ -1646,7 +1711,7 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict, policy: dict | No
     try:
         stat_result = subprocess.run(
             ["git", "diff", "--stat", "HEAD~1"],
-            capture_output=True, text=True, timeout=10, cwd=worktree_path,
+            capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
         )
         stat_lines = stat_result.stdout.strip().splitlines()
     except (subprocess.TimeoutExpired, OSError):
@@ -1677,8 +1742,8 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict, policy: dict | No
                 fixed_content = fixed_file_path.read_text(encoding="utf-8", errors="replace")
                 # Truncate very large files
                 lines_list = fixed_content.splitlines()
-                if len(lines_list) > 200:
-                    fixed_content = "\n".join(lines_list[:200]) + f"\n... (truncated, {len(lines_list)} total lines)"
+                if len(lines_list) > LLM_REVIEW_FILE_TRUNCATION:
+                    fixed_content = "\n".join(lines_list[:LLM_REVIEW_FILE_TRUNCATION]) + f"\n... (truncated, {len(lines_list)} total lines)"
 
                 # AC 14: When regression detection is enabled, ask Haiku for ALL findings.
                 # When disabled, only check if the original finding persists (old behavior).
@@ -1701,7 +1766,7 @@ def _verify_fix(root: Path, worktree_path: str, finding: dict, policy: dict | No
                     )
                 rescan_result = subprocess.run(
                     ["claude", "-p", rescan_prompt, "--model", "haiku"],
-                    capture_output=True, text=True, timeout=120, cwd=worktree_path,
+                    capture_output=True, text=True, timeout=RESCAN_TIMEOUT, cwd=worktree_path,
                 )
                 if rescan_result.returncode == 0:
                     rescan_output = rescan_result.stdout.strip()
@@ -1870,7 +1935,7 @@ def _is_git_dirty(root: Path) -> bool:
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
-            capture_output=True, text=True, timeout=15, cwd=str(root),
+            capture_output=True, text=True, timeout=GIT_BRANCH_TIMEOUT, cwd=str(root),
         )
         return bool(result.stdout.strip())
     except (subprocess.TimeoutExpired, OSError):
@@ -1882,13 +1947,13 @@ def _compute_pr_quality_score(verification: dict) -> float:
     total_changes = int(verification.get("total_changes", 0) or 0)
     changed_files = verification.get("changed_files", [])
     targeted_tests = verification.get("targeted_tests", [])
-    score -= min(total_changes / 1000.0, 0.25)
-    score -= min(max(len(changed_files) - 1, 0) * 0.03, 0.15)
+    score -= min(total_changes / VERIFY_DIFF_PENALTY_DIVISOR, VERIFY_DIFF_PENALTY_CAP)
+    score -= min(max(len(changed_files) - 1, 0) * VERIFY_FILE_PENALTY, VERIFY_FILE_PENALTY_CAP)
     if targeted_tests:
         if all(t.get("returncode") == 0 for t in targeted_tests if isinstance(t, dict)):
             score += 0.05
         else:
-            score -= 0.15
+            score -= VERIFY_LARGE_DIFF_PENALTY
     if verification.get("python_files_checked"):
         score += 0.03
     return round(max(0.0, min(1.0, score)), 3)
@@ -1909,7 +1974,7 @@ def _sync_outcomes(root: Path, findings: list[dict], policy: dict) -> tuple[list
             try:
                 result = subprocess.run(
                     ["gh", "pr", "view", str(pr_number), "--json", "state,mergedAt,closedAt,url"],
-                    capture_output=True, text=True, timeout=20, cwd=str(root),
+                    capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     data = json.loads(result.stdout)
@@ -1935,7 +2000,7 @@ def _sync_outcomes(root: Path, findings: list[dict], policy: dict) -> tuple[list
             try:
                 result = subprocess.run(
                     ["gh", "issue", "view", str(issue_number), "--json", "state,url,closedAt"],
-                    capture_output=True, text=True, timeout=20, cwd=str(root),
+                    capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
                 )
                 if result.returncode == 0 and result.stdout.strip():
                     data = json.loads(result.stdout)
@@ -2000,7 +2065,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
         # Try gh api first — most reliable way to get the default branch
         gh_result = subprocess.run(
             ["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
-            capture_output=True, text=True, timeout=10, cwd=str(root),
+            capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=str(root),
         )
         if gh_result.returncode == 0 and gh_result.stdout.strip():
             base_branch = gh_result.stdout.strip()
@@ -2026,7 +2091,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
         pass
 
     # Prune stale worktrees before creating a new one
-    subprocess.run(["git", "worktree", "prune"], capture_output=True, timeout=10, cwd=str(root))
+    subprocess.run(["git", "worktree", "prune"], capture_output=True, timeout=GIT_DELETE_TIMEOUT, cwd=str(root))
 
     # Remove existing worktree directory if leftover from crash
     if Path(worktree_path).exists():
@@ -2037,23 +2102,23 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
         # Without this, local-only branches cause PR creation to fail.
         subprocess.run(
             ["git", "fetch", "origin", base_branch],
-            capture_output=True, text=True, timeout=30, cwd=str(root),
+            capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
         )
 
         # Create worktree from the remote default branch, not the user's local copy.
         _log(f"Creating worktree at {worktree_path}")
         subprocess.run(
             ["git", "worktree", "add", "--detach", worktree_path, f"origin/{base_branch}"],
-            capture_output=True, text=True, timeout=30, cwd=str(root), check=True,
+            capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root), check=True,
         )
         # Delete stale branch from previous failed attempt if it exists
         subprocess.run(
             ["git", "branch", "-D", branch_name],
-            capture_output=True, text=True, timeout=15, cwd=worktree_path,
+            capture_output=True, text=True, timeout=GIT_BRANCH_TIMEOUT, cwd=worktree_path,
         )
         subprocess.run(
             ["git", "checkout", "-b", branch_name],
-            capture_output=True, text=True, timeout=15, cwd=worktree_path, check=True,
+            capture_output=True, text=True, timeout=GIT_BRANCH_TIMEOUT, cwd=worktree_path, check=True,
         )
 
         # Invoke claude with the dynos-work foundry pipeline
@@ -2217,7 +2282,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
         worktree_env = {**os.environ, "DYNOS_AUTOFIX_WORKTREE": "1"}
         claude_result = subprocess.run(
             claude_cmd,
-            capture_output=True, text=True, timeout=600, cwd=worktree_path,
+            capture_output=True, text=True, timeout=LLM_INVOCATION_TIMEOUT, cwd=worktree_path,
             env=worktree_env,
         )
 
@@ -2225,11 +2290,11 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
             # Check if Claude made any changes
             diff_check = subprocess.run(
                 ["git", "diff", "--quiet"],
-                capture_output=True, timeout=10, cwd=worktree_path,
+                capture_output=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
             )
             staged_check = subprocess.run(
                 ["git", "diff", "--cached", "--quiet"],
-                capture_output=True, timeout=10, cwd=worktree_path,
+                capture_output=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
             )
             has_changes = diff_check.returncode != 0 or staged_check.returncode != 0
 
@@ -2237,7 +2302,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
                 # Claude ran but made no changes — check if it committed already
                 log_check = subprocess.run(
                     ["git", "log", f"{base_branch}..HEAD", "--oneline"],
-                    capture_output=True, text=True, timeout=10, cwd=worktree_path,
+                    capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
                 )
                 has_changes = bool(log_check.stdout.strip())
 
@@ -2250,7 +2315,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
             # Check if Claude already committed (common with --permission-mode auto)
             log_check_2 = subprocess.run(
                 ["git", "log", f"{base_branch}..HEAD", "--oneline"],
-                capture_output=True, text=True, timeout=10, cwd=worktree_path,
+                capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
             )
             already_committed = bool(log_check_2.stdout.strip())
 
@@ -2258,7 +2323,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
                 # Stage and commit — Claude left uncommitted changes
                 add_result = subprocess.run(
                     ["git", "add", "-A"],
-                    capture_output=True, text=True, timeout=10, cwd=worktree_path,
+                    capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
                 )
                 if add_result.returncode != 0:
                     finding["status"] = "failed"
@@ -2269,7 +2334,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
                 # Check if anything was actually staged
                 staged_check_2 = subprocess.run(
                     ["git", "diff", "--cached", "--quiet"],
-                    capture_output=True, timeout=10, cwd=worktree_path,
+                    capture_output=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
                 )
                 if staged_check_2.returncode == 0:
                     # Nothing staged after add — Claude made changes but they vanished
@@ -2281,7 +2346,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
                 commit_result = subprocess.run(
                     ["git", "commit", "-m", f"[autofix] {description[:80]}",
                      "--author", "dynos-autofix <autofix@dynos.fit>"],
-                    capture_output=True, text=True, timeout=15, cwd=worktree_path,
+                    capture_output=True, text=True, timeout=GIT_PUSH_TIMEOUT, cwd=worktree_path,
                 )
                 if commit_result.returncode != 0:
                     finding["status"] = "failed"
@@ -2307,7 +2372,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
             # Push branch to remote
             push_result = subprocess.run(
                 ["git", "push", "-u", "origin", branch_name],
-                capture_output=True, text=True, timeout=30, cwd=worktree_path,
+                capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=worktree_path,
             )
             if push_result.returncode != 0:
                 finding["status"] = "failed"
@@ -2321,7 +2386,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
             try:
                 diff_stat_result = subprocess.run(
                     ["git", "diff", "--stat", "HEAD~1..HEAD"],
-                    capture_output=True, text=True, timeout=10, cwd=worktree_path,
+                    capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=worktree_path,
                 )
                 if diff_stat_result.returncode == 0 and diff_stat_result.stdout.strip():
                     diff_stat_text = diff_stat_result.stdout.strip()
@@ -2366,7 +2431,7 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
                     "--title", f"[autofix] {description[:80]}",
                     "--body", pr_body,
                 ],
-                capture_output=True, text=True, timeout=30, cwd=worktree_path,
+                capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=worktree_path,
             )
             if pr_result.returncode == 0:
                 # Extract PR number from output
@@ -2447,14 +2512,14 @@ def _autofix_finding(finding: dict, root: Path, policy: dict | None = None) -> d
         try:
             subprocess.run(
                 ["git", "worktree", "remove", "--force", worktree_path],
-                capture_output=True, text=True, timeout=15, cwd=str(root),
+                capture_output=True, text=True, timeout=GIT_BRANCH_TIMEOUT, cwd=str(root),
             )
             _log(f"Cleaned up worktree {worktree_path}")
         except (subprocess.TimeoutExpired, OSError) as exc:
             _log(f"Warning: worktree cleanup failed: {exc}")
             if Path(worktree_path).exists():
                 shutil.rmtree(worktree_path, ignore_errors=True)
-            subprocess.run(["git", "worktree", "prune"], capture_output=True, timeout=10, cwd=str(root))
+            subprocess.run(["git", "worktree", "prune"], capture_output=True, timeout=GIT_DELETE_TIMEOUT, cwd=str(root))
 
     return finding
 
@@ -2468,8 +2533,8 @@ def _group_similar_findings(findings: list[dict]) -> list[list[dict]]:
     """Group findings by exact (category, category_detail). 3+ = batch, <3 = singles.
 
     Returns a list of lists. Each inner list is either:
-    - A batch of 3+ findings with the same (category, category_detail)
-    - A single-item list for findings in groups < 3
+    - A batch of BATCH_MIN_GROUP_SIZE+ findings with the same (category, category_detail)
+    - A single-item list for findings in groups < BATCH_MIN_GROUP_SIZE
     """
     if not findings:
         return []
@@ -2486,7 +2551,7 @@ def _group_similar_findings(findings: list[dict]) -> list[list[dict]]:
     result: list[list[dict]] = []
     for key in sorted(groups.keys()):
         group = groups[key]
-        if len(group) >= 3:
+        if len(group) >= BATCH_MIN_GROUP_SIZE:
             result.append(group)
         else:
             # Each finding becomes its own single-item list
@@ -2530,12 +2595,16 @@ def _autofix_batch(batch: list[dict], root: Path, policy: dict) -> list[dict]:
             })
         else:
             updated["status"] = "failed"
+            if "fail_reason" not in updated:
+                updated["fail_reason"] = "batch_verification_failed"
 
     # AC 11: If no fixes passed verification, mark all failed, no PR
     passing = [r for r in passing_diffs if r["verified"]]
     if not passing:
         for r in results:
             r["status"] = "failed"
+            if "fail_reason" not in r:
+                r["fail_reason"] = "no_fixes_passed_verification"
         return results
 
     # AC 10: Build PR body listing all findings
@@ -2583,7 +2652,7 @@ def _check_pr_outcomes(root: Path, findings: list[dict]) -> list[dict]:
         gh_result = subprocess.run(
             ["gh", "pr", "list", "--label", "dynos-autofix", "--state", "all",
              "--json", "number,state,mergedAt,title"],
-            capture_output=True, text=True, timeout=30, cwd=str(root),
+            capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
         )
     except (FileNotFoundError, OSError):
         return findings
@@ -2633,7 +2702,7 @@ def _check_pr_outcomes(root: Path, findings: list[dict]) -> list[dict]:
             centrality_tier = _compute_centrality_tier(evidence_file, root)
             q_state = encode_autofix_state(category, file_ext, centrality_tier, severity)
 
-            update_q_value(q_table, q_state, "attempt_fix", 0.8, None)
+            update_q_value(q_table, q_state, "attempt_fix", PR_FEEDBACK_REWARD_MERGED, None)
             finding["merge_outcome"] = "merged"
             finding["q_reward_applied"] = True
             updated = True
@@ -2642,7 +2711,7 @@ def _check_pr_outcomes(root: Path, findings: list[dict]) -> list[dict]:
             try:
                 diff_result = subprocess.run(
                     ["gh", "pr", "diff", str(pr_number)],
-                    capture_output=True, text=True, timeout=30, cwd=str(root),
+                    capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
                 )
                 if diff_result.returncode == 0 and diff_result.stdout.strip():
                     save_fix_template(root, finding, diff_result.stdout)
@@ -2658,7 +2727,7 @@ def _check_pr_outcomes(root: Path, findings: list[dict]) -> list[dict]:
             centrality_tier = _compute_centrality_tier(evidence_file, root)
             q_state = encode_autofix_state(category, file_ext, centrality_tier, severity)
 
-            update_q_value(q_table, q_state, "attempt_fix", -0.5, None)
+            update_q_value(q_table, q_state, "attempt_fix", PR_FEEDBACK_REWARD_CLOSED, None)
             finding["merge_outcome"] = "closed_unmerged"
             finding["q_reward_applied"] = True
             updated = True
@@ -2779,7 +2848,7 @@ def _open_github_issue(finding: dict, root: Path, policy: dict | None = None) ->
         subprocess.run(
             ["gh", "label", "create", "dynos-autofix", "--color", "0E8A16",
              "--description", "Automated fix by dynos-work autofix scanner", "--force"],
-            capture_output=True, text=True, timeout=10, cwd=str(root),
+            capture_output=True, text=True, timeout=GIT_DELETE_TIMEOUT, cwd=str(root),
         )
         result = subprocess.run(
             [
@@ -2788,7 +2857,7 @@ def _open_github_issue(finding: dict, root: Path, policy: dict | None = None) ->
                 "--body", issue_body,
                 "--label", "dynos-autofix",
             ],
-            capture_output=True, text=True, timeout=30, cwd=str(root),
+            capture_output=True, text=True, timeout=GH_API_TIMEOUT, cwd=str(root),
         )
         if result.returncode == 0:
             issue_url = result.stdout.strip()
@@ -2847,8 +2916,8 @@ def _check_category_health(category: str, findings: list[dict]) -> tuple[str, st
                 failure_count += 1
         except (ValueError, TypeError):
             continue
-    if failure_count >= 3:
-        reason = f"{failure_count} failures in last 30 days"
+    if failure_count >= MAX_ATTEMPTS:
+        reason = f"{failure_count} failures in last {FINDING_MAX_AGE_DAYS} days"
         return "disabled", reason
     return "ok", ""
 
@@ -2885,22 +2954,22 @@ def _compute_autofix_reward(finding: dict) -> float:
 
     if status == "fixed":
         if merge_outcome == "merged":
-            return 1.0
+            return AUTOFIX_REWARD_PR_MERGED
         # PR opened but not yet merged
-        return 0.5
+        return AUTOFIX_REWARD_PR_OPENED
     elif status == "issue-opened":
-        return 0.3
+        return AUTOFIX_REWARD_ISSUE_OPENED
     elif status == "suppressed-policy" and finding.get("suppression_reason") == "q-learning:skip":
-        return 0.0
+        return AUTOFIX_REWARD_SKIP
     elif status == "failed":
         if "claude_no_changes" in fail_reason:
-            return -0.3
+            return AUTOFIX_REWARD_NO_CHANGES
         elif "verification_failed" in fail_reason:
-            return -0.5
+            return AUTOFIX_REWARD_VERIFICATION_FAILED
         elif "git_commit_failed" in fail_reason:
-            return -0.2
-        return -0.3  # default failure
-    return 0.0
+            return AUTOFIX_REWARD_GIT_COMMIT_FAILED
+        return AUTOFIX_REWARD_NO_CHANGES  # default failure
+    return AUTOFIX_REWARD_SKIP
 
 
 def _process_finding(
@@ -2927,8 +2996,8 @@ def _process_finding(
     existing_findings = _load_findings(root)
     cat_status, cat_reason = _check_category_health(category, existing_findings)
     if cat_status == "disabled":
-        finding["status"] = "failed"
-        finding["fail_reason"] = f"category_disabled: {cat_reason}"
+        finding["status"] = "suppressed"
+        finding["fail_reason"] = f"category_cooldown: {cat_reason}"
         finding["processed_at"] = now_iso()
         _log(f"Category '{category}' disabled: {cat_reason}")
         return finding
@@ -2972,7 +3041,7 @@ def _process_finding(
             q_action, q_source = select_action(
                 q_table, q_state,
                 ["attempt_fix", "open_issue", "skip"],
-                epsilon=0.15,
+                epsilon=QLEARN_EPSILON,
             )
             _log(f"Q-learning routing for {finding['finding_id']}: action={q_action} (source={q_source}, state={q_state})")
 
@@ -3030,7 +3099,7 @@ def _process_finding(
     if (
         fixability == "review-only"
         or category_config.get("mode") == "issue-only"
-        or confidence < float(category_config.get("min_confidence_autofix", 0.65) or 0.65)
+        or confidence < float(category_config.get("min_confidence_autofix", MIN_CONF_AUTOFIX) or MIN_CONF_AUTOFIX)
     ):
         finding["rollout_mode"] = "issue-only"
         result = _open_github_issue(finding, root, policy)
@@ -3153,10 +3222,10 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
     batch_enabled = (policy or {}).get("batch_similar_findings", True)
     batches: list[list[dict]] = []
     individual_findings: list[dict] = []
-    if batch_enabled and len(to_process) >= 3:
+    if batch_enabled and len(to_process) >= BATCH_MIN_GROUP_SIZE:
         groups = _group_similar_findings(to_process)
         for group in groups:
-            if len(group) >= 3:
+            if len(group) >= BATCH_MIN_GROUP_SIZE:
                 batches.append(group)
             else:
                 individual_findings.extend(group)
@@ -3187,12 +3256,13 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
         if remaining < 120:  # Batches need more time
             _log(f"Time budget low ({remaining:.0f}s), skipping remaining batches")
             for f in batch:
-                f["status"] = "failed"
+                # Don't mark as failed — no attempt was made. Keep as "new" for next cycle.
+                f["status"] = "new"
                 f["fail_reason"] = "timeout_budget_exhausted"
                 f["processed_at"] = now_iso()
                 existing_findings.append(f)
                 all_scan_findings.append(f)
-                summary_counts["failed"] += 1
+                summary_counts["skipped"] = summary_counts.get("skipped", 0) + 1
             continue
         results = _autofix_batch(batch, root, policy or {})
         for r in results:
@@ -3212,12 +3282,13 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
         remaining = SCAN_TIMEOUT_SECONDS - elapsed
         if remaining < 60:
             _log(f"Time budget low ({remaining:.0f}s remaining), stopping processing")
-            finding["status"] = "failed"
+            # Don't mark as failed — no attempt was made. Keep as "new" for next cycle.
+            finding["status"] = "new"
             finding["fail_reason"] = "timeout_budget_exhausted"
             finding["processed_at"] = now_iso()
             existing_findings.append(finding)
             all_scan_findings.append(finding)
-            summary_counts["failed"] += 1
+            summary_counts["skipped"] = summary_counts.get("skipped", 0) + 1
             continue
 
         processed = _process_finding(finding, root, policy, existing_findings)
@@ -3330,6 +3401,18 @@ def _cmd_scan_locked(root: Path, max_findings: int) -> int:
         },
         "scan_duration_seconds": round(elapsed, 2),
     }
+
+    log_event(
+        root,
+        "autofix_scan",
+        duration_s=round(time.monotonic() - start_time, 3),
+        total_detected=len(new_findings),
+        processed=summary_counts.get("processed", 0),
+        fixed=summary_counts.get("fixed", 0),
+        issues_opened=summary_counts.get("issues_opened", 0),
+        failed=summary_counts.get("failed", 0),
+        skipped_dedup=summary_counts.get("skipped_dedup", 0),
+    )
 
     # Only JSON to stdout (AC 18, 27)
     print(json.dumps(output, indent=2))

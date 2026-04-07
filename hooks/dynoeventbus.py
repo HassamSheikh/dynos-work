@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -23,6 +24,7 @@ from dynoslib_events import (
     emit_event,
     mark_processed,
 )
+from dynoslib_log import log_event
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -51,9 +53,14 @@ def _run(cmd: list[str], root: Path) -> bool:
 
 
 def run_learn(root: Path, _payload: dict) -> bool:
-    """Aggregate retrospectives into project memory."""
-    # Use claude CLI to invoke the learn skill (same as old hook)
-    return _run(["claude", "-p", "Run /dynos-work:learn for the most recently completed task"], root)
+    """Aggregate retrospectives into project memory (deterministic Python)."""
+    # dynopatterns.py does everything the learn skill does:
+    # EMA effectiveness scores, model policy, skip policy, baseline policy,
+    # agent routing table, prevention rules — all written to dynos_patterns.md
+    return _run(
+        ["python3", str(SCRIPT_DIR / "dynopatterns.py"), "--root", str(root)],
+        root,
+    )
 
 
 def run_trajectory(root: Path, _payload: dict) -> bool:
@@ -181,11 +188,24 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
                     payload = event_data.get("payload", {})
 
                     # Run handler, swallow errors (|| true semantics)
+                    err_msg = None
+                    t0 = time.monotonic()
                     try:
                         success = handler_fn(root, payload)
                     except Exception as e:
+                        err_msg = str(e)
                         print(f"  [warn] {consumer_name}: {e}", file=sys.stderr)
                         success = False
+
+                    log_event(
+                        root,
+                        "eventbus_handler",
+                        handler=consumer_name,
+                        trigger_event=event_type,
+                        success=success,
+                        duration_s=round(time.monotonic() - t0, 3),
+                        error=err_msg if not success else None,
+                    )
 
                     # Mark as processed regardless of success
                     mark_processed(event_path, consumer_name)
@@ -207,6 +227,35 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
 
     # Cleanup old events
     cleanup_old_events(root)
+
+    # Write post-completion receipt if task-completed was processed
+    if "task-completed" in summary:
+        try:
+            from dynoslib_receipts import receipt_post_completion
+            from dynoslib_core import find_active_tasks, load_json
+            # Find the most recently completed task to write the receipt to
+            dynos_dir = root / ".dynos"
+            task_dirs = sorted(dynos_dir.glob("task-*/manifest.json"), reverse=True)
+            for mp in task_dirs:
+                m = load_json(mp)
+                if m.get("stage") in ("CHECKPOINT_AUDIT", "DONE"):
+                    task_dir = mp.parent
+                    handlers_run = []
+                    for evt_type, results in summary.items():
+                        for r in results:
+                            name, status = r.split(":", 1)
+                            handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
+                    postmortem_ok = any(r.startswith("postmortem:ok") for r in summary.get("evolve-completed", []))
+                    patterns_ok = any(r.startswith("patterns:ok") for r in summary.get("learn-completed", []))
+                    receipt_post_completion(
+                        task_dir,
+                        handlers_run=handlers_run,
+                        postmortem_written=postmortem_ok,
+                        patterns_updated=patterns_ok,
+                    )
+                    break
+        except Exception as exc:
+            print(f"  [warn] post-completion receipt failed: {exc}", file=sys.stderr)
 
     return summary
 

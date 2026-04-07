@@ -8,7 +8,8 @@ import argparse
 import json
 from pathlib import Path
 
-from dynoslib_core import collect_retrospectives, now_iso, _persistent_project_dir
+from dynoslib_core import collect_retrospectives, load_json, now_iso, _persistent_project_dir
+from dynoslib_log import log_event
 from dynoslib_registry import ensure_learned_registry, register_learned_agent
 
 
@@ -138,32 +139,54 @@ def cmd_auto(args: argparse.Namespace) -> int:
     retrospectives = collect_retrospectives(root)
     registry = ensure_learned_registry(root)
     min_tasks = int(args.min_tasks)
-    result: dict = {"checked_at": now_iso(), "generated": [], "skipped_reasons": []}
+    result: dict = {"checked_at": now_iso(), "generated": [], "skipped_reasons": [], "steps": []}
 
+    # Step 1: Gate check
     if len(retrospectives) < min_tasks:
         result["skipped_reasons"].append(f"insufficient retrospectives: {len(retrospectives)} < {min_tasks}")
+        result["steps"].append({"step": "gate_check", "passed": False, "reason": f"{len(retrospectives)} < {min_tasks}"})
+        log_event(root, "evolve_step", step="gate_check", passed=False, retrospective_count=len(retrospectives))
         print(json.dumps(result, indent=2))
         return 0
+    result["steps"].append({"step": "gate_check", "passed": True, "retrospective_count": len(retrospectives)})
+    log_event(root, "evolve_step", step="gate_check", passed=True, retrospective_count=len(retrospectives))
 
-    # Find (role, task_type) combos from retrospectives that have enough data
+    # Step 2: Discover uncovered (role, task_type) slots
+    # Scan execution graphs for ALL executors that ran, not just those with repairs.
+    # executor_repair_frequency only contains executors that failed — misses clean runs.
     role_type_counts: dict[tuple[str, str], int] = {}
-    for retro in retrospectives:
-        for role in retro.get("executor_repair_frequency", {}):
+    dynos_dir = root / ".dynos"
+    for task_dir in sorted(dynos_dir.iterdir()) if dynos_dir.exists() else []:
+        if not task_dir.name.startswith("task-"):
+            continue
+        graph_path = task_dir / "execution-graph.json"
+        retro_path = task_dir / "task-retrospective.json"
+        if not (graph_path.exists() and retro_path.exists()):
+            continue
+        try:
+            retro = load_json(retro_path)
+            graph = load_json(graph_path)
             task_type = retro.get("task_type", "")
-            if isinstance(role, str) and isinstance(task_type, str) and role and task_type:
-                role_type_counts[(role, task_type)] = role_type_counts.get((role, task_type), 0) + 1
+            if not task_type:
+                continue
+            for seg in graph.get("segments", []):
+                role = seg.get("executor", "")
+                if role and isinstance(role, str):
+                    role_type_counts[(role, task_type)] = role_type_counts.get((role, task_type), 0) + 1
+        except (json.JSONDecodeError, OSError):
+            continue
 
-    # Check existing registry to avoid duplicates
     existing = {
         (a.get("role"), a.get("task_type"))
         for a in registry.get("agents", [])
     }
 
-    for (role, task_type), count in role_type_counts.items():
-        if count < 3:
-            continue
-        if (role, task_type) in existing:
-            continue
+    candidates = [(r, t, c) for (r, t), c in role_type_counts.items() if c >= 3 and (r, t) not in existing]
+    result["steps"].append({"step": "discover_slots", "total_slots": len(role_type_counts), "uncovered": len(candidates), "existing": len(existing)})
+    log_event(root, "evolve_step", step="discover_slots", total_slots=len(role_type_counts), uncovered=len(candidates), existing=len(existing))
+
+    # Step 3: Generate agents for uncovered slots
+    for role, task_type, count in candidates:
         agent_name = f"auto-{role.replace('-executor', '')}-{task_type}"
         agent_dir = _persistent_project_dir(root) / "learned-agents" / "executors"
         agent_dir.mkdir(parents=True, exist_ok=True)
@@ -185,7 +208,10 @@ def cmd_auto(args: argparse.Namespace) -> int:
             generated_from=latest_task,
         )
         result["generated"].append({"agent_name": agent_name, "role": role, "task_type": task_type})
+        log_event(root, "evolve_step", step="agent_generated", agent_name=agent_name, role=role, task_type=task_type, sample_count=count)
 
+    result["steps"].append({"step": "generate", "generated_count": len(result["generated"])})
+    log_event(root, "evolve_auto", generated_count=len(result.get("generated", [])), skipped_reasons=result.get("skipped_reasons", []), retrospective_count=len(retrospectives), steps=result["steps"])
     print(json.dumps(result, indent=2))
     return 0
 

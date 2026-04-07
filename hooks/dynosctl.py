@@ -100,6 +100,18 @@ def cmd_compute_reward(args: argparse.Namespace) -> int:
         from dynoslib_core import write_json
         write_json(task_dir / "task-retrospective.json", result)
         print(f"Written to {task_dir / 'task-retrospective.json'}")
+        # Write retrospective receipt
+        try:
+            from dynoslib_receipts import receipt_retrospective
+            receipt_retrospective(
+                task_dir,
+                quality_score=result.get("quality_score", 0),
+                cost_score=result.get("cost_score", 0),
+                efficiency_score=result.get("efficiency_score", 0),
+                total_tokens=result.get("total_token_usage", 0),
+            )
+        except Exception as exc:
+            print(f"[warn] retrospective receipt failed: {exc}", file=sys.stderr)
     else:
         print(json.dumps(result, indent=2))
     return 0
@@ -122,6 +134,16 @@ def cmd_validate_contract(args: argparse.Namespace) -> int:
     result = {"skill": args.skill, "valid": len(errors) == 0, "errors": errors}
     print(json.dumps(result, indent=2))
     return 1 if errors else 0
+
+
+def cmd_validate_receipts(args: argparse.Namespace) -> int:
+    import json
+    from dynoslib_receipts import validate_chain as validate_receipt_chain
+    task_dir = Path(args.task_dir).resolve()
+    gaps = validate_receipt_chain(task_dir)
+    result = {"valid": len(gaps) == 0, "gaps": gaps, "task_dir": str(task_dir)}
+    print(json.dumps(result, indent=2))
+    return 1 if gaps else 0
 
 
 def cmd_validate_chain(args: argparse.Namespace) -> int:
@@ -222,6 +244,10 @@ def build_parser() -> argparse.ArgumentParser:
     contract_parser.add_argument("--direction", choices=["input", "output", "both"], default="input")
     contract_parser.add_argument("--strict", action="store_true")
     contract_parser.set_defaults(func=cmd_validate_contract)
+
+    receipt_parser = subparsers.add_parser("validate-receipts", help="Validate receipt chain for a task")
+    receipt_parser.add_argument("task_dir")
+    receipt_parser.set_defaults(func=cmd_validate_receipts)
 
     chain_parser = subparsers.add_parser("validate-chain", help="Validate contract chain across the pipeline")
     chain_parser.set_defaults(func=cmd_validate_chain)

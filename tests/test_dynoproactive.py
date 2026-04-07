@@ -266,7 +266,7 @@ class TestProcessFindingRouting:
 
     def test_max_attempts_falls_back_to_issue(self, tmp_project: Path) -> None:
         finding = _make_finding("retry-1", "low", "dead-code", "desc", {})
-        finding["attempt_count"] = 2  # already at max
+        finding["attempt_count"] = 3  # already at max (MAX_ATTEMPTS=3)
         with patch("dynoproactive._open_github_issue") as issue_mock:
             issue_mock.side_effect = lambda f, root, policy=None: {**f, "status": "issue-opened"}
             result = _process_finding(finding, tmp_project)

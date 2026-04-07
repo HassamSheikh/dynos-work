@@ -11,6 +11,33 @@ There is one pipeline for all tasks. There are no shortcuts. Historical memory m
 
 ---
 
+## MANDATORY: Token Recording After Every Agent Spawn
+
+After EVERY Agent tool call in this skill (planner, spec-completion auditor, testing-executor), you MUST write a receipt that records token usage. Read `total_tokens` from the Agent tool result's usage summary and run:
+
+```python
+from dynoslib_receipts import receipt_planner_spawn, receipt_plan_audit, receipt_tdd_tests
+
+# After planner spawn (discovery/design/classification):
+receipt_planner_spawn(task_dir, "discovery", tokens_used=TOTAL_TOKENS)
+
+# After planner spawn (spec normalization):
+receipt_planner_spawn(task_dir, "spec", tokens_used=TOTAL_TOKENS)
+
+# After planner spawn (plan generation):
+receipt_planner_spawn(task_dir, "plan", tokens_used=TOTAL_TOKENS)
+
+# After spec-completion auditor (plan audit):
+receipt_plan_audit(task_dir, tokens_used=TOTAL_TOKENS, finding_count=N)
+
+# After testing-executor (TDD):
+receipt_tdd_tests(task_dir, tokens_used=TOTAL_TOKENS, test_count=N, criteria_covered=[1,2,3...])
+```
+
+Each receipt auto-records tokens to `token-usage.json`. If you skip this, the retrospective will show 0 tokens and the effectiveness scores will be wrong. This is the same enforcement pattern as the execute skill's receipts.
+
+---
+
 ## Step 0 — Metadata & Initialization
 
 1. Ensure `.dynos/` exists: `mkdir -p .dynos`. Then auto-register this project with the global registry (silent, idempotent): run `python3 "${PLUGIN_HOOKS}/dynoregistry.py" register "$(pwd)" 2>/dev/null || true`. This creates `~/.dynos/projects/{slug}/` and adds the project to `~/.dynos/registry.json` if not already registered. No user action needed. Then ensure the local maintenance daemon is running (silent, idempotent): run `PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynomaintain.py" start --root "$(pwd)" 2>/dev/null || true`. This starts the daemon without autofix. Autofix must be explicitly enabled by the user via `dynos init --autofix` or `dynos local start --autofix`. If already running, it is a no-op.
@@ -48,6 +75,61 @@ python3 hooks/dynosctl.py validate-task .dynos/task-{id}
 
 ---
 
+## Token & Event Capture (applies to ALL events in this skill)
+
+After every subagent spawn AND every deterministic validation, record the event:
+
+**For LLM subagent spawns** (planner, founder, testing-executor, spec-completion-auditor):
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+  --task-dir .dynos/task-{id} \
+  --agent "{agent_name}" \
+  --model "{model_name}" \
+  --input-tokens {input_tokens} \
+  --output-tokens {output_tokens} \
+  --phase planning \
+  --stage "{current_manifest_stage}" \
+  --type spawn \
+  --detail "{what the agent did}"
+```
+
+**For deterministic Python validations** (validate_task_artifacts, dynosctl validate-task, spec heading check, etc.):
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+  --task-dir .dynos/task-{id} \
+  --agent "{validation_tool_name}" \
+  --model "none" \
+  --input-tokens 0 \
+  --output-tokens 0 \
+  --phase planning \
+  --stage "{current_manifest_stage}" \
+  --type deterministic \
+  --detail "{validation result summary}"
+```
+
+Where:
+- `input_tokens`/`output_tokens` come from the Agent tool result's usage summary (pass `0` if unavailable)
+- `model_name` is the model used (e.g. "opus", "sonnet", "haiku")
+- `current_manifest_stage` is the current stage from manifest.json (e.g. DISCOVERY, SPEC_NORMALIZATION, PLANNING)
+- `detail` is a short description of what happened (e.g. "Discovery + Design + Classification", "Validated spec.md headings — 0 errors")
+
+This writes to `.dynos/task-{id}/token-usage.json` with a chronological event log. The same hook is used by execute and audit skills — events accumulate across all phases.
+
+**Specific events to record in this skill:**
+- Step 2: Planner spawn (phase=planning, stage=DISCOVERY)
+- Step 2: Founder simulation spawns (phase=planning, stage=DISCOVERY)
+- Step 2: Classification validation (type=deterministic, stage=DISCOVERY)
+- Step 2b: Fast-track gate check (type=deterministic, stage=DISCOVERY)
+- Step 3: Planner spec normalization spawn (phase=planning, stage=SPEC_NORMALIZATION)
+- Step 3: Spec heading/criteria validation (type=deterministic, stage=SPEC_NORMALIZATION)
+- Step 5: Planner plan generation spawn (phase=planning, stage=PLANNING)
+- Step 5: validate_task_artifacts run (type=deterministic, stage=PLANNING)
+- Step 7: spec-completion-auditor plan audit spawn (phase=audit, stage=PLAN_AUDIT)
+- Step 8: testing-executor TDD spawn (phase=tdd, stage=PLAN_AUDIT)
+- Step 8: TDD criteria coverage validation (type=deterministic, stage=PLAN_AUDIT)
+
+---
+
 ## Step 1 — Discovery Intake
 
 1. Build discovery context from:
@@ -71,6 +153,14 @@ python3 hooks/dynosctl.py validate-task .dynos/task-{id}
 When well-scoped: skip the planner spawn entirely. Instead, write `discovery-notes.md` with "No discovery needed — task is well-scoped." Write `design-decisions.md` with "No hard/critical design options — autonomous decisions only." Classify directly (infer type, domains, risk_level from the input). Then proceed to Step 2b (fast-track gate) and Step 3.
 
 When NOT well-scoped: spawn the planner as normal below.
+
+**Learned Planning Skill Injection (MANDATORY):** Before spawning the planner, check if a learned planning skill exists for this task type:
+
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 -c "from pathlib import Path; from dynorouter import resolve_route; r = resolve_route(Path('.'), 'plan-skill', '{task_type}'); print(r['agent_path'] or '')" 
+```
+
+If a non-empty path is returned AND the file exists, read it, strip frontmatter, and append its contents to the planner's instruction below under a `## Learned Planning Rules` heading. This injects project-specific planning patterns (e.g., tighter acceptance criteria, better segment sizing) derived from past task retrospectives. Log: `{timestamp} [ROUTE] plan-skill route={mode} agent={agent_name}`.
 
 Spawn the Planner subagent (`dynos-work:planning`) with instruction:
 
