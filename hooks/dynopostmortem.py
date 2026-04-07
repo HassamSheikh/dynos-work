@@ -18,22 +18,35 @@ from dynoslib_core import (
     project_policy,
     project_dir,
 )
+from dynoslib_log import log_event
+from dynoslib_defaults import (
+    DEFAULT_TOKEN_BUDGET,
+    GENERIC_ROUTING_PATTERN_THRESHOLD,
+    OVERRUN_PATTERN_THRESHOLD,
+    OVERRUN_RATIO_HIGH,
+    OVERRUN_RATIO_MEDIUM,
+    PATTERN_DETECTION_WINDOW,
+    QUALITY_REGRESSION_THRESHOLD,
+    QUALITY_THRESHOLD_ANOMALY,
+    REPAIR_CYCLES_THRESHOLD,
+    REPAIR_PATTERN_THRESHOLD,
+    SIMILAR_TASKS_LIMIT,
+    SIMILARITY_WEIGHT_DOMAIN,
+    SIMILARITY_WEIGHT_RISK,
+    SIMILARITY_WEIGHT_TASKTYPE,
+    TASK_TOKEN_BUDGETS,
+    WASTED_SPAWN_RATIO_THRESHOLD,
+    ZERO_QUALITY_PATTERN_THRESHOLD,
+)
 
 
-# Token budgets by (risk_level, task_type)
+# Token budgets by (risk_level, task_type) — derived from centralized defaults
 TOKEN_BUDGETS = {
-    ("low", "feature"): 30000,
-    ("low", "bugfix"): 15000,
-    ("low", "refactor"): 20000,
-    ("medium", "feature"): 80000,
-    ("medium", "bugfix"): 40000,
-    ("medium", "refactor"): 50000,
-    ("high", "feature"): 200000,
-    ("high", "bugfix"): 80000,
-    ("high", "refactor"): 100000,
-    ("critical", "feature"): 400000,
+    (risk, ttype): budget
+    for risk, type_budgets in TASK_TOKEN_BUDGETS.items()
+    for ttype, budget in type_budgets.items()
 }
-DEFAULT_BUDGET = 60000
+DEFAULT_BUDGET = DEFAULT_TOKEN_BUDGET
 
 
 def postmortems_dir(root: Path) -> Path:
@@ -69,7 +82,7 @@ def _count_log_pattern(log_text: str, pattern: str) -> int:
     return sum(1 for line in log_text.splitlines() if pattern in line)
 
 
-def _find_similar_tasks(retro: dict, all_retros: list[dict], limit: int = 3) -> list[dict]:
+def _find_similar_tasks(retro: dict, all_retros: list[dict], limit: int = SIMILAR_TASKS_LIMIT) -> list[dict]:
     """Find similar past tasks by type + domain match."""
     task_type = retro.get("task_type", "")
     task_domains = retro.get("task_domains", "")
@@ -80,11 +93,11 @@ def _find_similar_tasks(retro: dict, all_retros: list[dict], limit: int = 3) -> 
             continue
         score = 0.0
         if past.get("task_type") == task_type:
-            score += 0.5
+            score += SIMILARITY_WEIGHT_TASKTYPE
         if past.get("task_domains") == task_domains:
-            score += 0.3
+            score += SIMILARITY_WEIGHT_DOMAIN
         if past.get("task_risk_level") == retro.get("task_risk_level"):
-            score += 0.2
+            score += SIMILARITY_WEIGHT_RISK
         if score > 0:
             similar.append({"task_id": past.get("task_id"), "similarity": score, **past})
     similar.sort(key=lambda x: (-x["similarity"], x.get("task_id", "")))
@@ -100,16 +113,16 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
     budget = _expected_budget(risk, task_type, budget_multiplier)
 
     # Token overrun
-    if total_tokens > budget * 1.5:
+    if total_tokens > budget * OVERRUN_RATIO_MEDIUM:
         anomalies.append({
             "type": "token_overrun",
-            "severity": "high" if total_tokens > budget * 3 else "medium",
+            "severity": "high" if total_tokens > budget * OVERRUN_RATIO_HIGH else "medium",
             "detail": f"Used {int(total_tokens)} tokens vs {budget} budget ({total_tokens/budget:.1f}x)",
         })
 
     # Quality anomaly
     quality = _safe_float(retro.get("quality_score"), 0)
-    if quality < 0.5:
+    if quality < QUALITY_THRESHOLD_ANOMALY:
         anomalies.append({
             "type": "low_quality",
             "severity": "high",
@@ -127,7 +140,7 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
 
     # Repair cycles
     repairs = int(retro.get("repair_cycle_count", 0) or 0)
-    if repairs >= 2:
+    if repairs >= REPAIR_CYCLES_THRESHOLD:
         anomalies.append({
             "type": "high_repair_cycles",
             "severity": "medium",
@@ -137,7 +150,7 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
     # Wasted spawns ratio
     spawns = int(retro.get("subagent_spawn_count", 0) or 0)
     wasted = int(retro.get("wasted_spawns", 0) or 0)
-    if spawns > 0 and wasted / spawns > 0.5:
+    if spawns > 0 and wasted / spawns > WASTED_SPAWN_RATIO_THRESHOLD:
         anomalies.append({
             "type": "high_waste_ratio",
             "severity": "medium",
@@ -149,7 +162,7 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
         avg_similar_quality = sum(
             _safe_float(t.get("quality_score"), 0) for t in similar_tasks
         ) / len(similar_tasks)
-        if quality < avg_similar_quality - 0.3:
+        if quality < avg_similar_quality - QUALITY_REGRESSION_THRESHOLD:
             anomalies.append({
                 "type": "quality_regression_vs_similar",
                 "severity": "high",
@@ -159,7 +172,7 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
     return anomalies
 
 
-def _detect_recurring_patterns(all_retros: list[dict], window: int = 5) -> list[dict]:
+def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DETECTION_WINDOW) -> list[dict]:
     """Detect recurring issues across recent tasks."""
     recent = all_retros[-window:]
     patterns = []
@@ -169,7 +182,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = 5) -> list[
         1 for r in recent
         if r.get("agent_source") and all(v == "generic" for v in r.get("agent_source", {}).values())
     )
-    if generic_count >= 3:
+    if generic_count >= GENERIC_ROUTING_PATTERN_THRESHOLD:
         patterns.append({
             "pattern": "persistent_generic_routing",
             "occurrences": generic_count,
@@ -183,9 +196,9 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = 5) -> list[
         risk = r.get("task_risk_level", "medium")
         tt = r.get("task_type", "feature")
         tokens = _safe_float(r.get("total_token_usage"), 0)
-        if tokens > _expected_budget(risk, tt) * 1.5:
+        if tokens > _expected_budget(risk, tt) * OVERRUN_RATIO_MEDIUM:
             overrun_count += 1
-    if overrun_count >= 2:
+    if overrun_count >= OVERRUN_PATTERN_THRESHOLD:
         patterns.append({
             "pattern": "recurring_token_overrun",
             "occurrences": overrun_count,
@@ -195,7 +208,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = 5) -> list[
 
     # Recurring repair cycles
     repair_count = sum(1 for r in recent if int(r.get("repair_cycle_count", 0) or 0) > 0)
-    if repair_count >= 3:
+    if repair_count >= REPAIR_PATTERN_THRESHOLD:
         patterns.append({
             "pattern": "recurring_repair_cycles",
             "occurrences": repair_count,
@@ -205,7 +218,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = 5) -> list[
 
     # Recurring scoring issues (quality_score exactly 0)
     zero_quality = sum(1 for r in recent if _safe_float(r.get("quality_score"), -1) == 0)
-    if zero_quality >= 2:
+    if zero_quality >= ZERO_QUALITY_PATTERN_THRESHOLD:
         patterns.append({
             "pattern": "recurring_zero_quality_scores",
             "occurrences": zero_quality,
@@ -315,6 +328,7 @@ def write_postmortem(root: Path, task_id: str) -> dict:
     md = _render_markdown(postmortem)
     md_path.write_text(md)
 
+    log_event(root, "postmortem_written", task=task_id, anomaly_count=len(postmortem.get("anomalies", [])), recurring_pattern_count=len(postmortem.get("recurring_patterns", [])), json_path=str(json_path))
     return {
         "task_id": task_id,
         "json_path": str(json_path),
@@ -376,6 +390,7 @@ def _render_markdown(pm: dict) -> str:
 # Auto-improvement engine (delegated to dynopostmortem_improve)
 # ---------------------------------------------------------------------------
 from dynopostmortem_improve import (  # noqa: E402
+    apply_improvement,
     cmd_approve,
     cmd_improve,
     cmd_list_pending,

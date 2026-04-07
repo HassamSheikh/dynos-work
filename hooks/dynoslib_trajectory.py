@@ -62,14 +62,51 @@ def estimate_token_usage(subagent_spawn_count: int, model_used_by_agent: dict) -
     return max(1, int(subagent_spawn_count or 0)) * TOKEN_ESTIMATES["default"]
 
 
+# Rough input/output ratio by model (input-heavy due to context loading)
+INPUT_OUTPUT_RATIOS: dict[str, float] = {"opus": 0.70, "sonnet": 0.65, "haiku": 0.60, "default": 0.65}
+
+
+def estimate_token_breakdown(total: int, model: str | None = None) -> tuple[int, int]:
+    """Estimate input/output split from a total token count.
+
+    Returns (input_tokens, output_tokens).
+    """
+    ratio = INPUT_OUTPUT_RATIOS.get(model or "default", INPUT_OUTPUT_RATIOS["default"])
+    input_tokens = int(total * ratio)
+    return input_tokens, total - input_tokens
+
+
 def load_token_usage(task_dir: Path) -> dict:
-    """Read token-usage.json written by the audit skill during subagent spawns."""
+    """Read token-usage.json written by the audit/execute skills during subagent spawns.
+
+    Returns a dict with keys: agents, by_agent, by_model, total,
+    total_input_tokens, total_output_tokens.
+    """
     path = task_dir / "token-usage.json"
+    empty: dict = {
+        "agents": {}, "by_agent": {}, "by_model": {},
+        "total": 0, "total_input_tokens": 0, "total_output_tokens": 0,
+    }
     if path.exists():
         data = load_json(path)
         if isinstance(data, dict) and "agents" in data:
+            # Backfill missing fields for older format files
+            if "by_agent" not in data:
+                data["by_agent"] = {}
+            if "by_model" not in data:
+                data["by_model"] = {}
+            if "total_input_tokens" not in data:
+                data["total_input_tokens"] = sum(
+                    v.get("input_tokens", 0) for v in data.get("by_agent", {}).values()
+                    if isinstance(v, dict)
+                )
+            if "total_output_tokens" not in data:
+                data["total_output_tokens"] = sum(
+                    v.get("output_tokens", 0) for v in data.get("by_agent", {}).values()
+                    if isinstance(v, dict)
+                )
             return data
-    return {"agents": {}, "total": 0}
+    return empty
 
 
 def validate_retrospective_scores(retro: dict, task_dir: Optional[Path] = None) -> dict:

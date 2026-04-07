@@ -170,7 +170,10 @@ class TestLoadTokenUsage(unittest.TestCase):
         from dynoslib import load_token_usage
         with tempfile.TemporaryDirectory() as td:
             data = load_token_usage(Path(td))
-            self.assertEqual(data, {"agents": {}, "total": 0})
+            self.assertEqual(data["agents"], {})
+            self.assertEqual(data["total"], 0)
+            self.assertEqual(data["total_input_tokens"], 0)
+            self.assertEqual(data["total_output_tokens"], 0)
 
     def test_validate_uses_token_file(self) -> None:
         import tempfile

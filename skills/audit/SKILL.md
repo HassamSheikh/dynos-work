@@ -47,8 +47,10 @@ This returns a JSON plan with each auditor's action (spawn/skip), model, and rou
 
 For each auditor in the plan:
 - If `action: "skip"`: log `{timestamp} [SKIP] {name} — {reason}` and do not spawn
-- If `action: "spawn"`: spawn with the specified `model` (null = default), using `agent_path` if `route_mode` is "learned" or "alongside"
+- If `action: "spawn"`: spawn with the specified `model` (null = default)
 - Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
+
+**Learned Auditor Injection (MANDATORY):** When an auditor has `route_mode` of `"replace"` or `"alongside"` and a non-null `agent_path`, you MUST read the learned agent file at that path and append its contents to the auditor's spawn prompt. This is the same enforcement as the execute skill's inject-prompt. If the file exists, read it, strip frontmatter, and append under a `## Learned Auditor Instructions` heading. Log the injection to the execution log. If the file does not exist, log `[WARN] learned auditor file missing: {agent_path}` and spawn with generic instructions.
 
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
@@ -74,19 +76,48 @@ Spawn the determined auditors simultaneously, passing the resolved model for eac
 
 Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
-**Token capture (applies to all subagent spawns in Steps 3-4):** After each subagent completes, read `total_tokens` from the Agent tool result's usage summary. Immediately append the entry to `.dynos/task-{id}/token-usage.json` using this format:
+**Token & event capture (applies to all events in Steps 3-5):** After each subagent spawn AND each deterministic check, record the event:
 
-```python
-# Read or initialize
-import json
-path = ".dynos/task-{id}/token-usage.json"
-data = json.load(open(path)) if os.path.exists(path) else {"agents": {}, "total": 0}
-data["agents"][agent_name] = data["agents"].get(agent_name, 0) + token_count
-data["total"] = sum(v for v in data["agents"].values() if isinstance(v, (int, float)))
-json.dump(data, open(path, "w"), indent=2)
+**For LLM subagent spawns** (auditors, repair-coordinator, repair executors):
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+  --task-dir .dynos/task-{id} \
+  --agent "{agent_name}" \
+  --model "{model_name}" \
+  --input-tokens {input_tokens} \
+  --output-tokens {output_tokens} \
+  --phase audit \
+  --stage "AUDITING" \
+  --type spawn \
+  --detail "{what the agent did}"
 ```
 
-Write to this file after EVERY subagent spawn — auditors, repair-coordinator, executors, re-audit passes. This file is the durable record of token usage. The retrospective's `token_usage_by_agent` and `total_token_usage` fields should be populated from this file, not from memory. If `total_tokens` is unavailable from a spawn result, record `null` for that agent and exclude it from the sum.
+**For deterministic steps** (router decisions, retrospective computation, repair-log validation):
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/dynoslib_tokens.py" record \
+  --task-dir .dynos/task-{id} \
+  --agent "{tool_name}" \
+  --model "none" \
+  --input-tokens 0 \
+  --output-tokens 0 \
+  --phase audit \
+  --stage "AUDITING" \
+  --type deterministic \
+  --detail "{result summary}"
+```
+
+**For repair executor spawns**, use `--phase repair` and include `--segment {segment-id}` if the repair targets a specific segment.
+
+Run this after EVERY event. The hook writes to `.dynos/task-{id}/token-usage.json` with a chronological event log plus aggregated totals. The retrospective's token fields are populated from this file.
+
+**Specific events to record in this skill:**
+- Step 3: dynorouter audit-plan (type=deterministic, detail="Router decided: spawn X, skip Y")
+- Step 3: Each auditor spawn (type=spawn, phase=audit)
+- Step 4: repair-coordinator spawn (type=spawn, phase=repair)
+- Step 4: Each repair executor spawn (type=spawn, phase=repair, include --segment)
+- Step 4: dynosctl check-ownership after repair (type=deterministic, phase=repair)
+- Step 4: Re-audit spawns (type=spawn, phase=audit, detail="Re-audit after repair cycle N")
+- Step 5: compute_reward / validate_retrospective_scores (type=deterministic, phase=audit, detail="Computed retrospective scores")
 
 **Eager two-phase repair trigger:**
 

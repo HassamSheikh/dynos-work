@@ -18,6 +18,21 @@ from pathlib import Path
 
 from dynoslib_core import load_json, now_iso, write_json, project_dir, is_pid_running
 from dynoslib_crawler import build_import_graph
+from dynoslib_defaults import (
+    BACKOFF_HOURS_1DAY,
+    BACKOFF_HOURS_3DAY,
+    BACKOFF_HOURS_7DAY,
+    BACKOFF_SKIP_RATIO_1DAY,
+    BACKOFF_SKIP_RATIO_3DAY,
+    BACKOFF_SKIP_RATIO_7DAY,
+    DEFAULT_CENTRALITY_SCORE,
+    DEFAULT_POLL_SECONDS,
+    LOG_MAX_AGE_DAYS,
+    MAINTENANCE_CYCLE_TIMEOUT,
+    RECENT_SWEEPS_COUNT,
+    RECENT_TASKS_WINDOW,
+    SEVERITY_WEIGHTS,
+)
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -232,6 +247,12 @@ def promote_prevention_rules() -> dict:
     )
 
 
+def extract_project_stats(project_root: Path) -> dict:
+    """Extract stats for a single project."""
+    from dynoglobal_stats import extract_project_stats as _extract
+    return _extract(project_root)
+
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -250,7 +271,7 @@ def log_global(message: str) -> None:
         pass
 
 
-def cleanup_old_logs(max_age_days: int = 30) -> int:
+def cleanup_old_logs(max_age_days: int = LOG_MAX_AGE_DAYS) -> int:
     """Remove log files older than max_age_days. Returns count of files removed."""
     if max_age_days < 1:
         raise ValueError("max_age_days must be >= 1")
@@ -327,12 +348,12 @@ def _should_skip_backoff(entry: dict, sweep_count: int) -> bool:
     now = datetime.now(timezone.utc)
     age_hours = (now - last_dt).total_seconds() / 3600.0
 
-    if age_hours > 168:  # >7 days
-        return (sweep_count % 8) != 0
-    if age_hours > 72:   # >3 days
-        return (sweep_count % 4) != 0
-    if age_hours > 24:   # >1 day
-        return (sweep_count % 2) != 0
+    if age_hours > BACKOFF_HOURS_7DAY:  # >7 days
+        return (sweep_count % BACKOFF_SKIP_RATIO_7DAY) != 0
+    if age_hours > BACKOFF_HOURS_3DAY:   # >3 days
+        return (sweep_count % BACKOFF_SKIP_RATIO_3DAY) != 0
+    if age_hours > BACKOFF_HOURS_1DAY:   # >1 day
+        return (sweep_count % BACKOFF_SKIP_RATIO_1DAY) != 0
     return False
 
 
@@ -371,7 +392,7 @@ def _run_maintenance_cycle(root: Path) -> dict:
         [sys.executable, str(hooks_dir / "dynomaintain.py"), "run-once", "--root", str(root)],
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=MAINTENANCE_CYCLE_TIMEOUT,
     )
     if result.returncode == 0 and result.stdout.strip():
         try:
@@ -390,7 +411,7 @@ def _run_maintenance_cycle(root: Path) -> dict:
 # Cross-project priority queue
 # ---------------------------------------------------------------------------
 
-_SEVERITY_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+_SEVERITY_WEIGHT = SEVERITY_WEIGHTS
 _DONE_STATUSES = {"done", "fixed", "suppressed"}
 
 
@@ -444,7 +465,7 @@ def build_cross_project_queue(registry: dict, sweep_count: int = 0) -> list[dict
 
             evidence = finding.get("evidence", {})
             evidence_file = evidence.get("file", "") if isinstance(evidence, dict) else ""
-            centrality_score = pagerank.get(evidence_file, 0.5)
+            centrality_score = pagerank.get(evidence_file, DEFAULT_CENTRALITY_SCORE)
 
             detected_at = finding.get("detected_at", "")
             days_since = 0.0
@@ -523,7 +544,7 @@ def cmd_run_once(args: argparse.Namespace) -> int:
 def cmd_run_loop(args: argparse.Namespace) -> int:
     """Run the global daemon loop in the foreground."""
     ensure_global_dirs()
-    poll_seconds = int(getattr(args, "poll_seconds", None) or 3600)
+    poll_seconds = int(getattr(args, "poll_seconds", None) or DEFAULT_POLL_SECONDS)
 
     daemon_pid_path().write_text(f"{os.getpid()}\n")
     if daemon_stop_path().exists():
@@ -640,7 +661,7 @@ def cmd_start(args: argparse.Namespace) -> int:
             return 0
 
         hooks_dir = Path(__file__).resolve().parent
-        poll_seconds = int(getattr(args, "poll_seconds", None) or 3600)
+        poll_seconds = int(getattr(args, "poll_seconds", None) or DEFAULT_POLL_SECONDS)
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -738,7 +759,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "projects_maintained": s.get("projects_maintained"),
                     "projects_total": s.get("projects_total"),
                 }
-                for s in sweeps[-5:]
+                for s in sweeps[-RECENT_SWEEPS_COUNT:]
             ]
         except (json.JSONDecodeError, OSError):
             pass
@@ -769,7 +790,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
     except (json.JSONDecodeError, OSError) as e:
         print(json.dumps({"error": str(e)}))
         return 1
-    n = int(getattr(args, "last", None) or 10)
+    n = int(getattr(args, "last", None) or RECENT_TASKS_WINDOW)
     recent = sweeps[-n:]
     print(json.dumps({"total_sweeps": len(sweeps), "showing": len(recent), "sweeps": recent}, indent=2))
     return 0
@@ -788,7 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     sp_start = subparsers.add_parser("start", help="Start global daemon in background")
-    sp_start.add_argument("--poll-seconds", type=int, default=3600)
+    sp_start.add_argument("--poll-seconds", type=int, default=DEFAULT_POLL_SECONDS)
     sp_start.set_defaults(func=cmd_start)
 
     sp_stop = subparsers.add_parser("stop", help="Stop the global daemon")
@@ -801,11 +822,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp_run_once.set_defaults(func=cmd_run_once)
 
     sp_run_loop = subparsers.add_parser("run-loop", help="Run the daemon loop in foreground")
-    sp_run_loop.add_argument("--poll-seconds", type=int, default=3600)
+    sp_run_loop.add_argument("--poll-seconds", type=int, default=DEFAULT_POLL_SECONDS)
     sp_run_loop.set_defaults(func=cmd_run_loop)
 
     sp_logs = subparsers.add_parser("logs", help="Show recent global sweep logs")
-    sp_logs.add_argument("--last", default="10", help="Number of recent sweeps to show")
+    sp_logs.add_argument("--last", default=str(RECENT_TASKS_WINDOW), help="Number of recent sweeps to show")
     sp_logs.set_defaults(func=cmd_logs)
 
     sp_dash = subparsers.add_parser("dashboard", help="Generate or serve global dashboard")

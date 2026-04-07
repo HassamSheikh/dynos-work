@@ -459,16 +459,19 @@ def compute_reward(task_dir: Path) -> dict:
     task_risk_level = classification.get("risk_level", "medium")
 
     # --- 5. Token and model tracking ---
-    token_usage_by_agent: dict[str, int] = {}
-    total_token_usage = 0
-    token_path = task_dir / "token-usage.json"
-    if token_path.exists():
-        try:
-            token_data = load_json(token_path)
-            token_usage_by_agent = token_data.get("agents", {})
-            total_token_usage = token_data.get("total", 0)
-        except (json.JSONDecodeError, OSError):
-            pass
+    from dynoslib_tokens import get_summary as _get_token_summary
+    token_data = _get_token_summary(task_dir)
+    token_usage_by_agent: dict[str, int] = token_data.get("agents", {})
+    total_token_usage: int = token_data.get("total", 0)
+    total_input_tokens: int = token_data.get("total_input_tokens", 0)
+    total_output_tokens: int = token_data.get("total_output_tokens", 0)
+    token_usage_by_model: dict[str, dict] = token_data.get("by_model", {})
+    input_tokens_by_agent: dict[str, int] = {}
+    output_tokens_by_agent: dict[str, int] = {}
+    for agent, info in token_data.get("by_agent", {}).items():
+        if isinstance(info, dict):
+            input_tokens_by_agent[agent] = info.get("input_tokens", 0)
+            output_tokens_by_agent[agent] = info.get("output_tokens", 0)
 
     # --- 6. Spawn/waste tracking ---
     subagent_spawn_count = 0
@@ -529,6 +532,11 @@ def compute_reward(task_dir: Path) -> dict:
         "wasted_spawns": wasted_spawns,
         "token_usage_by_agent": token_usage_by_agent,
         "total_token_usage": total_token_usage,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "input_tokens_by_agent": input_tokens_by_agent,
+        "output_tokens_by_agent": output_tokens_by_agent,
+        "token_usage_by_model": token_usage_by_model,
         "quality_score": round(quality_score, 4),
         "cost_score": round(cost_score, 4),
         "efficiency_score": round(efficiency_score, 4),

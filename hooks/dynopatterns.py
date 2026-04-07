@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from dynoslib_core import collect_retrospectives, now_iso, _persistent_project_dir, load_json, write_json
+from dynoslib_log import log_event
 from dynoslib_registry import ensure_learned_registry
 
 DEFAULT_TASK_TYPES = ["feature", "bugfix", "refactor", "migration", "ml", "full-stack"]
@@ -721,6 +722,8 @@ def build_patterns_markdown(
 
 def write_patterns(root: Path) -> dict:
     """Generate policy data, write JSON files, then render and write markdown."""
+    steps_completed: list[str] = []
+
     # Step 1: Collect source data
     retrospectives = collect_retrospectives(root)
     registry = ensure_learned_registry(root)
@@ -728,10 +731,22 @@ def write_patterns(root: Path) -> dict:
     executor_roles = _observed_executor_roles(retrospectives, registry)
     auditor_roles = _observed_auditor_roles(retrospectives, registry)
 
+    if not retrospectives:
+        log_event(root, "learn_step_failed", step="collect", reason="no retrospectives found")
+        return {"written_at": now_iso(), "written_paths": [], "failed_paths": [], "error": "no retrospectives"}
+
+    steps_completed.append(f"collect:{len(retrospectives)} retros")
+    log_event(root, "learn_step", step="collect", retrospective_count=len(retrospectives),
+              task_types=list(task_types), executor_roles=list(executor_roles), auditor_roles=list(auditor_roles))
+
     # Step 2: Compute effectiveness scores (EMA) and derive policies
     effectiveness_scores = compute_effectiveness_scores(retrospectives)
     ema_model_policy = derive_model_policy(effectiveness_scores)
     ema_skip_policy = derive_skip_policy(effectiveness_scores)
+
+    steps_completed.append(f"ema:{len(effectiveness_scores)} scores, {len(ema_model_policy)} model, {len(ema_skip_policy)} skip")
+    log_event(root, "learn_step", step="ema_compute", effectiveness_count=len(effectiveness_scores),
+              model_policy_count=len(ema_model_policy), skip_policy_count=len(ema_skip_policy))
 
     # Step 2b: Legacy policy computation (backward compat, feeds markdown tables)
     model_policy_data = _build_model_policy_data(retrospectives)
@@ -751,8 +766,13 @@ def write_patterns(root: Path) -> dict:
     # Step 3: Migrate model_overrides from policy.json (merges with computed data)
     model_policy_data = _migrate_model_overrides(root, model_policy_data)
 
+    steps_completed.append(f"route:{len(route_policy_data)} routes")
+
     # Step 4: Write JSON policy files
     _write_policy_json_files(root, model_policy_data, skip_policy_data, route_policy_data)
+    steps_completed.append("json_written")
+    log_event(root, "learn_step", step="write_json_policies",
+              model_count=len(model_policy_data), skip_count=len(skip_policy_data), route_count=len(route_policy_data))
 
     # Step 5: Render markdown from the same data
     content = build_patterns_markdown(
@@ -772,6 +792,10 @@ def write_patterns(root: Path) -> dict:
             written.append(str(path))
         except OSError as exc:
             failed.append({"path": str(path), "error": str(exc)})
+    steps_completed.append(f"markdown:{len(written)} written, {len(failed)} failed")
+    log_event(root, "patterns_written", written_count=len(written), failed_count=len(failed),
+              retrospective_count=len(retrospectives), local_path=str(local_patterns_path(root)),
+              steps_completed=steps_completed)
     return {
         "written_at": now_iso(),
         "written_paths": written,

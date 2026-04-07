@@ -21,6 +21,28 @@ def main() -> int:
 
     task_dir = Path(sys.argv[1]).resolve()
     errors = validate_task_artifacts(task_dir, strict=True)
+
+    # Auto-emit deterministic validation event to per-task token ledger
+    try:
+        from dynoslib_tokens import record_tokens
+        from dynoslib_core import load_json
+        manifest = load_json(task_dir / "manifest.json")
+        stage = manifest.get("stage", "")
+        from dynoslib_tokens import phase_for_stage
+        record_tokens(
+            task_dir=task_dir,
+            agent="validate_task_artifacts",
+            model="none",
+            input_tokens=0,
+            output_tokens=0,
+            phase=phase_for_stage(stage),
+            stage=stage,
+            event_type="deterministic",
+            detail=f"{'PASS' if not errors else 'FAIL'} — {len(errors)} error(s)" + (f": {errors[0]}" if errors else ""),
+        )
+    except Exception:
+        pass  # Never let event recording break validation
+
     if errors:
         print("Artifact validation failed:")
         for error in errors:

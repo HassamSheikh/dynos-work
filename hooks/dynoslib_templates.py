@@ -7,10 +7,8 @@ import json
 from pathlib import Path
 
 from dynoslib_core import load_json, now_iso, write_json
+from dynoslib_defaults import MAX_FIX_TEMPLATES, MAX_TEMPLATE_DIFF_LINES
 from dynoglobal import global_home, project_slug
-
-_MAX_TEMPLATES = 50
-_MAX_DIFF_LINES = 100
 
 
 def _templates_path(root: Path) -> Path:
@@ -42,10 +40,10 @@ def _load_templates(path: Path) -> list[dict]:
 
 
 def _truncate_diff(diff: str) -> str:
-    """Truncate a diff to at most _MAX_DIFF_LINES lines."""
+    """Truncate a diff to at most MAX_TEMPLATE_DIFF_LINES lines."""
     lines = diff.split("\n")
-    if len(lines) > _MAX_DIFF_LINES:
-        lines = lines[:_MAX_DIFF_LINES]
+    if len(lines) > MAX_TEMPLATE_DIFF_LINES:
+        lines = lines[:MAX_TEMPLATE_DIFF_LINES]
     return "\n".join(lines)
 
 
@@ -69,7 +67,7 @@ def save_fix_template(root: Path, finding: dict, diff: str) -> None:
         templates.append(entry)
 
         # FIFO eviction: remove oldest entries until within capacity
-        while len(templates) > _MAX_TEMPLATES:
+        while len(templates) > MAX_FIX_TEMPLATES:
             templates.pop(0)
 
         path.parent.mkdir(parents=True, exist_ok=True)
