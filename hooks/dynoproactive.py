@@ -2996,8 +2996,8 @@ def _process_finding(
     existing_findings = _load_findings(root)
     cat_status, cat_reason = _check_category_health(category, existing_findings)
     if cat_status == "disabled":
-        finding["status"] = "failed"
-        finding["fail_reason"] = f"category_disabled: {cat_reason}"
+        finding["status"] = "suppressed"
+        finding["fail_reason"] = f"category_cooldown: {cat_reason}"
         finding["processed_at"] = now_iso()
         _log(f"Category '{category}' disabled: {cat_reason}")
         return finding
