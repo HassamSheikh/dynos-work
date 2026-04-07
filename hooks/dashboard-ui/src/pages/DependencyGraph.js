@@ -43,7 +43,7 @@ function computeLayout(segments) {
         for (const seg of segments) {
             if (assigned.has(seg.id))
                 continue;
-            const unmetDeps = seg.depends_on.filter((d) => idSet.has(d) && !assigned.has(d));
+            const unmetDeps = (seg.depends_on ?? []).filter((d) => idSet.has(d) && !assigned.has(d));
             if (unmetDeps.length === 0) {
                 layer.push(seg.id);
             }
@@ -121,7 +121,7 @@ function buildNodesAndEdges(segments) {
     });
     const edges = [];
     for (const seg of segments) {
-        for (const dep of seg.depends_on) {
+        for (const dep of seg.depends_on ?? []) {
             edges.push({
                 id: `${dep}->${seg.id}`,
                 source: dep,
