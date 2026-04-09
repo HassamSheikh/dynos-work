@@ -232,7 +232,7 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
     if "task-completed" in summary:
         try:
             from dynoslib_receipts import receipt_post_completion
-            from dynoslib_core import find_active_tasks, load_json
+            from dynoslib_core import load_json
             # Find the most recently completed task to write the receipt to
             dynos_dir = root / ".dynos"
             task_dirs = sorted(dynos_dir.glob("task-*/manifest.json"), reverse=True)
