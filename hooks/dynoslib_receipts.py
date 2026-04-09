@@ -145,14 +145,6 @@ def require_receipt(task_dir: Path, step_name: str) -> dict:
     return receipt
 
 
-def require_receipts(task_dir: Path, step_names: list[str]) -> dict[str, dict]:
-    """Validate multiple receipts exist. Returns all receipts or raises on first missing."""
-    results = {}
-    for name in step_names:
-        results[name] = require_receipt(task_dir, name)
-    return results
-
-
 def validate_chain(task_dir: Path) -> list[str]:
     """Validate the entire receipt chain for a task. Returns list of gaps.
 
