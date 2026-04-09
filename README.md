@@ -83,6 +83,8 @@ Just Claude Code. That's the only requirement.
 ## Links
 
 - [Pipelines](PIPELINES.md)
+- [Task Pipeline Index](tasks/README.md)
+- [Learning Pipeline Index](learn/README.md)
 - [Internals & CLI reference](INTERNALS.md)
 - [Architecture](ARCHITECTURE.md)
 - [Under the hood](UNDER_THE_HOOD.md)

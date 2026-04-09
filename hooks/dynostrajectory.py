@@ -1,55 +1,19 @@
 #!/usr/bin/env python3
-"""Trajectory store management for dynos-work."""
-
 from __future__ import annotations
-import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent))
 
-import argparse
-import json
+import sys
 from pathlib import Path
 
-from dynoslib_trajectory import rebuild_trajectory_store, search_trajectories
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_HOOKS_ROOT = _REPO_ROOT / "hooks"
+for _path in (str(_REPO_ROOT), str(_HOOKS_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
-
-def cmd_rebuild(args: argparse.Namespace) -> int:
-    store = rebuild_trajectory_store(Path(args.root).resolve())
-    print(
-        json.dumps(
-            {
-                "version": store["version"],
-                "updated_at": store["updated_at"],
-                "trajectory_count": len(store.get("trajectories", [])),
-            },
-            indent=2,
-        )
-    )
-    return 0
-
-
-def cmd_search(args: argparse.Namespace) -> int:
-    query = json.loads(Path(args.query_json).read_text())
-    results = search_trajectories(Path(args.root).resolve(), query, limit=args.limit)
-    print(json.dumps(results, indent=2))
-    return 0
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    rebuild_parser = subparsers.add_parser("rebuild", help="Rebuild the trajectory store from retrospectives")
-    rebuild_parser.add_argument("--root", default=".")
-    rebuild_parser.set_defaults(func=cmd_rebuild)
-
-    search_parser = subparsers.add_parser("search", help="Search trajectories from a query JSON file")
-    search_parser.add_argument("query_json")
-    search_parser.add_argument("--root", default=".")
-    search_parser.add_argument("--limit", type=int, default=3)
-    search_parser.set_defaults(func=cmd_search)
-
-    return parser
+from learn.hooks.dynostrajectory import *  # noqa: F401,F403
 
 
 if __name__ == "__main__":
     from dyno_cli_base import cli_main
+
     raise SystemExit(cli_main(build_parser))
