@@ -521,7 +521,7 @@ class TestPostmortemWritesToModelPolicyJson(unittest.TestCase):
     def test_adjust_model_policy_writes_model_policy_json(self) -> None:
         """adjust_model_policy action writes entries to model-policy.json with source postmortem_recommendation."""
         from dynoslib import _persistent_project_dir, write_json
-        from dynopostmortem import apply_improvement
+        from dynopostmortem_improve import apply_improvement
 
         persistent = _persistent_project_dir(self.root)
         # Initialize empty policy.json
@@ -552,7 +552,7 @@ class TestPostmortemWritesToModelPolicyJson(unittest.TestCase):
     def test_adjust_model_policy_preserves_explicit_policy_entries(self) -> None:
         """Postmortem recommendations do not overwrite existing explicit_policy entries."""
         from dynoslib import _persistent_project_dir, write_json
-        from dynopostmortem import apply_improvement
+        from dynopostmortem_improve import apply_improvement
 
         persistent = _persistent_project_dir(self.root)
         write_json(persistent / "policy.json", {})
