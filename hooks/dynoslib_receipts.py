@@ -325,18 +325,6 @@ def receipt_executor_done(
     )
 
 
-def receipt_audit_routing(
-    task_dir: Path,
-    auditors: list[dict],
-) -> Path:
-    """Write receipt proving all auditor routing decisions were made."""
-    return write_receipt(
-        task_dir,
-        "audit-routing",
-        auditors=auditors,
-    )
-
-
 def receipt_audit_done(
     task_dir: Path,
     auditor_name: str,

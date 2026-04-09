@@ -302,7 +302,7 @@ All receipts at `.dynos/task-{id}/receipts/{step-name}.json`.
 | `tdd-tests` | `receipt_tdd_tests()` | Advisory |
 | **`executor-routing`** | `receipt_executor_routing()` | **→ CHECKPOINT_AUDIT** |
 | `executor-{seg-id}` | `receipt_executor_done()` | `validate_chain()` |
-| `audit-routing` | `receipt_audit_routing()` | `validate_chain()` |
+| `audit-routing` | `write_receipt()` | `validate_chain()` |
 | `audit-{auditor}` | `receipt_audit_done()` | `validate_chain()` at DONE |
 | **`retrospective`** | `receipt_retrospective()` | **→ DONE** |
 | **`post-completion`** | `receipt_post_completion()` | **→ DONE** |
