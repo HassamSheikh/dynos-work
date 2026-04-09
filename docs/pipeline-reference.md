@@ -292,7 +292,6 @@ All receipts at `.dynos/task-{id}/receipts/{step-name}.json`.
 
 | Receipt | Written by | Gates which transition |
 |---|---|---|
-| `plan-routing` | `receipt_plan_routing()` | Advisory |
 | `planner-discovery` | `receipt_planner_spawn("discovery")` | Advisory |
 | `planner-spec` | `receipt_planner_spawn("spec")` | Advisory |
 | `spec-validated` | `receipt_spec_validated()` | Advisory |

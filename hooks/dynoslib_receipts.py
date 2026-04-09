@@ -233,24 +233,6 @@ def hash_file(path: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def receipt_plan_routing(
-    task_dir: Path,
-    agent_name: str | None,
-    agent_path: str | None,
-    route_mode: str,
-    agent_file_hash: str | None = None,
-) -> Path:
-    """Write receipt proving plan-skill routing was resolved."""
-    return write_receipt(
-        task_dir,
-        "plan-routing",
-        agent_name=agent_name,
-        agent_path=agent_path,
-        route_mode=route_mode,
-        agent_content_hash=agent_file_hash,
-    )
-
-
 def receipt_spec_validated(
     task_dir: Path,
     criteria_count: int,
