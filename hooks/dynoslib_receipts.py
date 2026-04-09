@@ -251,20 +251,6 @@ def receipt_plan_routing(
     )
 
 
-def receipt_spec_validated(
-    task_dir: Path,
-    criteria_count: int,
-    validation_passed: bool = True,
-) -> Path:
-    """Write receipt proving spec passed deterministic validation."""
-    return write_receipt(
-        task_dir,
-        "spec-validated",
-        criteria_count=criteria_count,
-        validation_passed=validation_passed,
-    )
-
-
 def receipt_plan_validated(
     task_dir: Path,
     segment_count: int,
