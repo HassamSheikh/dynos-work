@@ -7,7 +7,6 @@ The next step refuses to proceed unless the prior receipt exists.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -218,14 +217,6 @@ def validate_chain(task_dir: Path) -> list[str]:
                         gaps.append(f"audit-{name}")
 
     return gaps
-
-
-def hash_file(path: Path) -> str | None:
-    """SHA256 hash of a file's contents. Returns None if file doesn't exist."""
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-    except (OSError, FileNotFoundError):
-        return None
 
 
 # ---------------------------------------------------------------------------
