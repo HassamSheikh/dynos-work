@@ -25,11 +25,22 @@ import { spawnSync } from 'node:child_process';
 const CLI_DIR = resolve(import.meta.dir, '..', '..');
 const DIST_ENTRY = join(CLI_DIR, 'dist', 'index.js');
 
+// Per-harness relative path from install root to the emitted skill tree.
+// Cursor reads ~/.cursor/skills-cursor/<prefix><skill>/SKILL.md (global, flat
+// with prefix on the subdir name). Windsurf/Warp keep the project-local
+// /skills/dynos-work/ nested layout. Copilot emits flat .prompt.md files.
 const HARNESS_ROOTS: Record<string, string> = {
-  cursor: '.cursor/skills/dynos-work',
+  cursor: '.cursor/skills-cursor',
   windsurf: '.windsurf/skills/dynos-work',
   copilot: '.github/prompts',
   warp: '.warp/skills/dynos-work',
+};
+// Subdir naming per harness: cursor prefixes skill names, others do not.
+const HARNESS_SKILL_PREFIX: Record<string, string> = {
+  cursor: 'dynos-work-',
+  windsurf: '',
+  copilot: 'dynos-work-', // not used as subdir — copilot is flat-filename
+  warp: '',
 };
 
 const SKILL_NAMES = [
@@ -47,9 +58,13 @@ function ensureBuilt() {
 function regenerate(harness: string): string {
   ensureBuilt();
   const target = mkdtempSync(join(tmpdir(), `dw-${harness}-`));
-  const result = spawnSync('node', [DIST_ENTRY, 'init', '--ai', harness, '--target', target], {
-    encoding: 'utf8',
-  });
+  // Force --project so global-default harnesses (codex, cursor) still
+  // emit into the target directory rather than $HOME.
+  const result = spawnSync(
+    'node',
+    [DIST_ENTRY, 'init', '--ai', harness, '--target', target, '--project'],
+    { encoding: 'utf8' },
+  );
   if (result.status !== 0) {
     throw new Error(
       `CLI regen failed for ${harness} (exit ${result.status}):\n${result.stderr}`,
@@ -72,10 +87,12 @@ function walk(dir: string, rel = ''): string[] {
 }
 
 describe('non-Claude roots (criterion 19)', () => {
-  it('cursor produces 22 SKILL.md under .cursor/skills/dynos-work/', () => {
+  it('cursor produces 22 SKILL.md under .cursor/skills-cursor/dynos-work-{name}/', () => {
     const t = regenerate('cursor');
     for (const name of SKILL_NAMES) {
-      expect(existsSync(join(t, '.cursor', 'skills', 'dynos-work', name, 'SKILL.md'))).toBe(true);
+      expect(
+        existsSync(join(t, '.cursor', 'skills-cursor', `dynos-work-${name}`, 'SKILL.md')),
+      ).toBe(true);
     }
   });
 
@@ -175,7 +192,7 @@ describe('inlined-agent contract (criterion 22)', () => {
   it('cursor start/SKILL.md contains verbatim body of base/agents/planning.md (sans frontmatter)', () => {
     const t = regenerate('cursor');
     const skillBody = readFileSync(
-      join(t, '.cursor', 'skills', 'dynos-work', 'start', 'SKILL.md'),
+      join(t, '.cursor', 'skills-cursor', 'dynos-work-start', 'SKILL.md'),
       'utf8',
     );
 
@@ -202,7 +219,7 @@ describe('inlined-agent contract (criterion 22)', () => {
   it('cursor start/SKILL.md introduces the inlined role with a heading', () => {
     const t = regenerate('cursor');
     const body = readFileSync(
-      join(t, '.cursor', 'skills', 'dynos-work', 'start', 'SKILL.md'),
+      join(t, '.cursor', 'skills-cursor', 'dynos-work-start', 'SKILL.md'),
       'utf8',
     );
     expect(body).toMatch(/### Role:\s*planning/);

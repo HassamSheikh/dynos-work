@@ -4,12 +4,14 @@
   "installType": "full",
   "folderStructure": {
     "root": ".cursor",
-    "skillPath": "skills/dynos-work",
+    "skillPath": "skills-cursor",
     "filename": "SKILL.md"
   },
+  "skillNamePrefix": "dynos-work-",
+  "defaultScope": "global",
   "frontmatter": {
     "name": "dynos-work",
-    "description": "Task foundry for software engineering: discovery → spec → plan → execute → audit. Trigger with /dynos-work:start, /dynos-work:audit, /dynos-work:investigate, /dynos-work:execute, /dynos-work:status."
+    "description": "Task foundry for software engineering: discovery → spec → plan → execute → audit. Individual skills invoked as /dynos-work-start, /dynos-work-audit, etc."
   },
   "capabilities": {
     "parallel_subagents": false,

@@ -20,5 +20,6 @@
     "env_injection": false
   },
   "skillNamePrefix": "dynos-work-",
+  "flatFilename": true,
   "skillOrWorkflow": "Workflow"
 }

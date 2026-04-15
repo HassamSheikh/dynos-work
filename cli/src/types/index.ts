@@ -64,6 +64,12 @@ export interface PlatformConfig {
   capabilities: PlatformCapabilities;
   extraFiles?: ExtraFile[];
   skillNamePrefix?: string;
+  /**
+   * Emit one flat `{prefix}{skill}.prompt.md` file per skill instead of a
+   * per-skill subdirectory. Copilot's `.github/prompts/` scans flat files.
+   * Requires `skillNamePrefix` to disambiguate skill names.
+   */
+  flatFilename?: boolean;
   scriptPath?: string;
   skillOrWorkflow?: SkillOrWorkflow;
   /**

@@ -81,6 +81,10 @@
       "type": "string",
       "minLength": 1
     },
+    "flatFilename": {
+      "type": "boolean",
+      "description": "Emit flat {prefix}{skill}.prompt.md files (copilot). Without this flag, prefix is applied to the per-skill subdir name (cursor)."
+    },
     "scriptPath": {
       "type": "string",
       "minLength": 1

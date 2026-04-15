@@ -26,9 +26,13 @@ function ensureBuilt() {
 function regenerate(harness: string): string {
   ensureBuilt();
   const target = mkdtempSync(join(tmpdir(), `dw-lint-${harness}-`));
-  const result = spawnSync('node', [DIST_ENTRY, 'init', '--ai', harness, '--target', target], {
-    encoding: 'utf8',
-  });
+  // Force --project so global-default harnesses (codex, cursor) emit into
+  // the target dir rather than $HOME.
+  const result = spawnSync(
+    'node',
+    [DIST_ENTRY, 'init', '--ai', harness, '--target', target, '--project'],
+    { encoding: 'utf8' },
+  );
   if (result.status !== 0) {
     throw new Error(`regen for ${harness} failed (exit ${result.status}):\n${result.stderr}`);
   }

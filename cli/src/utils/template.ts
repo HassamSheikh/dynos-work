@@ -373,21 +373,28 @@ export async function generatePlatformFiles(
   await mkdir(skillsParent, { recursive: true });
 
   const skills = await listSkills();
-  const flatLayout = typeof config.skillNamePrefix === 'string' && config.skillNamePrefix.length > 0;
+  const prefix = config.skillNamePrefix ?? '';
+  const hasPrefix = prefix.length > 0;
+  // Explicit flag: `flatFilename: true` means emit `{prefix}{skill}.prompt.md`
+  // flat in skillsParent (copilot). Without it we use per-skill subdirs even
+  // when a prefix is set (cursor: `skills-cursor/{prefix}{skill}/SKILL.md`).
+  const flatFilename = config.flatFilename === true;
 
   for (const skillName of skills) {
     const rendered = await renderSkillFile(config, skillName, isGlobal);
 
     let skillDir: string;
     let skillFilePath: string;
-    if (flatLayout) {
-      // copilot-style flat layout: {root}/{skillPath}/{prefix}{skill}.prompt.md
+    if (hasPrefix && flatFilename) {
+      // Copilot: {root}/{skillPath}/{prefix}{skill}.prompt.md
       skillDir = skillsParent;
-      const prefix = config.skillNamePrefix as string;
       skillFilePath = join(skillDir, `${prefix}${skillName}.prompt.md`);
     } else {
-      // Per-skill subdir layout.
-      skillDir = join(skillsParent, skillName);
+      // Nested subdir. Cursor uses prefix on the subdir name so that
+      // the global discovery list shows `dynos-work-start` etc. rather
+      // than clobbering a system skill named `start`.
+      const dirName = hasPrefix ? `${prefix}${skillName}` : skillName;
+      skillDir = join(skillsParent, dirName);
       await mkdir(skillDir, { recursive: true });
       skillFilePath = join(skillDir, config.folderStructure.filename);
     }
@@ -395,8 +402,10 @@ export async function generatePlatformFiles(
     await writeFile(skillFilePath, rendered, 'utf-8');
     createdPaths.push(skillFilePath);
 
-    // Copy {skill}.extra/ into the skill directory (only for non-flat layouts).
-    if (!flatLayout) {
+    // Copy {skill}.extra/ into the skill directory when we have a real
+    // per-skill subdir (i.e. not the copilot flat-file layout).
+    const hasSkillSubdir = !(hasPrefix && flatFilename);
+    if (hasSkillSubdir) {
       const extraDir = join(ASSETS_DIR, 'templates', 'base', `${skillName}.extra`);
       if (await exists(extraDir)) {
         try {
