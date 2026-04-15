@@ -16,6 +16,27 @@ from typing import Any
 from dynoslib_core import now_iso, append_execution_log
 from dynoslib_log import log_event
 
+__all__ = [
+    "write_receipt",
+    "read_receipt",
+    "require_receipt",
+    "require_receipts",
+    "validate_chain",
+    "hash_file",
+    "receipt_plan_routing",
+    "receipt_spec_validated",
+    "receipt_plan_validated",
+    "receipt_executor_routing",
+    "receipt_executor_done",
+    "receipt_audit_routing",
+    "receipt_audit_done",
+    "receipt_retrospective",
+    "receipt_post_completion",
+    "receipt_planner_spawn",
+    "receipt_plan_audit",
+    "receipt_tdd_tests",
+]
+
 # Map receipt steps to human-readable execution-log entries
 _LOG_MESSAGES: dict[str, str] = {
     "plan-routing": "[ROUTE] plan-skill → {route_mode} agent={agent_name}",
