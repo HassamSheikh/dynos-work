@@ -80,6 +80,12 @@ Writes a retrospective  --> learns for next time
 
 Just Claude Code. That's the only requirement.
 
+## Looking for autofix?
+
+The background code scanner and autofix PR opener used to live here. In 7.0.0 it moved to its own repo: [**dynos-fit/autofix**](https://github.com/dynos-fit/autofix). Install it separately if you want scheduled scans, dead-code cleanup PRs, or dependency-vuln auto-fixes. dynos-work keeps its focus on foundry task execution and learning.
+
+See [docs/migration-autofix-split.md](docs/migration-autofix-split.md) if you were using autofix in 6.0.0 and need the upgrade path.
+
 ## Links
 
 - [Pipelines](PIPELINES.md)
@@ -89,6 +95,7 @@ Just Claude Code. That's the only requirement.
 - [Architecture](ARCHITECTURE.md)
 - [Under the hood](UNDER_THE_HOOD.md)
 - [Changelog](CHANGELOG.md)
+- [Autofix repo (separate)](https://github.com/dynos-fit/autofix)
 
 ## Philosophy
 

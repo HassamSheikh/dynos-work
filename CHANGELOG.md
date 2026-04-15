@@ -7,6 +7,49 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.0.0] - 2026-04-15
+### "Focused Foundry": Task + Learning Split, Autofix Extracted
+
+This release narrows dynos-work's scope to what it does best — task execution and self-learning — and extracts autofix into its own repo. Internally, hook implementations split into `tasks/hooks/` and `learn/hooks/` module trees; the plugin-facing `hooks/*.py` entrypoints become thin compatibility shims so existing skills/agents and CLI invocations keep working.
+
+### Breaking
+
+- **Autofix extracted to [dynos-fit/autofix](https://github.com/dynos-fit/autofix)**. See [docs/migration-autofix-split.md](docs/migration-autofix-split.md) for the upgrade path. Removed from this repo:
+  - Slash command `/dynos-work:autofix` and the `skills/autofix/` skill
+  - `dynos init --autofix` CLI flag
+  - `dynos autofix scan / list / clear` CLI subcommand tree
+  - `hooks/dynoproactive.py` scanner module
+  - Dashboard "Autofix" tab + related React components
+  - Autofix-specific tests
+- **Daemon model replaced with system crontab**. `dynos local start / stop` are gone; replaced by `dynos local run-once / status / logs`. `dynos init` now registers a crontab entry instead of forking a long-running Python process.
+
+### Added
+
+- **`tasks/` module tree** at repo root for task-pipeline hooks (`dynoplanner`, `dynorouter`, `dynosctl`, `dynoslib_contracts`, `dynoslib_validate`, `validate_task_artifacts`).
+- **`learn/` module tree** at repo root for learning-pipeline hooks (`dynopatterns`, `dynoevolve`, `dynobench`, `dynoauto`, `dynopostmortem`, `dynorollout`, `dynosdream`, `dynoslib_qlearn`, `dynostate`, `dynostrajectory`, `dynogenerate`, `dynofixture`, `dynoeval`, `dynochallenge`).
+- **Pipeline index docs:** `tasks/README.md`, `learn/README.md`, `docs/pipeline-reference.md`.
+- **Compatibility shims:** `hooks/*.py` remain as thin `from tasks.hooks.X import *` / `from learn.hooks.X import *` re-exports so existing `python3 hooks/dynosctl.py --help` invocations still work.
+
+### Changed
+
+- `skills/maintain/SKILL.md` updated — removed autofix-PR-automation language; still surfaces technical-debt findings for manual triage.
+- `install.sh` no longer detects `gh` + `claude` and enables autofix. It warns about `gh` only if you want to open PRs from dynos-work-managed tasks.
+- README reframes the plugin as "task execution + learning" and points at the new autofix repo.
+
+### Migration
+
+See [docs/migration-autofix-split.md](docs/migration-autofix-split.md). TL;DR:
+1. `claude plugin update dynos-work` picks up 7.0.0
+2. Install `dynos-fit/autofix` separately if you want scheduled scans + auto-PRs
+3. Existing `.dynos/` state (policies, findings, q-learning tables) is preserved and readable by the new autofix repo
+
+### Removed
+
+- `hooks/dynoproactive.py`, `skills/autofix/`, dashboard Autofix page, 4 autofix test files. All moved to `dynos-fit/autofix`.
+- Long-running Python daemon — replaced by crontab entries so the system handles scheduling.
+
+---
+
 ## [6.0.0] - 2026-04-03
 ### "Runtime Control Plane": Deterministic Foundry, Live Dashboard, Maintainer Daemon
 
@@ -254,3 +297,4 @@ Versions prior to 2.8.0 predate this changelog.
 [2.9.0]: https://github.com/dynos-fit/dynos-work/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/dynos-fit/dynos-work/compare/v2.7.0...v2.8.0
 [6.0.0]: https://github.com/dynos-fit/dynos-work/compare/v5.0.0...v6.0.0
+[7.0.0]: https://github.com/dynos-fit/dynos-work/compare/v6.0.0...v7.0.0
