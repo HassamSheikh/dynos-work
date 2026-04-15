@@ -173,7 +173,7 @@ def _detect_anomalies(retro: dict, similar_tasks: list[dict], budget_multiplier:
     return anomalies
 
 
-def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DETECTION_WINDOW) -> list[dict]:
+def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DETECTION_WINDOW, budget_multiplier: float = 1.0) -> list[dict]:
     """Detect recurring issues across recent tasks."""
     recent = all_retros[-window:]
     patterns = []
@@ -197,7 +197,7 @@ def _detect_recurring_patterns(all_retros: list[dict], window: int = PATTERN_DET
         risk = r.get("task_risk_level", "medium")
         tt = r.get("task_type", "feature")
         tokens = _safe_float(r.get("total_token_usage"), 0)
-        if tokens > _expected_budget(risk, tt) * OVERRUN_RATIO_MEDIUM:
+        if tokens > _expected_budget(risk, tt, budget_multiplier) * OVERRUN_RATIO_MEDIUM:
             overrun_count += 1
     if overrun_count >= OVERRUN_PATTERN_THRESHOLD:
         patterns.append({
@@ -246,7 +246,7 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
     budget_multiplier = float(policy.get("token_budget_multiplier", 1.0))
     similar = _find_similar_tasks(retro, all_retros)
     anomalies = _detect_anomalies(retro, similar, budget_multiplier)
-    recurring = _detect_recurring_patterns(all_retros)
+    recurring = _detect_recurring_patterns(all_retros, budget_multiplier=budget_multiplier)
 
     risk = retro.get("task_risk_level", "medium")
     task_type = retro.get("task_type", "feature")
@@ -358,8 +358,9 @@ def _render_markdown(pm: dict) -> str:
         f"- Findings: {quality.get('total_findings', 0)} total, {quality.get('repair_cycles', 0)} repair cycles",
     ]
 
-    if quality.get("findings_by_auditor"):
-        for auditor, count in quality["findings_by_auditor"].items():
+    findings_by_auditor = quality.get("findings_by_auditor", {})
+    if findings_by_auditor:
+        for auditor, count in findings_by_auditor.items():
             lines.append(f"  - {auditor}: {count}")
 
     lines.extend([
@@ -374,17 +375,17 @@ def _render_markdown(pm: dict) -> str:
     if pm.get("anomalies"):
         lines.extend(["", "## Anomalies"])
         for a in pm["anomalies"]:
-            lines.append(f"- **[{a['severity']}] {a['type']}**: {a['detail']}")
+            lines.append(f"- **[{a.get('severity', 'unknown')}] {a.get('type', 'unknown')}**: {a.get('detail', '')}")
 
     if pm.get("similar_tasks"):
         lines.extend(["", "## Similar Past Tasks"])
         for s in pm["similar_tasks"]:
-            lines.append(f"- {s['task_id']}: quality={s['quality_score']:.2f}, tokens={s['total_tokens']:,}, repairs={s['repair_cycles']}")
+            lines.append(f"- {s.get('task_id', 'unknown')}: quality={s.get('quality_score', 0):.2f}, tokens={s.get('total_tokens', 0):,}, repairs={s.get('repair_cycles', 0)}")
 
     if pm.get("recurring_patterns"):
         lines.extend(["", "## Recurring Patterns (across recent tasks)"])
         for p in pm["recurring_patterns"]:
-            lines.append(f"- **{p['pattern']}** ({p['occurrences']}/{p['window']} tasks): {p['recommendation']}")
+            lines.append(f"- **{p.get('pattern', 'unknown')}** ({p.get('occurrences', 0)}/{p.get('window', 0)} tasks): {p.get('recommendation', '')}")
 
     lines.append("")
     return "\n".join(lines)
