@@ -411,7 +411,7 @@ def receipt_post_completion(
 # ---------------------------------------------------------------------------
 
 
-def receipt_planner_spawn(
+def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     task_dir: Path,
     phase: str,  # "discovery", "spec", or "plan"
     tokens_used: int | None,
