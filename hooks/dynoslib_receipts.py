@@ -16,6 +16,27 @@ from typing import Any
 from dynoslib_core import now_iso, append_execution_log
 from dynoslib_log import log_event
 
+__all__ = [
+    "write_receipt",
+    "read_receipt",
+    "require_receipt",
+    "require_receipts",
+    "validate_chain",
+    "hash_file",
+    "receipt_plan_routing",
+    "receipt_spec_validated",
+    "receipt_plan_validated",
+    "receipt_executor_routing",
+    "receipt_executor_done",
+    "receipt_audit_routing",
+    "receipt_audit_done",
+    "receipt_retrospective",
+    "receipt_post_completion",
+    "receipt_planner_spawn",
+    "receipt_plan_audit",
+    "receipt_tdd_tests",
+]
+
 # Map receipt steps to human-readable execution-log entries
 _LOG_MESSAGES: dict[str, str] = {
     "plan-routing": "[ROUTE] plan-skill → {route_mode} agent={agent_name}",
@@ -251,20 +272,6 @@ def receipt_plan_routing(
     )
 
 
-def receipt_spec_validated(
-    task_dir: Path,
-    criteria_count: int,
-    validation_passed: bool = True,
-) -> Path:
-    """Write receipt proving spec passed deterministic validation."""
-    return write_receipt(
-        task_dir,
-        "spec-validated",
-        criteria_count=criteria_count,
-        validation_passed=validation_passed,
-    )
-
-
 def receipt_plan_validated(
     task_dir: Path,
     segment_count: int,
@@ -404,7 +411,7 @@ def receipt_post_completion(
 # ---------------------------------------------------------------------------
 
 
-def receipt_planner_spawn(
+def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     task_dir: Path,
     phase: str,  # "discovery", "spec", or "plan"
     tokens_used: int | None,
@@ -444,25 +451,6 @@ def receipt_plan_audit(
         model_used=model_used,
     )
 
-
-def receipt_tdd_tests(
-    task_dir: Path,
-    tokens_used: int | None,
-    test_count: int = 0,
-    criteria_covered: list[int] | None = None,
-    model_used: str | None = None,
-) -> Path:
-    """Write receipt proving TDD test generation ran. Also records tokens."""
-    if tokens_used and tokens_used > 0:
-        _record_tokens(task_dir, "tdd-testing-executor", model_used or "default", tokens_used)
-    return write_receipt(
-        task_dir,
-        "tdd-tests",
-        tokens_used=tokens_used,
-        test_count=test_count,
-        criteria_covered=criteria_covered or [],
-        model_used=model_used,
-    )
 
 
 # ---------------------------------------------------------------------------

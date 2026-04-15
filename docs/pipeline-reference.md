@@ -295,11 +295,10 @@ All receipts at `.dynos/task-{id}/receipts/{step-name}.json`.
 | `plan-routing` | `receipt_plan_routing()` | Advisory |
 | `planner-discovery` | `receipt_planner_spawn("discovery")` | Advisory |
 | `planner-spec` | `receipt_planner_spawn("spec")` | Advisory |
-| `spec-validated` | `receipt_spec_validated()` | Advisory |
+| `spec-validated` | `write_receipt(task_dir, "spec-validated", ...)` | Advisory |
 | `planner-plan` | `receipt_planner_spawn("plan")` | Advisory |
 | **`plan-validated`** | `receipt_plan_validated()` | **→ EXECUTION** |
 | `plan-audit-check` | `receipt_plan_audit()` | Advisory |
-| `tdd-tests` | `receipt_tdd_tests()` | Advisory |
 | **`executor-routing`** | `receipt_executor_routing()` | **→ CHECKPOINT_AUDIT** |
 | `executor-{seg-id}` | `receipt_executor_done()` | `validate_chain()` |
 | `audit-routing` | `receipt_audit_routing()` | `validate_chain()` |
