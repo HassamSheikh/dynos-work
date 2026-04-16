@@ -56,6 +56,7 @@ from lib_validate import (
     check_segment_ownership,
     collect_headings,
     compute_fast_track,
+    conditional_plan_headings,
     detect_cycle,
     parse_acceptance_criteria,
     validate_generated_html,
@@ -63,6 +64,18 @@ from lib_validate import (
     validate_repair_log,
     validate_retrospective,
     validate_task_artifacts,
+)
+
+# ---------------------------------------------------------------------------
+# plan_gap_analysis: verify plan claims against codebase
+# ---------------------------------------------------------------------------
+from plan_gap_analysis import (
+    analyze_api_contracts,
+    analyze_data_model,
+    extract_section,
+    findings_from_report,
+    parse_markdown_table,
+    run_gap_analysis,
 )
 
 # ---------------------------------------------------------------------------

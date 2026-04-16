@@ -91,6 +91,7 @@ class TestDynoslibFacadeReExports:
         # From lib_validate (AC 3)
         "REQUIRED_SPEC_HEADINGS",
         "REQUIRED_PLAN_HEADINGS",
+        "conditional_plan_headings",
         "validate_generated_html",
         "collect_headings",
         "parse_acceptance_criteria",
@@ -102,6 +103,13 @@ class TestDynoslibFacadeReExports:
         "validate_repair_log",
         "validate_retrospective",
         "check_segment_ownership",
+        # From plan_gap_analysis
+        "analyze_api_contracts",
+        "analyze_data_model",
+        "extract_section",
+        "findings_from_report",
+        "parse_markdown_table",
+        "run_gap_analysis",
         # From lib_trajectory (AC 4)
         "ensure_trajectory_store",
         "compute_quality_score",
@@ -213,6 +221,7 @@ class TestDynoslibValidateExports:
     EXPECTED_NAMES = [
         "REQUIRED_SPEC_HEADINGS",
         "REQUIRED_PLAN_HEADINGS",
+        "conditional_plan_headings",
         "validate_generated_html",
         "collect_headings",
         "parse_acceptance_criteria",
