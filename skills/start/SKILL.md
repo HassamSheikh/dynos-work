@@ -36,6 +36,10 @@ Each receipt auto-records tokens to `token-usage.json`. If you skip this, the re
 
 ---
 
+---
+
+# Phase 1: Intake
+
 ## Step 0 — Metadata & Initialization
 
 1. Ensure `.dynos/` exists: `mkdir -p .dynos`. Then auto-register this project with the global registry (silent, idempotent): run `python3 "${PLUGIN_HOOKS}/registry.py" register "$(pwd)" 2>/dev/null || true`. This creates `~/.dynos/projects/{slug}/` and adds the project to `~/.dynos/registry.json` if not already registered. No user action needed. Then ensure the local maintenance daemon is running (silent, idempotent): run `PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/maintain.py" start --root "$(pwd)" 2>/dev/null || true`. This starts the daemon without autofix. Autofix must be explicitly enabled by the user via `dynos init --autofix` or `dynos local start --autofix`. If already running, it is a no-op.
@@ -141,6 +145,10 @@ This writes to `.dynos/task-{id}/token-usage.json` with a chronological event lo
 
 ---
 
+---
+
+# Phase 2: Design
+
 ## Step 2 — Discovery + Design + Classification
 
 **Fast-track discovery skip:** Before spawning the planner, check if the task input is already well-scoped. A task is well-scoped when ALL of:
@@ -221,6 +229,10 @@ If any condition is not met, proceed normally (no fast-track). Do not ask the us
 
 ---
 
+---
+
+# Phase 3: Specification
+
 ## Step 3 — Spec Normalization
 
 Spawn the Planner subagent with instruction:
@@ -265,6 +277,10 @@ python3 hooks/ctl.py transition .dynos/task-{id} PLANNING
 ```
 
 ---
+
+---
+
+# Phase 4: Planning
 
 ## Step 5 — Generate Plan + Execution Graph
 
@@ -340,6 +356,10 @@ Present `plan.md` to the user and ask for approval.
 
 ---
 
+---
+
+# Phase 5: Verification
+
 ## Step 7 — Plan Audit
 
 **Fast-track skip:** If `manifest.json` has `"fast_track": true`, check the project policy at `~/.dynos/projects/{slug}/policy.json` for `"fast_track_skip_plan_audit": true`. If both are true, skip the plan audit entirely and proceed to Step 8. Log: `{timestamp} [SKIP] plan audit — fast_track_skip_plan_audit policy`. This policy is set automatically by the improvement engine when low-risk tasks consistently pass without repair.
@@ -382,6 +402,10 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 6. Commit the approved tests to the snapshot branch before any production code is written.
 
 ---
+
+---
+
+# Phase 6: Handoff
 
 ## Step 9 — Done
 
