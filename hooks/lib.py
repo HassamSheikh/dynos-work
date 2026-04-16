@@ -67,6 +67,18 @@ from lib_validate import (
 )
 
 # ---------------------------------------------------------------------------
+# plan_gap_analysis: verify plan claims against codebase
+# ---------------------------------------------------------------------------
+from plan_gap_analysis import (
+    analyze_api_contracts,
+    analyze_data_model,
+    extract_section,
+    findings_from_report,
+    parse_markdown_table,
+    run_gap_analysis,
+)
+
+# ---------------------------------------------------------------------------
 # lib_trajectory: trajectory store, quality scoring, similarity search
 # ---------------------------------------------------------------------------
 from lib_trajectory import (

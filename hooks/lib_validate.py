@@ -251,6 +251,12 @@ def validate_task_artifacts(task_dir: Path, strict: bool = False) -> list[str]:
                 full = task_dir.parent.parent / ref_path
                 if not full.exists():
                     errors.append(f"plan Reference Code path does not exist: {ref_path}")
+
+        # Gap analysis: verify API Contracts / Data Model claims against code
+        from plan_gap_analysis import findings_from_report, run_gap_analysis
+        project_root = task_dir.parent.parent
+        gap_report = run_gap_analysis(project_root, task_dir)
+        errors.extend(findings_from_report(gap_report))
     elif strict:
         errors.append(f"missing required file: {plan_path}")
 

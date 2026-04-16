@@ -103,6 +103,13 @@ class TestDynoslibFacadeReExports:
         "validate_repair_log",
         "validate_retrospective",
         "check_segment_ownership",
+        # From plan_gap_analysis
+        "analyze_api_contracts",
+        "analyze_data_model",
+        "extract_section",
+        "findings_from_report",
+        "parse_markdown_table",
+        "run_gap_analysis",
         # From lib_trajectory (AC 4)
         "ensure_trajectory_store",
         "compute_quality_score",

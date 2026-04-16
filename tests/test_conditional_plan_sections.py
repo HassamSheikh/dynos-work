@@ -85,10 +85,16 @@ def _make_task_dir(
     domains: list[str],
     extra_plan: str = "",
     include_plan: bool = True,
+    source_files: dict[str, str] | None = None,
 ) -> Path:
     """Create a minimal task directory with manifest, spec, plan, and graph."""
     task_dir = tmp_path / ".dynos" / "task-test"
     task_dir.mkdir(parents=True)
+    if source_files:
+        for path, content in source_files.items():
+            fpath = tmp_path / path
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(content)
 
     manifest = {
         "stage": "PLANNING",
@@ -190,7 +196,8 @@ class TestValidateConditionalHeadings:
 
     def test_backend_with_api_contracts_passes(self, tmp_path: Path):
         task_dir = _make_task_dir(
-            tmp_path, domains=["backend"], extra_plan=_api_contracts_section()
+            tmp_path, domains=["backend"], extra_plan=_api_contracts_section(),
+            source_files={"src/routes.js": "app.get('/api/test', handler);"},
         )
         errors = validate_task_artifacts(task_dir)
         assert not any("API Contracts" in e for e in errors)
@@ -202,7 +209,8 @@ class TestValidateConditionalHeadings:
 
     def test_db_with_data_model_passes(self, tmp_path: Path):
         task_dir = _make_task_dir(
-            tmp_path, domains=["db"], extra_plan=_data_model_section()
+            tmp_path, domains=["db"], extra_plan=_data_model_section(),
+            source_files={"migrations/001.sql": "CREATE TABLE tests (id INT PRIMARY KEY);"},
         )
         errors = validate_task_artifacts(task_dir)
         assert not any("Data Model" in e for e in errors)
@@ -218,6 +226,10 @@ class TestValidateConditionalHeadings:
             tmp_path,
             domains=["backend", "db"],
             extra_plan=_api_contracts_section() + _data_model_section(),
+            source_files={
+                "src/routes.js": "app.get('/api/test', handler);",
+                "migrations/001.sql": "CREATE TABLE tests (id INT PRIMARY KEY);",
+            },
         )
         errors = validate_task_artifacts(task_dir)
         assert not any("API Contracts" in e for e in errors)

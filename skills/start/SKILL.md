@@ -296,8 +296,10 @@ The command is the source of truth for artifact validation. Use the rules below 
 
 For `plan.md`:
 1. It must contain `Technical Approach`, `Reference Code`, `Components / Modules`, `Data Flow`, `Error Handling Strategy`, `Test Strategy`, `Dependency Graph`, and `Open Questions`.
-2. Every component or module section must list exact files.
-3. `Reference Code` paths must exist in the repo unless explicitly marked as to-be-created.
+2. When domains include backend, ui, or security: `API Contracts` section is required. When domains include db: `Data Model` section is required.
+3. Every component or module section must list exact files.
+4. `Reference Code` paths must exist in the repo unless explicitly marked as to-be-created.
+5. **Gap analysis (deterministic):** if the plan contains `API Contracts` or `Data Model` sections, their claims are verified against the codebase. Endpoints listed in the API Contracts table must correspond to actual route definitions. Tables listed in the Data Model table must correspond to actual model/schema/migration definitions. Claimed-but-not-found entries are validation errors — the planner must either fix the table or mark new entries as to-be-created.
 
 For `execution-graph.json`:
 1. It must parse as valid JSON.
@@ -344,9 +346,15 @@ Present `plan.md` to the user and ask for approval.
 
 **Normal path:**
 
-1. Spawn `spec-completion-auditor` to verify that `plan.md` and `execution-graph.json` cover all acceptance criteria in `spec.md`.
-2. If the auditor finds gaps, route back to planning, repair the gaps, and rerun both deterministic artifact validation and the plan audit.
-3. Create a git branch safety net: `dynos/task-{id}-snapshot`.
+1. **Deterministic gap analysis (mandatory, runs before LLM audit):**
+   ```bash
+   python3 hooks/plan_gap_analysis.py --root . --task-dir .dynos/task-{id}
+   ```
+   This verifies that claims in `## API Contracts` and `## Data Model` sections correspond to real code. If the plan claims an endpoint or table exists that the codebase doesn't have, the planner must either fix the table or explicitly mark the entry as to-be-created. Gap analysis failures block the plan audit — do not proceed to the LLM audit until all gaps are resolved or acknowledged.
+
+2. Spawn `spec-completion-auditor` to verify that `plan.md` and `execution-graph.json` cover all acceptance criteria in `spec.md`.
+3. If either the gap analysis or the auditor finds gaps, route back to planning, repair the gaps, and rerun both deterministic artifact validation and the plan audit.
+4. Create a git branch safety net: `dynos/task-{id}-snapshot`.
 
 ---
 
