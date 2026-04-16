@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
 
 import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
@@ -199,3 +202,56 @@ class TestFacadeExport:
     def test_is_learning_enabled_exported(self):
         import lib
         assert hasattr(lib, "is_learning_enabled")
+
+
+# ---------------------------------------------------------------------------
+# CLI: ctl.py config
+# ---------------------------------------------------------------------------
+
+class TestCtlConfig:
+    def test_config_get_empty(self, tmp_path: Path):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "ctl.py"), "config", "get", "--root", str(tmp_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "{}" in result.stdout
+
+    def test_config_set_and_get(self, tmp_path: Path):
+        # Set
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "ctl.py"), "config", "set", "learning_enabled", "false", "--root", str(tmp_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "false" in result.stdout
+
+        # Get
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "ctl.py"), "config", "get", "learning_enabled", "--root", str(tmp_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "false" in result.stdout
+
+    def test_config_set_true(self, tmp_path: Path):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "hooks" / "ctl.py"), "config", "set", "learning_enabled", "true", "--root", str(tmp_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0
+        assert "true" in result.stdout
+
+    def test_config_roundtrip_disables_learning(self, tmp_path: Path):
+        from lib_core import is_learning_enabled
+        dynos_home = tmp_path / ".dynos-home"
+
+        # Set via CLI
+        with mock.patch.dict(os.environ, {"DYNOS_HOME": str(dynos_home)}):
+            subprocess.run(
+                [sys.executable, str(ROOT / "hooks" / "ctl.py"), "config", "set", "learning_enabled", "false", "--root", str(tmp_path)],
+                capture_output=True, text=True, timeout=10,
+                env={**os.environ, "DYNOS_HOME": str(dynos_home)},
+            )
+            # Verify the function reads it
+            assert is_learning_enabled(tmp_path) is False
