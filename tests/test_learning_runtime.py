@@ -119,10 +119,10 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(results[0]["trajectory"]["source_task_id"], "task-20260401-001")
 
     def test_register_and_promote_learned_agent(self) -> None:
-        init = self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        init = self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         self.assertEqual(init.returncode, 0)
         register = self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "backend-sharp",
             "backend-executor",
@@ -176,9 +176,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(agent["last_evaluation"]["recommendation"], "promote_replace")
 
     def test_skill_shadow_mode_and_benchmark_runner(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "plan-tightener",
             "plan-skill",
@@ -440,9 +440,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["cases"][0]["baseline_observed"]["tests_passed"], 1)
 
     def test_must_pass_category_blocks_promotion_and_demotes_active_component(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "security-hardener",
             "security-auditor",
@@ -552,98 +552,12 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(agent["status"], "demoted_on_regression")
         self.assertFalse(agent["route_allowed"])
 
-    def test_route_resolution_prefers_allowed_highest_composite(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.run_py(
-            "calibrate.py",
-            "register-agent",
-            "backend-sharp",
-            "backend-executor",
-            "feature",
-            ".dynos/learned-agents/executors/backend-sharp.md",
-            "task-20260401-001",
-            "--root",
-            str(self.root),
-        )
-        self.run_py(
-            "calibrate.py",
-            "register-agent",
-            "backend-steady",
-            "backend-executor",
-            "feature",
-            ".dynos/learned-agents/executors/backend-steady.md",
-            "task-20260401-002",
-            "--root",
-            str(self.root),
-        )
-        low_candidate = self.root / "low.json"
-        high_candidate = self.root / "high.json"
-        baseline = self.root / "baseline.json"
-        low_candidate.write_text(
-            json.dumps(
-                [
-                    {"quality_score": 0.90, "cost_score": 0.8, "efficiency_score": 0.85},
-                    {"quality_score": 0.91, "cost_score": 0.8, "efficiency_score": 0.84},
-                    {"quality_score": 0.90, "cost_score": 0.79, "efficiency_score": 0.85},
-                ]
-            )
-        )
-        high_candidate.write_text(
-            json.dumps(
-                [
-                    {"quality_score": 0.95, "cost_score": 0.82, "efficiency_score": 0.9},
-                    {"quality_score": 0.94, "cost_score": 0.81, "efficiency_score": 0.9},
-                    {"quality_score": 0.95, "cost_score": 0.8, "efficiency_score": 0.89},
-                ]
-            )
-        )
-        baseline.write_text(
-            json.dumps(
-                [
-                    {"quality_score": 0.84, "cost_score": 0.8, "efficiency_score": 0.8},
-                    {"quality_score": 0.83, "cost_score": 0.79, "efficiency_score": 0.8},
-                    {"quality_score": 0.84, "cost_score": 0.8, "efficiency_score": 0.79},
-                ]
-            )
-        )
-        self.run_py(
-            "eval.py",
-            "promote",
-            "backend-steady",
-            "backend-executor",
-            "feature",
-            str(low_candidate),
-            str(baseline),
-            "--root",
-            str(self.root),
-        )
-        self.run_py(
-            "eval.py",
-            "promote",
-            "backend-sharp",
-            "backend-executor",
-            "feature",
-            str(high_candidate),
-            str(baseline),
-            "--root",
-            str(self.root),
-        )
-        route = self.run_py(
-            "route.py",
-            "backend-executor",
-            "feature",
-            "--root",
-            str(self.root),
-        )
-        self.assertEqual(route.returncode, 0, route.stdout + route.stderr)
-        payload = json.loads(route.stdout)
-        self.assertEqual(payload["source"], "learned:backend-sharp")
-        self.assertTrue(payload["route_allowed"])
+    # test_route_resolution_prefers_allowed_highest_composite removed — tests deleted modules (route.py, generate.py)
 
     def test_auto_runner_executes_matching_shadow_fixture_and_promotes(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "backend-shadow",
             "backend-executor",
@@ -739,9 +653,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(queue["items"], [])
 
     def test_fixture_synthesis_and_auto_sync_create_generated_fixture(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         register = self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "backend-synth",
             "backend-executor",
@@ -772,93 +686,14 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(len(queue["items"]), 1)
         self.assertIn("agent-backend-synth-feature.json", queue["items"][0]["fixture_path"])
 
-    def test_structured_generation_registers_component_and_report_surfaces_it(self) -> None:
-        output_path = self.root / ".dynos" / "learned-agents" / "executors" / "backend-crafted.md"
-        generated = self.run_py(
-            "generate.py",
-            "backend-crafted",
-            "backend-executor",
-            "feature",
-            str(output_path),
-            "task-20260401-001",
-            "--source-task",
-            "task-20260401-001",
-            "--root",
-            str(self.root),
-        )
-        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
-        self.assertTrue(output_path.exists())
-        content = output_path.read_text()
-        self.assertIn("## Operating Focus", content)
-        report = self.run_py("report.py", "--root", str(self.root))
-        self.assertEqual(report.returncode, 0, report.stdout + report.stderr)
-        payload = json.loads(report.stdout)
-        self.assertEqual(payload["summary"]["learned_components"], 1)
-        self.assertEqual(payload["summary"]["shadow_components"], 1)
+    # test_structured_generation_registers_component_and_report_surfaces_it removed — tests deleted modules (route.py, generate.py)
 
-    def test_freshness_policy_blocks_stale_route(self) -> None:
-        for number in range(3, 9):
-            task_id = f"task-20260401-00{number}"
-            self.make_task(
-                task_id,
-                {
-                    "task_id": task_id,
-                    "task_outcome": "DONE",
-                    "task_type": "feature",
-                    "task_domains": "backend",
-                    "task_risk_level": "medium",
-                    "findings_by_auditor": {"code-quality-auditor": 0},
-                    "findings_by_category": {"cq": 0},
-                    "executor_repair_frequency": {"backend-executor": 0},
-                    "spec_review_iterations": 1,
-                    "repair_cycle_count": 0,
-                    "subagent_spawn_count": 2,
-                    "wasted_spawns": 0,
-                    "auditor_zero_finding_streaks": {"code-quality-auditor": 1},
-                    "executor_zero_repair_streak": 1,
-                    "quality_score": 0.9,
-                    "cost_score": 0.8,
-                    "efficiency_score": 0.85,
-                },
-            )
-        (self.root / ".dynos" / "policy.json").write_text(json.dumps({"freshness_task_window": 1}, indent=2) + "\n")
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
-        self.run_py(
-            "calibrate.py",
-            "register-agent",
-            "backend-stale",
-            "backend-executor",
-            "feature",
-            ".dynos/learned-agents/executors/backend-stale.md",
-            "task-20260401-001",
-            "--root",
-            str(self.root),
-        )
-        candidate = self.root / "candidate-stale.json"
-        baseline = self.root / "baseline-stale.json"
-        candidate.write_text(json.dumps([{"quality_score": 0.95, "cost_score": 0.82, "efficiency_score": 0.9}] * 3))
-        baseline.write_text(json.dumps([{"quality_score": 0.82, "cost_score": 0.8, "efficiency_score": 0.81}] * 3))
-        self.run_py(
-            "eval.py",
-            "promote",
-            "backend-stale",
-            "backend-executor",
-            "feature",
-            str(candidate),
-            str(baseline),
-            "--root",
-            str(self.root),
-        )
-        route = self.run_py("route.py", "backend-executor", "feature", "--root", str(self.root))
-        self.assertEqual(route.returncode, 0, route.stdout + route.stderr)
-        payload = json.loads(route.stdout)
-        self.assertEqual(payload["source"], "generic")
-        self.assertTrue(payload["freshness_blocked"])
+    # test_freshness_policy_blocks_stale_route removed — tests deleted modules (route.py, generate.py)
 
     def test_dashboard_and_lineage_generation(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "backend-lineage",
             "backend-executor",
@@ -881,9 +716,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue(any(node["kind"] == "component" for node in graph["nodes"]))
 
     def test_patterns_generation_writes_policy_tables(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "backend-patterned",
             "backend-executor",
@@ -906,9 +741,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue((self.persistent_dir / "effectiveness-scores.json").exists())
 
     def test_task_artifact_challenge_rollout_runs(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "backend-runner",
             "backend-executor",
@@ -957,9 +792,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["cases"][0]["winner"], "candidate")
 
     def test_maintainer_run_once_executes_cycle_and_writes_status(self) -> None:
-        self.run_py("calibrate.py", "init-registry", "--root", str(self.root))
+        self.run_py("agent_generator.py", "init-registry", "--root", str(self.root))
         self.run_py(
-            "calibrate.py",
+            "agent_generator.py",
             "register-agent",
             "backend-maintainer",
             "backend-executor",

@@ -104,21 +104,19 @@ class TestTemplateSaveAndStorage:
         save_fix_template(tmp_project, finding, "--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-bad\n+good\n")
 
         # Template file should exist under DYNOS_HOME/projects/{slug}/
-        from sweeper import global_home, project_slug
-        slug = project_slug(tmp_project)
-        template_path = global_home() / "projects" / slug / "fix-templates.json"
+        from lib_core import _persistent_project_dir
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
         assert template_path.exists(), f"Template file should be created at {template_path}"
 
     def test_template_entry_has_required_fields(self, tmp_project: Path) -> None:
         # AC 5: Each entry has category, file_ext, diff, saved_at
         from lib_templates import save_fix_template
-        from sweeper import global_home, project_slug
+        from lib_core import _persistent_project_dir
 
         finding = _make_finding()
         save_fix_template(tmp_project, finding, "some diff content")
 
-        slug = project_slug(tmp_project)
-        template_path = global_home() / "projects" / slug / "fix-templates.json"
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
         templates = json.loads(template_path.read_text())
         assert isinstance(templates, list)
         assert len(templates) == 1
@@ -131,26 +129,24 @@ class TestTemplateSaveAndStorage:
     def test_template_category_matches_finding(self, tmp_project: Path) -> None:
         # AC 5
         from lib_templates import save_fix_template
-        from sweeper import global_home, project_slug
+        from lib_core import _persistent_project_dir
 
         finding = _make_finding(category="security")
         save_fix_template(tmp_project, finding, "diff")
 
-        slug = project_slug(tmp_project)
-        template_path = global_home() / "projects" / slug / "fix-templates.json"
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
         templates = json.loads(template_path.read_text())
         assert templates[0]["category"] == "security"
 
     def test_template_file_ext_from_evidence_file(self, tmp_project: Path) -> None:
         # AC 5: file_ext derived from evidence.file
         from lib_templates import save_fix_template
-        from sweeper import global_home, project_slug
+        from lib_core import _persistent_project_dir
 
         finding = _make_finding(evidence={"file": "src/widget.dart", "line": 5})
         save_fix_template(tmp_project, finding, "diff")
 
-        slug = project_slug(tmp_project)
-        template_path = global_home() / "projects" / slug / "fix-templates.json"
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
         templates = json.loads(template_path.read_text())
         assert templates[0]["file_ext"] == ".dart"
 
@@ -162,24 +158,22 @@ class TestTemplateSaveAndStorage:
             finding = _make_finding(finding_id=f"test-{i:03d}")
             save_fix_template(tmp_project, finding, f"diff-{i}")
 
-        from sweeper import global_home, project_slug
-        slug = project_slug(tmp_project)
-        template_path = global_home() / "projects" / slug / "fix-templates.json"
+        from lib_core import _persistent_project_dir
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
         templates = json.loads(template_path.read_text())
         assert len(templates) == 5
 
     def test_fifo_eviction_at_50_entries(self, tmp_project: Path) -> None:
         # AC 5: FIFO eviction when at 50 capacity
         from lib_templates import save_fix_template
-        from sweeper import global_home, project_slug
+        from lib_core import _persistent_project_dir
 
         # Save 50 templates
         for i in range(50):
             finding = _make_finding(finding_id=f"test-{i:03d}", category=f"cat-{i}")
             save_fix_template(tmp_project, finding, f"diff-{i}")
 
-        slug = project_slug(tmp_project)
-        template_path = global_home() / "projects" / slug / "fix-templates.json"
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
         templates = json.loads(template_path.read_text())
         assert len(templates) == 50
 
@@ -197,14 +191,13 @@ class TestTemplateSaveAndStorage:
     def test_diff_truncated_to_100_lines(self, tmp_project: Path) -> None:
         # AC 5 implicit: diff truncated to 100 lines before storage
         from lib_templates import save_fix_template
-        from sweeper import global_home, project_slug
+        from lib_core import _persistent_project_dir
 
         long_diff = "\n".join(f"line-{i}" for i in range(200))
         finding = _make_finding()
         save_fix_template(tmp_project, finding, long_diff)
 
-        slug = project_slug(tmp_project)
-        template_path = global_home() / "projects" / slug / "fix-templates.json"
+        template_path = _persistent_project_dir(tmp_project) / "fix-templates.json"
         templates = json.loads(template_path.read_text())
         stored_lines = templates[0]["diff"].split("\n")
         assert len(stored_lines) <= 100, "Stored diff should be truncated to 100 lines"
@@ -219,10 +212,9 @@ class TestTemplateSaveAndStorage:
     def test_handles_corrupt_template_file(self, tmp_project: Path) -> None:
         # AC 5 implicit: corrupt file treated as empty
         from lib_templates import save_fix_template
-        from sweeper import global_home, project_slug
+        from lib_core import _persistent_project_dir
 
-        slug = project_slug(tmp_project)
-        template_dir = global_home() / "projects" / slug
+        template_dir = _persistent_project_dir(tmp_project)
         template_dir.mkdir(parents=True, exist_ok=True)
         template_path = template_dir / "fix-templates.json"
         template_path.write_text("{{{{invalid json")
@@ -345,10 +337,9 @@ class TestFindMatchingTemplate:
     def test_handles_corrupt_template_file_returns_none(self, tmp_project: Path) -> None:
         # AC 6 implicit: corrupt file returns None
         from lib_templates import find_matching_template
-        from sweeper import global_home, project_slug
+        from lib_core import _persistent_project_dir
 
-        slug = project_slug(tmp_project)
-        template_dir = global_home() / "projects" / slug
+        template_dir = _persistent_project_dir(tmp_project)
         template_dir.mkdir(parents=True, exist_ok=True)
         (template_dir / "fix-templates.json").write_text("not valid json")
 

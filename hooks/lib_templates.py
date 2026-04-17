@@ -8,13 +8,12 @@ from pathlib import Path
 
 from lib_core import load_json, now_iso, write_json
 from lib_defaults import MAX_FIX_TEMPLATES, MAX_TEMPLATE_DIFF_LINES
-from sweeper import global_home, project_slug
+from lib_core import _persistent_project_dir
 
 
 def _templates_path(root: Path) -> Path:
     """Return the path to fix-templates.json for the given project."""
-    slug = project_slug(root)
-    return global_home() / "projects" / slug / "fix-templates.json"
+    return _persistent_project_dir(root) / "fix-templates.json"
 
 
 def _extract_file_ext(finding: dict) -> str:
