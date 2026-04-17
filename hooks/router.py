@@ -36,6 +36,86 @@ from lib_registry import ensure_learned_registry
 
 
 # ---------------------------------------------------------------------------
+# Router context — cached data for a single plan build
+# ---------------------------------------------------------------------------
+
+class RouterContext:
+    """Pre-loads all data needed for routing decisions once per plan build.
+
+    Eliminates redundant file reads: policy, patterns, retrospectives,
+    and registry are each read exactly once and shared across all
+    resolve_model / resolve_route / resolve_skip calls.
+    """
+
+    def __init__(self, root: Path):
+        self.root = root
+        self._policy: dict | None = None
+        self._patterns_text: str | None = None
+        self._retrospectives: list[dict] | None = None
+        self._registry: dict | None = None
+        self._learning: bool | None = None
+
+    @property
+    def policy(self) -> dict:
+        if self._policy is None:
+            self._policy = project_policy(self.root)
+        return self._policy
+
+    @property
+    def patterns_text(self) -> str | None:
+        if self._patterns_text is None:
+            path = _persistent_project_dir(self.root) / "dynos_patterns.md"
+            try:
+                self._patterns_text = path.read_text()
+            except (FileNotFoundError, OSError):
+                self._patterns_text = ""
+        return self._patterns_text or None
+
+    @property
+    def retrospectives(self) -> list[dict]:
+        if self._retrospectives is None:
+            self._retrospectives = collect_retrospectives(self.root)
+        return self._retrospectives
+
+    @property
+    def registry(self) -> dict:
+        if self._registry is None:
+            self._registry = _read_learned_registry(self.root)
+        return self._registry
+
+    @property
+    def learning_enabled(self) -> bool:
+        if self._learning is None:
+            self._learning = is_learning_enabled(self.root)
+        return self._learning
+
+
+def _read_learned_registry(root: Path) -> dict:
+    """Read the learned agent registry without creating files (pure read)."""
+    from lib_registry import learned_registry_path
+    path = learned_registry_path(root)
+    if not path.exists():
+        return {"agents": [], "benchmarks": []}
+    try:
+        data = load_json(path)
+        if isinstance(data, dict) and "agents" in data:
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {"agents": [], "benchmarks": []}
+
+
+# ---------------------------------------------------------------------------
+# Exploration
+# ---------------------------------------------------------------------------
+
+import random
+
+VALID_MODELS = ["haiku", "sonnet", "opus"]
+DEFAULT_EPSILON = 0.1  # 10% exploration rate
+
+
+# ---------------------------------------------------------------------------
 # Model selection
 # ---------------------------------------------------------------------------
 
@@ -67,16 +147,23 @@ COLD_START_MINIMUM = UCB_COLD_START_MINIMUM
 def _parse_effectiveness_scores(
     path: Path, role: str, task_type: str,
 ) -> list[dict]:
+    """Parse the Effectiveness Scores table from a file path."""
+    try:
+        text = path.read_text()
+    except OSError:
+        return []
+    return _parse_effectiveness_scores_from_text(text, role, task_type)
+
+
+def _parse_effectiveness_scores_from_text(
+    text: str, role: str, task_type: str,
+) -> list[dict]:
     """Parse the Effectiveness Scores table for a given role and task_type.
 
     Returns a list of dicts with keys: model, quality, cost, efficiency, samples.
     Aggregates across source values (generic + learned) per model.
     """
     rows: dict[str, dict] = {}  # keyed by model
-    try:
-        text = path.read_text()
-    except OSError:
-        return []
 
     in_table = False
     for line in text.splitlines():
@@ -175,7 +262,7 @@ def _benchmark_model_for_agent(root: Path, role: str, task_type: str) -> dict | 
 
     Returns {"model": str, "mean_composite": float, "sample_count": int} or None.
     """
-    registry = ensure_learned_registry(root)
+    registry = _read_learned_registry(root)
     # Find matching active learned agent
     agent_name = None
     for agent in registry.get("agents", []):
@@ -245,10 +332,11 @@ def _benchmark_model_for_agent(root: Path, role: str, task_type: str) -> dict | 
     }
 
 
-def resolve_model(root: Path, role: str, task_type: str) -> dict:
+def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | None = None) -> dict:
     """Determine which model an agent should use.
 
     Priority order:
+      0.  Epsilon-greedy exploration       -> source: "exploration"
       1.  policy.json model_overrides     -> source: "explicit_policy"
       2.  UCB1 over effectiveness scores  -> source: "ucb"
       2b. Benchmark model performance     -> source: "benchmark_model"
@@ -259,8 +347,23 @@ def resolve_model(root: Path, role: str, task_type: str) -> dict:
 
     Returns {"model": str|None, "source": str, ...}.
     """
-    policy = project_policy(root)
+    policy = ctx.policy if ctx else project_policy(root)
     key = f"{role}:{task_type}"
+
+    # 0. Epsilon-greedy exploration — randomly try a different model
+    # to feed the UCB1 bandit with multi-arm data. Skipped for
+    # security-auditor (always opus) and when exploration is disabled.
+    epsilon = float(policy.get("exploration_epsilon", DEFAULT_EPSILON))
+    if (
+        epsilon > 0
+        and role != "security-auditor"
+        and (ctx.learning_enabled if ctx else is_learning_enabled(root))
+        and random.random() < epsilon
+    ):
+        model = random.choice([m for m in VALID_MODELS if m != SECURITY_FLOOR_MODEL])
+        result = {"model": model, "source": "exploration", "epsilon": epsilon}
+        log_event(root, "router_model_decision", role=role, task_type=task_type, model=model, source="exploration")
+        return result
 
     # 1. Explicit policy.json overrides (highest priority)
     model_overrides = policy.get("model_overrides", {})
@@ -271,15 +374,21 @@ def resolve_model(root: Path, role: str, task_type: str) -> dict:
         return result
 
     # Steps 2-4 use learned data — skip when learning is disabled.
-    if not is_learning_enabled(root):
+    if not (ctx.learning_enabled if ctx else is_learning_enabled(root)):
         result = {"model": DEFAULT_MODEL, "source": "default"}
         log_event(root, "router_model_decision", role=role, task_type=task_type, model=result["model"], source="default (learning_enabled=false)")
         return result
 
     # 2. UCB1 over effectiveness scores
-    patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
-    if patterns_path.exists():
-        candidates = _parse_effectiveness_scores(patterns_path, role, task_type)
+    patterns_text = ctx.patterns_text if ctx else None
+    if patterns_text is None:
+        patterns_path = _persistent_project_dir(root) / "dynos_patterns.md"
+        try:
+            patterns_text = patterns_path.read_text()
+        except (FileNotFoundError, OSError):
+            patterns_text = None
+    if patterns_text:
+        candidates = _parse_effectiveness_scores_from_text(patterns_text, role, task_type)
         if candidates:
             exploration_c = float(policy.get("ucb_exploration_constant", DEFAULT_UCB_C))
             winner = _ucb_select_model(candidates, exploration_c)
@@ -376,7 +485,7 @@ SKIP_EXEMPT = {"security-auditor", "spec-completion-auditor", "code-quality-audi
 DEFAULT_SKIP_THRESHOLD = _DEFAULT_SKIP_THRESHOLD
 
 
-def resolve_skip(root: Path, auditor: str, task_type: str) -> dict:
+def resolve_skip(root: Path, auditor: str, task_type: str, ctx: RouterContext | None = None) -> dict:
     """Determine whether an auditor should be skipped.
 
     Returns {"skip": bool, "reason": str, "streak": int, "threshold": int}.
@@ -384,11 +493,11 @@ def resolve_skip(root: Path, auditor: str, task_type: str) -> dict:
     if auditor in SKIP_EXEMPT:
         return {"skip": False, "reason": "skip-exempt", "streak": 0, "threshold": 0}
 
-    if not is_learning_enabled(root):
+    if not (ctx.learning_enabled if ctx else is_learning_enabled(root)):
         return {"skip": False, "reason": "learning_enabled=false (no skip)", "streak": 0, "threshold": 0}
 
-    # Get streak from most recent prior task
-    retros = collect_retrospectives(root)
+    # Get streak from most recent prior task (cached via ctx)
+    retros = ctx.retrospectives if ctx else collect_retrospectives(root)
     streak = 0
     if retros:
         latest = retros[-1]
@@ -442,7 +551,7 @@ def _get_skip_threshold(root: Path, auditor: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def resolve_route(root: Path, role: str, task_type: str) -> dict:
+def resolve_route(root: Path, role: str, task_type: str, ctx: RouterContext | None = None) -> dict:
     """Determine whether to use generic, learned, or alongside agent.
 
     Returns {
@@ -453,7 +562,7 @@ def resolve_route(root: Path, role: str, task_type: str) -> dict:
         "source": str
     }.
     """
-    if not is_learning_enabled(root):
+    if not (ctx.learning_enabled if ctx else is_learning_enabled(root)):
         result = {
             "mode": "generic",
             "agent_path": None,
@@ -464,7 +573,7 @@ def resolve_route(root: Path, role: str, task_type: str) -> dict:
         log_event(root, "router_route_decision", role=role, task_type=task_type, mode="generic", agent_name=None, composite_score=0.0, source="learning_enabled=false")
         return result
 
-    registry = ensure_learned_registry(root)
+    registry = ctx.registry if ctx else _read_learned_registry(root)
     agents = registry.get("agents", [])
 
     # Find matching learned agent
@@ -564,15 +673,6 @@ def load_prevention_rules(root: Path) -> list[dict]:
         return []
 
 
-AUDITOR_ROLES = [
-    "spec-completion-auditor",
-    "security-auditor",
-    "code-quality-auditor",
-    "dead-code-auditor",
-    "ui-auditor",
-    "db-schema-auditor",
-]
-
 # Ensemble voting: these auditors get two cheap models first.
 # If both return zero findings, pass. If either finds something, escalate to opus.
 ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
@@ -591,6 +691,7 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
 
     No prompt interpretation needed. The caller just follows the plan.
     """
+    ctx = RouterContext(root)
     plan = {
         "generated_at": now_iso(),
         "task_type": task_type,
@@ -612,8 +713,8 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
             eligible.append("performance-auditor")
 
     for auditor in eligible:
-        # Skip check
-        skip_decision = resolve_skip(root, auditor, task_type)
+        # Skip check (uses cached retrospectives via ctx)
+        skip_decision = resolve_skip(root, auditor, task_type, ctx=ctx)
         if skip_decision["skip"]:
             plan["auditors"].append({
                 "name": auditor,
@@ -624,15 +725,15 @@ def build_audit_plan(root: Path, task_type: str, domains: list[str], fast_track:
             })
             continue
 
-        # Model selection
-        model_decision = resolve_model(root, auditor, task_type)
+        # Model selection (uses cached policy + patterns via ctx)
+        model_decision = resolve_model(root, auditor, task_type, ctx=ctx)
 
         # Fast-track model override: haiku for spec-completion
         if fast_track and auditor == "spec-completion-auditor" and model_decision["source"] == "default":
             model_decision = {"model": "haiku", "source": "fast_track_override"}
 
-        # Route selection
-        route_decision = resolve_route(root, auditor, task_type)
+        # Route selection (uses cached registry via ctx)
+        route_decision = resolve_route(root, auditor, task_type, ctx=ctx)
 
         entry = {
             "name": auditor,
@@ -665,6 +766,7 @@ def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dic
 
     Returns structured decisions for each segment's executor.
     """
+    ctx = RouterContext(root)
     all_rules = load_prevention_rules(root)
     plan = {
         "generated_at": now_iso(),
@@ -676,8 +778,8 @@ def build_executor_plan(root: Path, task_type: str, segments: list[dict]) -> dic
         executor = seg.get("executor", "")
         seg_id = seg.get("id", "")
 
-        model_decision = resolve_model(root, executor, task_type)
-        route_decision = resolve_route(root, executor, task_type)
+        model_decision = resolve_model(root, executor, task_type, ctx=ctx)
+        route_decision = resolve_route(root, executor, task_type, ctx=ctx)
 
         # Filter prevention rules relevant to this executor
         executor_rules = [
