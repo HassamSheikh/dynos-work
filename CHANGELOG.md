@@ -10,7 +10,7 @@ and this project adheres to **Semantic Versioning**.
 ## [7.0.0] - 2026-04-16
 ### "Verified Foundry": Tool-Grounded Verification, Compliance, Least Privilege
 
-This release implements the full 17-PR roadmap from `docs/foundry-design.md`. The foundry moves from LLM-reviewing-LLM to deterministic-tool-checking-LLM across every verification surface. Autofix is extracted to a separate repository. The learning layer becomes explicitly optional.
+The foundry moves from LLM-reviewing-LLM to deterministic-tool-checking-LLM across every verification surface. Autofix is extracted to a separate repository. The learning layer becomes explicitly optional.
 
 ### Added
 - **Compliance auditing** (PR #10): security-auditor flags GPL/AGPL deps, generates SBOM via cyclonedx-bom/syft, verifies dependency provenance via Sigstore, checks for missing privacy code (data export, account deletion). New `compliance` category with `comp-` prefix.
