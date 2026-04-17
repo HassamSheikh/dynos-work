@@ -348,6 +348,62 @@ def cmd_bus(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_calibration(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    import json as _json
+    root = Path(args.root).resolve()
+
+    if args.cal_action == "status":
+        from lib_registry import ensure_learned_registry
+        registry = ensure_learned_registry(root)
+        agents = registry.get("agents", [])
+        if not agents:
+            print("  No learned agents registered")
+            return 0
+
+        print(f"  Learned Agents: {len(agents)}")
+        print(f"  {'Name':<35} {'Mode':<12} {'Status':<25} {'Route':<6} {'Composite':<10} {'Samples'}")
+        print(f"  {'-'*35} {'-'*12} {'-'*25} {'-'*6} {'-'*10} {'-'*7}")
+        for a in agents:
+            name = a.get("agent_name", "?")[:35]
+            mode = a.get("mode", "?")
+            status = a.get("status", "?")
+            route = "yes" if a.get("route_allowed") else "no"
+            bs = a.get("benchmark_summary", {})
+            composite = f"{bs.get('mean_composite', 0):.3f}" if bs.get("mean_composite") else "-"
+            samples = bs.get("sample_count", 0)
+            print(f"  {name:<35} {mode:<12} {status:<25} {route:<6} {composite:<10} {samples}")
+        return 0
+
+    if args.cal_action == "history":
+        from lib_registry import ensure_learned_registry
+        registry = ensure_learned_registry(root)
+        agents = registry.get("agents", [])
+        for a in agents:
+            evals = a.get("benchmarks", [])
+            if not evals:
+                continue
+            name = a.get("agent_name", "?")
+            print(f"  {name}:")
+            for e in evals[-5:]:  # last 5
+                rec = e.get("recommendation", "?")
+                dq = e.get("delta_quality", 0)
+                dc = e.get("delta_composite", 0)
+                ts = e.get("evaluated_at", "?")[:19]
+                print(f"    {ts}  {rec:<20} Δq={dq:+.3f}  Δc={dc:+.3f}")
+        if not any(a.get("benchmarks") for a in agents):
+            print("  No benchmark history yet")
+        return 0
+
+    if args.cal_action == "json":
+        from lib_registry import ensure_learned_registry
+        registry = ensure_learned_registry(root)
+        print(_json.dumps(registry, indent=2))
+        return 0
+
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -439,6 +495,16 @@ def build_parser() -> argparse.ArgumentParser:
     bus_handlers = bus_sub.add_parser("handlers", help="List registered handlers")
     bus_handlers.add_argument("--root", default=".")
     bus_parser.set_defaults(func=cmd_bus)
+
+    cal_parser = subparsers.add_parser("calibration", help="Learned agent registry and benchmark status")
+    cal_sub = cal_parser.add_subparsers(dest="cal_action", required=True)
+    cal_status = cal_sub.add_parser("status", help="Show all learned agents with mode/status/scores")
+    cal_status.add_argument("--root", default=".")
+    cal_history = cal_sub.add_parser("history", help="Show recent benchmark history per agent")
+    cal_history.add_argument("--root", default=".")
+    cal_json = cal_sub.add_parser("json", help="Dump full registry as JSON")
+    cal_json.add_argument("--root", default=".")
+    cal_parser.set_defaults(func=cmd_calibration)
 
     config_parser = subparsers.add_parser("config", help="Get or set project policy values")
     config_parser.add_argument("action", choices=["get", "set"], help="Action: get or set")

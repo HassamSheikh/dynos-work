@@ -392,55 +392,7 @@ class TestNoCircularImports:
             assert mod_name in sys.modules, f"{mod_name} not in sys.modules after import"
 
 
-# ===================================================================
-# AC 9: sweeper no longer imports maintenance_cycle directly
-# ===================================================================
-
-class TestDaemonSubprocessSeparation:
-    """AC 9: sweeper uses subprocess.run to invoke maintain
-    instead of importing maintenance_cycle directly."""
-
-    def test_no_direct_maintenance_cycle_import(self) -> None:
-        """sweeper.py does not contain 'from daemon import maintenance_cycle'."""
-        source = (ROOT / "sandbox" / "sweeper.py").read_text()
-        tree = ast.parse(source, filename="sweeper.py")
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module in ("maintain", "daemon"):
-                imported_names = [alias.name for alias in node.names]
-                assert "maintenance_cycle" not in imported_names, (
-                    "sweeper.py still imports maintenance_cycle from daemon"
-                )
-
-    def test_subprocess_invocation_pattern_exists(self) -> None:
-        """sweeper.py contains subprocess.run invocation for maintain."""
-        source = (ROOT / "sandbox" / "sweeper.py").read_text()
-        assert "subprocess.run" in source, (
-            "sweeper.py does not contain subprocess.run invocation"
-        )
-        assert "maintain" in source, (
-            "sweeper.py does not reference maintain in subprocess call"
-        )
-
-    def test_subprocess_uses_run_once_subcommand(self) -> None:
-        """The subprocess invocation uses the 'run-once' subcommand."""
-        source = (ROOT / "sandbox" / "sweeper.py").read_text()
-        assert "run-once" in source, (
-            "sweeper.py subprocess call does not use 'run-once' subcommand"
-        )
-
-    def test_subprocess_captures_output(self) -> None:
-        """The subprocess invocation captures stdout for JSON parsing."""
-        source = (ROOT / "sandbox" / "sweeper.py").read_text()
-        assert "capture_output=True" in source or "stdout=" in source, (
-            "sweeper.py subprocess call does not capture output"
-        )
-
-    def test_subprocess_has_timeout(self) -> None:
-        """The subprocess invocation has a timeout parameter."""
-        source = (ROOT / "sandbox" / "sweeper.py").read_text()
-        assert "timeout=" in source, (
-            "sweeper.py subprocess call does not have a timeout"
-        )
+# TestDaemonSubprocessSeparation removed — sweeper.py deleted.
 
 
 # ===================================================================
@@ -514,17 +466,6 @@ class TestFunctionRelocation:
         from lib import is_pid_running
         assert callable(is_pid_running)
 
-    def test_sweeper_imports_from_lib_core(self) -> None:
-        """sweeper.py imports project_dir from lib_core (or lib)."""
-        source = (ROOT / "sandbox" / "sweeper.py").read_text()
-        tree = ast.parse(source, filename="sweeper.py")
-        # project_dir should NOT be defined as a function in sweeper.py anymore
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "project_dir":
-                pytest.fail(
-                    "sweeper.py still defines project_dir as a local function. "
-                    "It should import it from lib_core."
-                )
 
     def test_postmortem_imports_project_dir_from_lib(self) -> None:
         """postmortem.py imports project_dir from lib, not sweeper."""
@@ -538,39 +479,7 @@ class TestFunctionRelocation:
                 )
 
 
-# ===================================================================
-# AC 12: global_stats.py exports
-# ===================================================================
-
-class TestDynoglobalStatsExtraction:
-    """AC 12: global_stats.py exports extract_project_stats,
-    aggregate_cross_project_stats, and promote_prevention_rules."""
-
-    def test_module_exists(self) -> None:
-        assert (HOOKS_DIR / "global_stats.py").exists(), (
-            "global_stats.py does not exist in hooks/"
-        )
-
-    EXPECTED_NAMES = [
-        "extract_project_stats",
-        "aggregate_cross_project_stats",
-        "promote_prevention_rules",
-    ]
-
-    @pytest.mark.parametrize("name", EXPECTED_NAMES)
-    def test_global_stats_exports(self, name: str) -> None:
-        import global_stats
-        assert hasattr(global_stats, name), (
-            f"global_stats.{name} not found"
-        )
-
-    def test_sweeper_still_exposes_stats_functions(self) -> None:
-        """sweeper.py re-imports and exposes the stats functions."""
-        import sweeper
-        for name in self.EXPECTED_NAMES:
-            assert hasattr(sweeper, name), (
-                f"sweeper.{name} no longer accessible after extraction"
-            )
+# TestDynoglobalStatsExtraction removed — sweeper.py/global_stats.py deleted.
 
 
 # ===================================================================

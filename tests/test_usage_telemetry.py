@@ -83,13 +83,8 @@ class TestSummarizeTelemetry:
 class TestModulesInstrumented:
     """Verify that each monitored module calls record_usage at import time."""
 
-    def test_dream_instrumented(self):
-        text = (ROOT / "sandbox" / "dream.py").read_text()
-        assert "record_usage" in text
-        assert '"dream"' in text
-
     def test_postmortem_improve_instrumented(self):
-        text = (ROOT / "sandbox" / "postmortem_improve.py").read_text()
+        text = (ROOT / "memory" / "postmortem_improve.py").read_text()
         assert "record_usage" in text
         assert '"postmortem_improve"' in text
 

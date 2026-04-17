@@ -156,25 +156,10 @@ def propose_improvements(root: Path) -> list[dict]:
             "suggested_value": "haiku for spec-completion-auditor and code-quality-auditor on low-risk tasks",
         })
 
-    # 5. Learned agent seeding
-    role_type_counts: dict[tuple[str, str], int] = {}
-    for r in all_retros:
-        for role in r.get("executor_repair_frequency", {}):
-            tt = r.get("task_type", "")
-            if isinstance(role, str) and isinstance(tt, str):
-                role_type_counts[(role, tt)] = role_type_counts.get((role, tt), 0) + 1
-    for (role, tt), count in role_type_counts.items():
-        if count >= 3:
-            proposals.append({
-                "id": f"imp-seed-{role}-{tt}",
-                "type": "learned_agent_seed",
-                "target": str(_persistent_project_dir(root) / "learned-agents" / "executors" / f"auto-{role.replace('-executor', '')}-{tt}.md"),
-                "description": f"Role {role} on {tt} tasks has {count} observations. Seed a learned agent.",
-                "action": "seed_learned_agent",
-                "role": role,
-                "task_type": tt,
-                "observation_count": count,
-            })
+    # 5. Learned agent seeding — REMOVED.
+    # agent_generator.py is the single owner of agent creation.
+    # It produces richer content (prevention rules, finding categories)
+    # than the minimal 5-line stub this used to write.
 
     return [p for p in proposals if p.get("id") not in applied_ids]
 
@@ -276,26 +261,6 @@ def apply_improvement(root: Path, proposal: dict) -> dict:
         else:
             result["reason"] = f"Prevention rule for '{category}' already exists"
 
-    elif action == "seed_learned_agent":
-        role = proposal.get("role", "")
-        tt = proposal.get("task_type", "")
-        agent_name = f"auto-{role.replace('-executor', '')}-{tt}"
-        agent_dir = _persistent_project_dir(root) / "learned-agents" / "executors"
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        agent_path = agent_dir / f"{agent_name}.md"
-        if not agent_path.exists():
-            agent_path.write_text(
-                f"# {agent_name}\n\n"
-                f"Auto-generated from postmortem analysis.\n"
-                f"Role: {role}, Task type: {tt}\n"
-                f"Observations: {proposal.get('observation_count', 0)}\n"
-                f"Generated: {now_iso()}\n"
-            )
-            result["applied"] = True
-            result["reason"] = f"Seeded {agent_path.name}"
-        else:
-            result["reason"] = f"Agent {agent_name} already exists"
-
     else:
         result["reason"] = f"Action '{action}' not auto-applicable (logged for manual review)"
 
@@ -317,7 +282,7 @@ def run_improvement_cycle(root: Path) -> dict:
         "proposals": proposals,
     })
 
-    safe_actions = {"adjust_policy", "seed_learned_agent", "adjust_model_policy", "add_prevention_rule"}
+    safe_actions = {"adjust_policy", "adjust_model_policy", "add_prevention_rule"}
     results: list[dict] = []
     for p in proposals:
         if p.get("action") in safe_actions:

@@ -128,16 +128,13 @@ def maintenance_cycle(root: Path) -> dict:
         }
     try:
         actions: list[dict] = []
+        # Only run steps NOT already handled by the eventbus.
+        # Eventbus covers: improve, agent_generator, policy_engine,
+        # dashboard, register, benchmark_scheduler (via handlers/).
+        # Postmortem runs inline in audit Step 5a.
+        # Daemon-only: trajectory rebuild.
         for script_name, args in (
             ("trajectory.py", ("rebuild", "--root", str(root))),
-            ("patterns.py", ("--root", str(root))),
-            ("calibrate.py", ("auto", "--root", str(root))),
-            ("postmortem.py", ("generate-all", "--root", str(root))),
-            ("postmortem.py", ("improve", "--root", str(root))),
-            ("fixture.py", ("sync", "--root", str(root))),
-            ("auto.py", ("run", "--root", str(root))),
-            ("dashboard.py", ("generate", "--root", str(root))),
-            ("report.py", ("--root", str(root))),
         ):
             completed, payload = run_python(root, script_name, *args)
             action = {
