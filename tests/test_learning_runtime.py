@@ -1047,12 +1047,9 @@ class LearningRuntimeTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         status = json.loads((self.root / ".dynos" / "maintenance" / "status.json").read_text())
         self.assertIn("last_cycle", status)
-        registry = json.loads((self.persistent_dir / "learned-agents" / "registry.json").read_text())
-        agent = registry["agents"][0]
-        self.assertIn(agent["mode"], {"alongside", "replace"})
-        self.assertTrue(agent["route_allowed"])
-        self.assertTrue((self.root / ".dynos" / "dashboard.html").exists())
-        self.assertTrue((self.persistent_dir / "project_rules.md").exists())
+        # Daemon now only runs trajectory rebuild — bench/eval/dashboard/policy
+        # are handled by the eventbus. Agent promotion and dashboard generation
+        # are no longer the daemon's responsibility.
 
     def test_maintainer_invoke_alias_runs(self) -> None:
         invoke = self.run_py("daemon.py", "invoke", "--root", str(self.root))
