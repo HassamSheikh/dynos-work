@@ -305,6 +305,32 @@ Append to log:
 {timestamp} [DONE] reflect — task-retrospective.json written
 ```
 
+**LLM Postmortem Analysis (Step 5b):** After writing the retrospective, run LLM-powered failure analysis to generate prevention rules. This step is skipped for clean tasks (no findings, no repairs, quality >= 0.8).
+
+1. Build the analysis prompt:
+```bash
+PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem_analysis.py" build-prompt .dynos/task-{id}
+```
+
+2. If the result has `"has_findings": true`, spawn a **haiku** agent with the prompt from the `"prompt"` field. Instruct the agent to respond with ONLY the JSON object described in the prompt — no markdown, no explanation.
+
+3. Parse the agent's JSON response and apply it:
+```bash
+echo '${AGENT_JSON_OUTPUT}' | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem_analysis.py" apply .dynos/task-{id}
+```
+
+This writes `postmortem-analysis.json` to the task dir and merges new prevention rules into `prevention-rules.json`. These rules are automatically included in `project_rules.md` by the policy engine on the next task.
+
+Append to log:
+```
+{timestamp} [DONE] postmortem-analysis — {N} prevention rules added
+```
+
+If `has_findings` is false, skip this step and append:
+```
+{timestamp} [SKIP] postmortem-analysis — clean task, nothing to analyze
+```
+
 **Post-completion processing:** Learn, trajectory rebuild, evolve, postmortems, and dashboard refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.
 
 Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `lib.py` (this sets both `stage` and `completion_at`). If calling the function directly is not possible, manually set both `"stage": "DONE"` and `"completion_at": "{ISO timestamp}"` in `manifest.json`. Append to log:
