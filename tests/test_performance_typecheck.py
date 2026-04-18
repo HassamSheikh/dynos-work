@@ -28,11 +28,32 @@ class TestPerformanceCheck:
     def test_detects_n_plus_one(self, tmp_path: Path):
         from performance_check import scan_files
         (tmp_path / "app.py").write_text(
+            "import sqlite3\n"
             "for user in users:\n    db.query(f'SELECT * FROM orders WHERE user_id={user.id}')\n"
         )
         result = scan_files(tmp_path)
         patterns = [f["pattern"] for f in result["findings"]]
         assert "n_plus_one" in patterns
+
+    def test_no_n_plus_one_on_dict_get(self, tmp_path: Path):
+        """dict.get() inside a loop in a file with no DB driver is not an N+1."""
+        from performance_check import scan_files
+        (tmp_path / "process.py").write_text(
+            "for item in items:\n    name = item.get('name', 'unknown')\n"
+        )
+        result = scan_files(tmp_path)
+        patterns = [f["pattern"] for f in result["findings"]]
+        assert "n_plus_one" not in patterns
+
+    def test_no_n_plus_one_without_db_import(self, tmp_path: Path):
+        """Even with db.query(), a file with no DB driver import is not flagged."""
+        from performance_check import scan_files
+        (tmp_path / "fake.py").write_text(
+            "for x in xs:\n    db.query(x)\n"
+        )
+        result = scan_files(tmp_path)
+        patterns = [f["pattern"] for f in result["findings"]]
+        assert "n_plus_one" not in patterns
 
     def test_detects_missing_timeout(self, tmp_path: Path):
         from performance_check import scan_files
@@ -50,7 +71,10 @@ class TestPerformanceCheck:
 
     def test_detects_unbounded_query(self, tmp_path: Path):
         from performance_check import scan_files
-        (tmp_path / "repo.py").write_text("rows = db.execute('SELECT * FROM users')\n")
+        (tmp_path / "repo.py").write_text(
+            "import sqlite3\n"
+            "rows = db.execute('SELECT * FROM users')\n"
+        )
         result = scan_files(tmp_path)
         patterns = [f["pattern"] for f in result["findings"]]
         assert "unbounded_query" in patterns
