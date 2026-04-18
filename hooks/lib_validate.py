@@ -189,7 +189,20 @@ def compute_fast_track(manifest: dict) -> bool:
 
 
 def apply_fast_track(task_dir: Path) -> bool:
-    """Check fast-track eligibility and write to manifest. Returns True if fast-tracked."""
+    """Compute fast-track eligibility AND persist the result to ``manifest.json``.
+
+    This is NOT a pure computation. As a side-effect, this function writes the
+    boolean result back to ``task_dir/manifest.json`` under the ``fast_track``
+    key (overwriting any prior value). Callers that only want the eligibility
+    decision without persisting it should use ``compute_fast_track`` directly.
+
+    Eligibility rule (delegated to ``compute_fast_track``): a task is
+    fast-track-eligible when its ``classification.risk_level`` is ``"low"`` AND
+    its ``classification.domains`` list contains exactly one element.
+
+    Returns the same boolean that was written to the manifest: ``True`` if
+    fast-track-eligible, ``False`` otherwise.
+    """
     manifest_path = task_dir / "manifest.json"
     manifest = load_json(manifest_path)
     fast = compute_fast_track(manifest)
