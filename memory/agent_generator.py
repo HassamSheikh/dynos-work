@@ -222,13 +222,12 @@ def cmd_auto(args: argparse.Namespace) -> int:
                 agent_name, role, task_type, matched_retros, latest_task, root
             )
             agent_path.write_text(content)
-        rel_path = str(agent_path.relative_to(root))
         register_learned_agent(
             root,
             agent_name=agent_name,
             role=role,
             task_type=task_type,
-            path=rel_path,
+            path=str(agent_path),
             generated_from=latest_task,
         )
         result["generated"].append({"agent_name": agent_name, "role": role, "task_type": task_type})
