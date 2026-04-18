@@ -40,7 +40,10 @@ VALID_CLASSIFICATION_TYPES: set[str] = {
     "full-stack",
 }
 
-VALID_DOMAINS: set[str] = {"ui", "backend", "db", "ml", "security"}
+VALID_DOMAINS: set[str] = {
+    "ui", "backend", "db", "ml", "security",
+    "testing", "refactor", "migration", "docs", "infra",
+}
 VALID_RISK_LEVELS: set[str] = {"low", "medium", "high", "critical"}
 
 COMPOSITE_WEIGHTS: tuple[float, float, float] = (0.6, 0.25, 0.15)

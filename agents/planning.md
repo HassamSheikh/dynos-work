@@ -36,6 +36,16 @@ When given this phase, read `raw-input.md`, `discovery-notes.md`, and `design-de
 
 Your spec must be hostile to sloppy implementation. It should leave no room for fake completion, implied behavior gaps, or "good enough" interpretations.
 
+## Phase: Spec + Plan (combined, fast-track only)
+
+When given this phase, produce BOTH `spec.md` AND `plan.md` AND `execution-graph.json` in a single pass. This phase is only used for fast-track tasks (low risk, single domain) where the spec and plan are tightly coupled and the overhead of two separate spawns dominates the actual work.
+
+Read `raw-input.md`, `discovery-notes.md`, `design-decisions.md`, AND the actual implementation files referenced in the task. Verify runtime semantics directly — do not assume.
+
+Produce all three artifacts following the same rules as the individual phases below (Spec Normalization for `spec.md`, Implementation Planning for `plan.md` and `execution-graph.json`). For a fast-track task, the execution graph should contain a **single segment** and the spec should be concise (each section may be a single line if no significant complexity exists).
+
+Apply the same heading rules as the individual phases — including the conditional `## API Contracts`, `## Data Model`, and `## Architecture Decisions` sections. Use `N/A — ...` bodies when the section is triggered by domain/risk but the task does not actually touch that surface.
+
 ## Phase: Classification + Spec Normalization (combined)
 
 Legacy combined phase. Perform BOTH classification and spec normalization in a single pass.
@@ -56,11 +66,13 @@ Produce a JSON classification object and write it to `.dynos/task-{id}/manifest.
 ```json
 {
   "type": "feature | bugfix | refactor | migration | ml | full-stack",
-  "domains": ["ui", "backend", "db", "ml", "security"],
+  "domains": ["ui", "backend", "db", "ml", "security", "testing", "refactor", "migration", "docs", "infra"],
   "risk_level": "low | medium | high | critical",
   "notes": "Any relevant classification notes"
 }
 ```
+
+Pick whichever domains accurately describe what the executor will touch. A unittest→pytest migration is `domains: [testing, migration]`. A README rewrite is `domains: [docs]`. A pure code restructure with no behavior change is `domains: [refactor]` plus the affected technical domain (backend, ui, etc.).
 
 **Classification rules:**
 - `type: feature` — new functionality being added
@@ -134,7 +146,7 @@ Write to `.dynos/task-{id}/plan.md`:
 [2-3 paragraphs describing the overall approach. Start with the WHY — why this approach over alternatives. Then the WHAT — the high-level architecture. Then the HOW — the key technical decisions. Name the existing patterns in the codebase that this work should follow.]
 
 ## Architecture Decisions
-*(Required when risk_level is high or critical. Omit for low/medium-risk tasks.)*
+*(Required when risk_level is high or critical. For low/medium-risk tasks, include the heading with body `N/A — no architectural decisions for this task.`)*
 
 [For every significant technical decision in this task, document it as a typed ADR:
 
@@ -156,7 +168,7 @@ Each ADR is a constraint that downstream executors must follow. If an executor e
 - **Dwell Time:** [For UI components: 2-second / 30-second / 2-minute screen — drives information density decisions]
 
 ## API Contracts
-*(Required when domains include backend, ui, or security. Omit for tasks that don't touch API surfaces.)*
+*(Required when domains include backend, ui, or security. ALWAYS include this heading when triggered — if the task does not add or modify any API surface, write the body as: `N/A — no API surface added or modified by this task.`)*
 
 [For every endpoint or interface added or modified by this task, document the contract:
 
@@ -169,7 +181,7 @@ For non-HTTP interfaces (WebSocket, gRPC, IPC): document the equivalent contract
 If the task modifies an existing API: show the before/after diff of the contract. Breaking changes must be called out explicitly with a migration note.]
 
 ## Data Model
-*(Required when domains include db. Omit for tasks that don't touch the data layer.)*
+*(Required when domains include db. ALWAYS include this heading when triggered — if the task does not add or modify any schema, write the body as: `N/A — no data model changes in this task.`)*
 
 [For every table, collection, or schema added or modified:
 

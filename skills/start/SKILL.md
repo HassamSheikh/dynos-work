@@ -244,7 +244,9 @@ If any condition is not met, proceed normally (no fast-track). Do not ask the us
 
 ## Step 3 — Spec Normalization
 
-Spawn the Planner subagent with instruction:
+**Fast-track combined spawn:** If `manifest.json` has `"fast_track": true`, skip the spawn and the spec validation. Spec is produced in Step 5 by the combined Spec + Plan planner spawn. Walk the manifest stage straight through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING` (no work between transitions; this preserves the state-machine invariants while collapsing the LLM work into a single spawn). Log: `{timestamp} [SKIP] spec-normalization-spawn — fast_track combined planner`. Skip the rest of this step and proceed to Step 4.
+
+**Normal path:** Spawn the Planner subagent with instruction:
 
 ```text
 Phase: Spec Normalization.
@@ -274,9 +276,9 @@ python3 hooks/ctl.py transition .dynos/task-{id} SPEC_REVIEW
 
 ## Step 4 — Spec Review
 
-This gate always runs. There is no skip path.
+**Fast-track skip:** If `manifest.json` has `"fast_track": true`, skip this step. Spec is reviewed together with the plan in Step 6 (combined approval gate). Log: `{timestamp} [SKIP] spec-review — fast_track combined gate`.
 
-Present `spec.md` to the user and ask for approval.
+**Normal path:** Present `spec.md` to the user and ask for approval.
 
 - If approved: append `{timestamp} [HUMAN] SPEC_REVIEW — approved` to the execution log.
 - If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, and present the updated spec again.
@@ -310,6 +312,9 @@ Hierarchical flow:
 1. Spawn Master Planner (Opus) for strategic boundaries.
 2. Spawn Worker Planners in parallel for non-overlapping subsystems.
 3. Merge outputs into final `plan.md` and `execution-graph.json`.
+
+Fast-track combined flow (when `fast_track: true`):
+1. Spawn Planner (Opus) ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and `execution-graph.json` together. This replaces both Step 3 (Spec Normalization) and Step 5's normal planner spawn.
 
 Standard flow:
 1. Spawn Planner (Opus) with instruction to generate `plan.md` and `execution-graph.json`.
@@ -358,12 +363,12 @@ python3 hooks/ctl.py transition .dynos/task-{id} PLAN_REVIEW
 
 ## Step 6 — Plan Review
 
-This gate always runs. There is no skip path.
+This gate always runs. For fast-track tasks it acts as the combined Spec + Plan approval (since Step 4 was skipped) — present BOTH `spec.md` AND `plan.md` together.
 
-Present `plan.md` to the user and ask for approval.
+Present the artifact(s) to the user and ask for approval.
 
-- If approved: append `{timestamp} [HUMAN] PLAN_REVIEW — approved` to the execution log.
-- If changes are requested: append the feedback, respawn planning, re-run deterministic artifact validation, and present the updated plan again.
+- If approved: append `{timestamp} [HUMAN] PLAN_REVIEW — approved` to the execution log (for fast-track also append `[HUMAN] SPEC_REVIEW — approved (combined gate)`).
+- If changes are requested: append the feedback, respawn planning (combined Spec + Plan phase for fast-track, otherwise standard planning), re-run deterministic artifact validation, and present the updated artifact(s) again.
 - If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Plan rejected by user`, and stop.
 
 ---
@@ -374,25 +379,28 @@ Present `plan.md` to the user and ask for approval.
 
 ## Step 7 — Plan Audit
 
-**Fast-track skip:** If `manifest.json` has `"fast_track": true`, check the project policy at `~/.dynos/projects/{slug}/policy.json` for `"fast_track_skip_plan_audit": true`. If both are true, skip the plan audit entirely and proceed to Step 8. Log: `{timestamp} [SKIP] plan audit — fast_track_skip_plan_audit policy`. This policy is set automatically by the improvement engine when low-risk tasks consistently pass without repair.
+The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/critical-risk tasks (the deterministic check covers low/medium because validate_task_artifacts already enforces criteria coverage). This avoids 1.5–3M tokens per task on auditor work that duplicates the deterministic checks.
 
-**Normal path:**
-
-1. **Deterministic gap analysis (mandatory, runs before LLM audit):**
+1. **Deterministic gap analysis (mandatory, always runs):**
    ```bash
    python3 hooks/plan_gap_analysis.py --root . --task-dir .dynos/task-{id}
    ```
-   This verifies that claims in `## API Contracts` and `## Data Model` sections correspond to real code. If the plan claims an endpoint or table exists that the codebase doesn't have, the planner must either fix the table or explicitly mark the entry as to-be-created. Gap analysis failures block the plan audit — do not proceed to the LLM audit until all gaps are resolved or acknowledged.
+   This verifies that claims in `## API Contracts` and `## Data Model` sections correspond to real code. If the plan claims an endpoint or table exists that the codebase doesn't have, the planner must either fix the table or explicitly mark the entry as to-be-created. Gap analysis failures block — repair before continuing.
 
-2. Spawn `spec-completion-auditor` to verify that `plan.md` and `execution-graph.json` cover all acceptance criteria in `spec.md`.
-3. If either the gap analysis or the auditor finds gaps, route back to planning, repair the gaps, and rerun both deterministic artifact validation and the plan audit.
+2. **LLM plan auditor (conditional):** Only spawn `spec-completion-auditor` when `risk_level` is `high` or `critical`. For low/medium risk, the deterministic checks (`validate_task_artifacts` for criteria coverage + gap analysis for code/plan alignment) are authoritative — skip the LLM spawn. Log: `{timestamp} [SKIP] plan-audit-llm — risk_level={risk}`.
+
+3. If gap analysis finds gaps, or (when invoked) the auditor finds gaps, route back to planning, repair, and rerun deterministic artifact validation.
 4. Create a git branch safety net: `dynos/task-{id}-snapshot`.
 
 ---
 
-## Step 8 — TDD-First Gate
+## Step 8 — TDD-First Gate (opt-in only)
 
-This gate always runs. There is no skip path.
+This gate is **off by default**. It is only invoked when `risk_level` is `critical` OR the spec explicitly requests TDD-first.
+
+When NOT invoked: tests are written by `testing-executor` after production code, in the execute skill (Step 4 of execute), where the implementation context is already known. This avoids ~1.5–2M tokens of pre-code context loading per task.
+
+When invoked (critical risk or explicit opt-in):
 
 1. Spawn `testing-executor` with instruction:
 
@@ -453,7 +461,7 @@ Next: /dynos-work:execute
 - You do not execute production code.
 - You do not audit production code.
 - You do not decide when the task is done.
-- You do not skip discovery, spec review, plan review, plan audit, or TDD review.
+- You do not skip discovery, plan review, or plan audit (when applicable to the risk level).
 - You do not let historical memory override human approval or deterministic validation.
 
 ---
