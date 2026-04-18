@@ -99,8 +99,26 @@ def run_postmortem(root: Path, _payload: dict) -> bool:
     )
 
 
+_DASHBOARD_DEBOUNCE_SECONDS = 30
+
+
 def run_dashboard(root: Path, _payload: dict) -> bool:
-    """Refresh live dashboard artifacts."""
+    """Refresh live dashboard artifacts.
+
+    Debounced: dashboard freshness within ~30s is indistinguishable to a
+    human refreshing the page. Bursty completions (e.g., a batch of
+    related tasks finishing back-to-back) used to regenerate the
+    dashboard once per task — pure waste. Skip if the output file was
+    modified within _DASHBOARD_DEBOUNCE_SECONDS.
+    """
+    data_path = root / ".dynos" / "dashboard-data.json"
+    if data_path.exists():
+        try:
+            age = time.time() - data_path.stat().st_mtime
+            if age < _DASHBOARD_DEBOUNCE_SECONDS:
+                return True  # Skip — recent enough
+        except OSError:
+            pass
     return _run(
         ["python3", str(SCRIPT_DIR / "dashboard.py"), "generate", "--root", str(root)],
         root,
@@ -117,8 +135,27 @@ def run_register(root: Path, _payload: dict) -> bool:
     )
 
 
-def run_improve(root: Path, _payload: dict) -> bool:
-    """Run the auto-improvement engine on postmortem data."""
+def run_improve(root: Path, payload: dict) -> bool:
+    """Run the auto-improvement engine on postmortem data.
+
+    Payload-aware skip: the improvement engine derives prevention rules
+    from finding categories and repair patterns. A task with zero findings
+    AND zero repair cycles offers no signal to learn from; skip the
+    subprocess spawn entirely. Saves ~50-300ms of Python interpreter
+    startup + import on the common clean-task path.
+    """
+    task_dir_str = (payload or {}).get("task_dir") if isinstance(payload, dict) else None
+    if task_dir_str:
+        try:
+            from lib_core import load_json
+            retro = load_json(Path(task_dir_str) / "task-retrospective.json")
+            findings_total = sum(retro.get("findings_by_auditor", {}).values())
+            if findings_total == 0 and retro.get("repair_cycle_count", 0) == 0:
+                return True  # Nothing to learn from
+        except (FileNotFoundError, OSError, Exception):
+            # Any error — fall through to the actual handler. Better to
+            # spend the 300ms than silently skip improvement.
+            pass
     return _run(
         ["python3", str(SCRIPT_DIR / "postmortem_improve.py"), "improve", "--root", str(root)],
         root,
