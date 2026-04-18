@@ -511,11 +511,37 @@ def _fire_task_completed(task_dir: Path) -> None:
     from the parent's process group. Output is redirected to
     .dynos/events/drain.log so post-completion failures remain inspectable.
     """
+    import os
     import subprocess
+    from pathlib import Path as _Path
 
     root = task_dir.parent.parent  # .dynos/task-xxx -> repo root
-    hooks_dir = root / "hooks"
-    env_path = f"{hooks_dir}:{__import__('os').environ.get('PYTHONPATH', '')}"
+    # Resolve hooks_dir from PLUGIN_HOOKS env var first so external projects
+    # (whose own repo root does NOT contain a dynos-work hooks/ directory) can
+    # still dispatch the drain. Fall back to `root/hooks` only when the env
+    # var is unset AND that directory exists — otherwise the drain is a no-op
+    # rather than a silent crash in drain.log.
+    _plugin_hooks = os.environ.get("PLUGIN_HOOKS", "").strip()
+    if _plugin_hooks and _Path(_plugin_hooks).is_dir():
+        hooks_dir = _Path(_plugin_hooks)
+    else:
+        _repo_hooks = root / "hooks"
+        if (_repo_hooks / "eventbus.py").is_file():
+            hooks_dir = _repo_hooks
+        else:
+            # Neither PLUGIN_HOOKS nor root/hooks/eventbus.py is available.
+            # Log the skip and return — don't Popen into a broken path.
+            try:
+                log_dir = root / ".dynos" / "events"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                (log_dir / "drain.log").open("a").write(
+                    f"\n=== drain SKIPPED for {task_dir.name} at {now_iso()} "
+                    f"(PLUGIN_HOOKS unset and {root}/hooks/eventbus.py not found) ===\n"
+                )
+            except OSError:
+                pass
+            return
+    env_path = f"{hooks_dir}:{os.environ.get('PYTHONPATH', '')}"
 
     # Step 1: Emit task-completed event with task identity (sync — small write)
     task_id = task_dir.name
