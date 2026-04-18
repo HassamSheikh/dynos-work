@@ -192,6 +192,47 @@ def _detect_segment(agent_type: str, agent_desc: str) -> str | None:
     return None
 
 
+def _record_orphan_tokens(
+    root: Path,
+    *,
+    agent_name: str,
+    agent_desc: str,
+    result: dict,
+    transcript_path: Path,
+    reason: str,
+) -> None:
+    """Append a token record to .dynos/orphan-tokens.jsonl when no fresh
+    active task is available for attribution.
+
+    This is the safety net for the freshness gate in _find_active_task:
+    instead of silently dropping legitimate token usage from long-running
+    subagents (or subagents that finished after a long manual pause), the
+    record is preserved in a visible orphan ledger. Operators can
+    reconcile manually, and a future improvement could attribute orphans
+    back to the right task by matching agent_id / transcript_path.
+    """
+    orphan_dir = root / ".dynos"
+    orphan_dir.mkdir(parents=True, exist_ok=True)
+    orphan_path = orphan_dir / "orphan-tokens.jsonl"
+    record = {
+        "recorded_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "agent": agent_name,
+        "agent_desc": agent_desc[:200] if agent_desc else "",
+        "model": result.get("model", "unknown"),
+        "input_tokens": result.get("input_tokens", 0),
+        "output_tokens": result.get("output_tokens", 0),
+        "agent_id": result.get("agent_id", ""),
+        "transcript_path": str(transcript_path),
+        "reason": reason,
+    }
+    try:
+        with open(orphan_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        # Last resort: don't crash the SubagentStop hook if disk write fails.
+        pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Record subagent token usage")
     parser.add_argument("--transcript", required=True, help="Path to subagent transcript JSONL")
@@ -206,9 +247,26 @@ def main() -> int:
     if not transcript_path.exists():
         return 0
 
-    # Find active task
+    # Build agent name from type (used in both happy path and orphan path)
+    agent_name = args.agent_type
+    if agent_name.startswith("dynos-work:"):
+        agent_name = agent_name[len("dynos-work:"):]
+
+    # Find active task. If no fresh non-terminal task exists, the tokens
+    # would otherwise be silently dropped — record to orphan-tokens.jsonl
+    # so the data is preserved for reconciliation.
     task_dir = _find_active_task(root)
     if task_dir is None:
+        result = _parse_transcript(transcript_path)
+        if result["input_tokens"] > 0 or result["output_tokens"] > 0:
+            _record_orphan_tokens(
+                root,
+                agent_name=agent_name,
+                agent_desc=args.agent_desc,
+                result=result,
+                transcript_path=transcript_path,
+                reason="no fresh active task at SubagentStop time",
+            )
         return 0
 
     # Parse transcript
@@ -217,12 +275,6 @@ def main() -> int:
     # Skip if no tokens recorded (empty transcript)
     if result["input_tokens"] == 0 and result["output_tokens"] == 0:
         return 0
-
-    # Build agent name from type
-    agent_name = args.agent_type
-    # Strip "dynos-work:" prefix for cleaner names
-    if agent_name.startswith("dynos-work:"):
-        agent_name = agent_name[len("dynos-work:"):]
 
     # Detect phase, stage, segment
     phase, stage = _detect_phase_and_stage(args.agent_type, task_dir)
