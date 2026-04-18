@@ -10,6 +10,7 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import json
+import hashlib
 import math
 from pathlib import Path
 
@@ -102,6 +103,20 @@ class RouterContext:
         if self._learning is None:
             self._learning = is_learning_enabled(self.root)
         return self._learning
+
+    @property
+    def benchmark_history(self) -> dict:
+        """Cached read of benchmark history JSON.
+
+        Avoids re-reading benchmark/history.json once per role inside the
+        same plan build. Returns an empty dict-shaped record on miss.
+        """
+        if not hasattr(self, "_benchmark_history"):
+            try:
+                self._benchmark_history = load_json(benchmark_history_path(self.root))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                self._benchmark_history = {"runs": []}
+        return self._benchmark_history
 
 
 def _read_learned_registry(root: Path) -> dict:
@@ -311,16 +326,19 @@ def _ucb_select_model(
 BENCHMARK_MODEL_MIN_SAMPLES = 2
 
 
-def _benchmark_model_for_agent(root: Path, role: str, task_type: str) -> dict | None:
+def _benchmark_model_for_agent(root: Path, role: str, task_type: str, ctx: RouterContext | None = None) -> dict | None:
     """Find the best model for a role based on learned agent benchmark runs.
 
     Looks up the active learned agent for (role, task_type), then filters
     benchmark history runs for that agent. Groups by model, computes mean
     composite score, and returns the best model with >= BENCHMARK_MODEL_MIN_SAMPLES.
 
+    When *ctx* is provided, registry and benchmark history are read from the
+    shared cache instead of re-reading the JSON files for every role lookup.
+
     Returns {"model": str, "mean_composite": float, "sample_count": int} or None.
     """
-    registry = _read_learned_registry(root)
+    registry = ctx.registry if ctx else _read_learned_registry(root)
     # Find matching active learned agent
     agent_name = None
     for agent in registry.get("agents", []):
@@ -335,11 +353,14 @@ def _benchmark_model_for_agent(root: Path, role: str, task_type: str) -> dict | 
     if not agent_name:
         return None
 
-    # Load benchmark history and filter for this agent
-    try:
-        history = load_json(benchmark_history_path(root))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+    # Load benchmark history (shared via ctx when available, else fresh read)
+    if ctx is not None:
+        history = ctx.benchmark_history
+    else:
+        try:
+            history = load_json(benchmark_history_path(root))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
     runs = history.get("runs", [])
 
     # Group composite scores by model for matching runs
@@ -466,7 +487,7 @@ def resolve_model(root: Path, role: str, task_type: str, ctx: RouterContext | No
                 return result
 
     # 2b. Benchmark model performance — learned agent benchmark runs grouped by model
-    benchmark_result = _benchmark_model_for_agent(root, role, task_type)
+    benchmark_result = _benchmark_model_for_agent(root, role, task_type, ctx=ctx)
     if benchmark_result:
         model = benchmark_result["model"]
         result = {"model": model, "source": "benchmark_model",
@@ -957,6 +978,148 @@ def build_executor_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Executor plan cache — task-local, fingerprint-keyed, replayable
+#
+# Why this exists:
+#   The execute skill calls `inject-prompt` once per segment. Each invocation
+#   is a separate Python process that previously rebuilt the executor plan
+#   from scratch — re-reading policy.json, effectiveness-scores.json, the
+#   retrospective glob, the learned-agent registry, and benchmark history
+#   for every single segment.
+#
+#   For a 10-segment task that means 10 redundant rebuilds of work that is
+#   100% deterministic given the same inputs. Worse, when epsilon-greedy
+#   exploration is enabled, the per-segment rebuild rolls the dice again,
+#   so the model the executor was spawned with (from `executor-plan`) can
+#   silently disagree with the model the prompt was injected for.
+#
+#   The cache:
+#     - hashes every input that drives the plan
+#     - stores the cached plan under `.dynos/task-{id}/router-cache/`
+#     - lets `inject-prompt` reuse the plan when fingerprint matches
+#     - guarantees executor-plan and inject-prompt see the same routing
+#
+# When the cache misses (different fingerprint / cache absent / corrupt),
+# inject-prompt falls back to the live `build_executor_plan` path. The cache
+# is an optimization; correctness still holds without it.
+# ---------------------------------------------------------------------------
+
+
+_ROUTER_CACHE_VERSION = "1"
+
+
+def _hash_path(h: "hashlib._Hash", path: Path) -> None:
+    """Mix a path's bytes (or marker if missing) into the hash digest."""
+    try:
+        data = path.read_bytes()
+        h.update(b"FILE:")
+        h.update(str(path).encode())
+        h.update(b":")
+        h.update(len(data).to_bytes(8, "big"))
+        h.update(data)
+    except (FileNotFoundError, IsADirectoryError, OSError):
+        h.update(b"MISSING:")
+        h.update(str(path).encode())
+
+
+def _router_inputs_fingerprint(root: Path, task_type: str, graph_path: Path) -> str:
+    """Compute a stable SHA256 over every input that drives the executor plan.
+
+    Inputs covered:
+      - cache version (so a code change invalidates old caches)
+      - task_type
+      - graph file contents
+      - policy.json (router epsilon, weights, model overrides)
+      - effectiveness-scores.json (UCB candidates)
+      - model-policy.json (fallback)
+      - learned registry.json (route mode / agent path)
+      - benchmark history.json (benchmark_model selection)
+      - prevention-rules.json (filtered into plan_entry)
+      - skip-policy.json (audit-plan parity, harmless to include)
+
+    Any change to any input flips the fingerprint, forcing a rebuild.
+    """
+    persistent = _persistent_project_dir(root)
+    h = hashlib.sha256()
+    h.update(b"V:")
+    h.update(_ROUTER_CACHE_VERSION.encode())
+    h.update(b"\nTASK_TYPE:")
+    h.update(task_type.encode())
+    h.update(b"\n")
+    inputs = [
+        graph_path,
+        persistent / "policy.json",
+        persistent / "effectiveness-scores.json",
+        persistent / "model-policy.json",
+        persistent / "skip-policy.json",
+        persistent / "prevention-rules.json",
+        persistent / "learned-agents" / "registry.json",
+        persistent / "benchmarks" / "history.json",
+    ]
+    for p in inputs:
+        _hash_path(h, p)
+    return h.hexdigest()
+
+
+def _task_id_from_graph_path(graph_path: Path) -> str | None:
+    """Derive task_id from a graph path like .dynos/task-{id}/execution-graph.json."""
+    try:
+        parent = graph_path.resolve().parent
+        if parent.name.startswith("task-"):
+            return parent.name
+    except OSError:
+        pass
+    return None
+
+
+def _executor_plan_cache_path(root: Path, task_id: str) -> Path:
+    """Path to the cached executor plan for this task."""
+    return root / ".dynos" / task_id / "router-cache" / "executor-plan.json"
+
+
+def _write_executor_plan_cache(
+    root: Path, task_id: str, plan: dict, fingerprint: str, graph_path: Path,
+) -> Path:
+    """Write the executor plan + fingerprint to the task-local cache."""
+    cache_path = _executor_plan_cache_path(root, task_id)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "version": _ROUTER_CACHE_VERSION,
+        "fingerprint": fingerprint,
+        "generated_at": now_iso(),
+        "task_id": task_id,
+        "task_type": plan.get("task_type"),
+        "graph_path": str(graph_path),
+        "plan": plan,
+    }
+    cache_path.write_text(json.dumps(record, indent=2) + "\n")
+    return cache_path
+
+
+def _read_executor_plan_cache(
+    root: Path, task_id: str, expected_fingerprint: str,
+) -> dict | None:
+    """Return the cached plan if fingerprint matches and version is current."""
+    cache_path = _executor_plan_cache_path(root, task_id)
+    if not cache_path.exists():
+        return None
+    try:
+        record = load_json(cache_path)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get("version") != _ROUTER_CACHE_VERSION:
+        return None
+    if record.get("fingerprint") != expected_fingerprint:
+        return None
+    plan = record.get("plan")
+    if not isinstance(plan, dict) or not isinstance(plan.get("segments"), list):
+        return None
+    return plan
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -976,7 +1139,29 @@ def cmd_executor_plan(args: argparse.Namespace) -> int:
         print(json.dumps({"error": f"graph not found: {graph_path}"}))
         return 1
     graph = load_json(graph_path)
+
+    # Build plan once. Write to the task-local cache so per-segment
+    # `inject-prompt` invocations can reuse it without rebuilding.
     plan = build_executor_plan(root, args.task_type, graph.get("segments", []))
+
+    task_id = _task_id_from_graph_path(graph_path)
+    if task_id:
+        try:
+            fingerprint = _router_inputs_fingerprint(root, args.task_type, graph_path)
+            cache_path = _write_executor_plan_cache(
+                root, task_id, plan, fingerprint, graph_path,
+            )
+            log_event(
+                root, "router_cache_write",
+                task_id=task_id,
+                fingerprint=fingerprint[:12],
+                cache_path=str(cache_path),
+                segment_count=len(plan.get("segments", [])),
+            )
+        except OSError as exc:
+            # Cache write is best-effort — never block plan delivery on it.
+            log_event(root, "router_cache_write_failed", task_id=task_id, error=str(exc))
+
     print(json.dumps(plan, indent=2))
     return 0
 
@@ -993,7 +1178,16 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 
 def cmd_inject_prompt(args: argparse.Namespace) -> int:
-    """Read base prompt from stdin, inject learned agent rules, print result."""
+    """Read base prompt from stdin, inject learned agent rules, print result.
+
+    Plan resolution order:
+      1. Try the task-local executor-plan cache (written by `executor-plan`).
+         If the fingerprint matches, reuse the cached plan entry — no
+         re-derivation, no re-rolled exploration dice, guaranteed agreement
+         with the model the executor was spawned under.
+      2. On cache miss / corruption / fingerprint drift, fall back to
+         building a single-segment plan live. Correctness is preserved.
+    """
     root = Path(args.root).resolve()
     graph_path = Path(args.graph)
     if not graph_path.exists():
@@ -1012,12 +1206,44 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
         print(json.dumps({"error": f"segment not found: {args.segment_id}"}))
         return 1
 
-    # Build executor plan for this segment
-    plan = build_executor_plan(root, args.task_type, [target_seg])
-    if not plan["segments"]:
-        print(json.dumps({"error": "no plan entry for segment"}))
-        return 1
-    plan_entry = plan["segments"][0]
+    plan_entry: dict | None = None
+    cache_status = "miss"
+
+    # Cache lookup — only attempt if we can derive task_id from graph path
+    task_id = _task_id_from_graph_path(graph_path)
+    if task_id:
+        try:
+            fingerprint = _router_inputs_fingerprint(root, args.task_type, graph_path)
+        except OSError:
+            fingerprint = None
+        if fingerprint:
+            cached_plan = _read_executor_plan_cache(root, task_id, fingerprint)
+            if cached_plan is not None:
+                for entry in cached_plan.get("segments", []):
+                    if entry.get("segment_id") == args.segment_id:
+                        plan_entry = entry
+                        cache_status = "hit"
+                        break
+                if plan_entry is None:
+                    cache_status = "stale_segment"
+            else:
+                cache_status = "fingerprint_drift"
+
+    if plan_entry is None:
+        # Fallback: live build for this single segment
+        plan = build_executor_plan(root, args.task_type, [target_seg])
+        if not plan["segments"]:
+            print(json.dumps({"error": "no plan entry for segment"}))
+            return 1
+        plan_entry = plan["segments"][0]
+
+    log_event(
+        root, "router_cache_lookup",
+        scope="inject_prompt",
+        task_id=task_id,
+        segment_id=args.segment_id,
+        status=cache_status,
+    )
 
     # Read base prompt from stdin
     import sys as _sys
@@ -1026,6 +1252,60 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
     # Build complete prompt
     result = build_executor_prompt(root, target_seg, plan_entry, base_prompt)
     print(result)
+    return 0
+
+
+def cmd_router_cache(args: argparse.Namespace) -> int:
+    """Inspect the executor-plan cache for a task.
+
+    Prints a JSON record with cache presence, fingerprint, freshness against
+    current inputs, and how many segments are stored. Useful for verifying
+    that `inject-prompt` will hit cache before spawning N executor agents.
+    """
+    root = Path(args.root).resolve()
+    graph_path = Path(args.graph)
+    task_id = _task_id_from_graph_path(graph_path) if graph_path.exists() else None
+    if not task_id:
+        print(json.dumps({"error": "could not derive task_id from --graph"}))
+        return 1
+
+    cache_path = _executor_plan_cache_path(root, task_id)
+    if not cache_path.exists():
+        print(json.dumps({
+            "task_id": task_id,
+            "cache_present": False,
+            "cache_path": str(cache_path),
+            "status": "absent",
+        }, indent=2))
+        return 0
+
+    try:
+        record = load_json(cache_path)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(json.dumps({
+            "task_id": task_id,
+            "cache_present": True,
+            "cache_path": str(cache_path),
+            "status": "corrupt",
+            "error": str(exc),
+        }, indent=2))
+        return 0
+
+    current_fp = _router_inputs_fingerprint(root, args.task_type, graph_path)
+    stored_fp = record.get("fingerprint", "")
+    fresh = stored_fp == current_fp and record.get("version") == _ROUTER_CACHE_VERSION
+    out = {
+        "task_id": task_id,
+        "cache_present": True,
+        "cache_path": str(cache_path),
+        "status": "fresh" if fresh else "stale",
+        "stored_fingerprint": stored_fp[:16],
+        "current_fingerprint": current_fp[:16],
+        "version": record.get("version"),
+        "generated_at": record.get("generated_at"),
+        "segment_count": len(record.get("plan", {}).get("segments", [])),
+    }
+    print(json.dumps(out, indent=2))
     return 0
 
 
@@ -1052,6 +1332,12 @@ def build_parser() -> argparse.ArgumentParser:
     ip.add_argument("--graph", required=True)
     ip.add_argument("--segment-id", required=True)
     ip.set_defaults(func=cmd_inject_prompt)
+
+    rc = subparsers.add_parser("router-cache-status", help="Inspect executor-plan cache freshness for a task")
+    rc.add_argument("--root", default=".")
+    rc.add_argument("--task-type", required=True)
+    rc.add_argument("--graph", required=True)
+    rc.set_defaults(func=cmd_router_cache)
 
     res = subparsers.add_parser("resolve", help="Resolve model/skip/route for one role")
     res.add_argument("role")
