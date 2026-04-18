@@ -2,7 +2,11 @@
 """Validate dynos-work task artifacts deterministically.
 
 Usage:
-  python3 hooks/validate_task_artifacts.py .dynos/task-YYYYMMDD-NNN
+  python3 hooks/validate_task_artifacts.py .dynos/task-YYYYMMDD-NNN [--no-gap]
+
+  --no-gap   Skip the plan_gap_analysis pass. Use this from execute
+             preflight when planning has already validated the same
+             plan — saves up to ~2000 file reads per call.
 """
 
 from __future__ import annotations
@@ -15,12 +19,17 @@ from lib_validate import validate_task_artifacts
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    run_gap = True
+    if "--no-gap" in args:
+        run_gap = False
+        args = [a for a in args if a != "--no-gap"]
+    if len(args) != 1:
         print(__doc__.strip())
         return 2
 
-    task_dir = Path(sys.argv[1]).resolve()
-    errors = validate_task_artifacts(task_dir, strict=True)
+    task_dir = Path(args[0]).resolve()
+    errors = validate_task_artifacts(task_dir, strict=True, run_gap=run_gap)
 
     # Auto-emit deterministic validation event to per-task token ledger
     try:
