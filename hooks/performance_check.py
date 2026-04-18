@@ -25,21 +25,50 @@ CODE_EXTENSIONS = {
 
 SKIP_DIRS = {".git", "node_modules", ".dynos", "__pycache__", "dist", "build", "vendor"}
 
+# Files only scan for N+1 / unbounded-query patterns if they import a real DB
+# driver or ORM. Without this gate the detector fires on `dict.get()` and
+# similar in-memory field access, which is the dominant pattern in
+# JSON-processing codebases.
+_DB_IMPORT_RE = re.compile(
+    r"\b(?:import|from)\s+("
+    r"sqlite3|psycopg2|psycopg|pymongo|sqlalchemy|MySQLdb|mysql\.connector|"
+    r"asyncpg|aiomysql|aiosqlite|motor|peewee|tortoise|databases|redis|"
+    r"django\.db|flask_sqlalchemy|google\.cloud\.(?:firestore|bigquery|datastore|spanner)"
+    r")\b"
+)
+
+
+def _file_uses_db(content: str) -> bool:
+    """Return True when the file imports a known DB driver or ORM."""
+    return bool(_DB_IMPORT_RE.search(content))
+
 
 # ---------------------------------------------------------------------------
 # Pattern detectors
 # ---------------------------------------------------------------------------
 
 def _detect_n_plus_one(content: str, filepath: str) -> list[dict[str, Any]]:
-    """Detect N+1 query patterns: DB calls inside loops."""
+    """Detect N+1 query patterns: DB calls inside loops.
+
+    Only fires when (a) the file imports a known DB driver/ORM, AND
+    (b) the call has a receiver name that looks like a DB handle. This
+    avoids flagging `dict.get()` and similar in-memory access.
+    """
+    if not _file_uses_db(content):
+        return []
+
     findings: list[dict[str, Any]] = []
     lines = content.splitlines()
     in_loop = False
     loop_start = 0
 
-    # Python: for/while loop containing .query, .execute, .get, .filter, .find
+    # Match <db-handle>.<query-method>( — receiver must be DB-shaped.
     db_call_re = re.compile(
-        r"\.(query|execute|find|findOne|findAll|get|filter|select|fetch|where|raw|all)\s*\(", re.IGNORECASE
+        r"\b(cursor|conn|connection|session|db|database|client|query|queryset|"
+        r"repo|repository|objects|Model|Entity)\.(query|execute|find|findOne|"
+        r"findAll|filter|select|fetch|where|raw|all|get|first|last|count|"
+        r"exists)\s*\(",
+        re.IGNORECASE,
     )
     loop_re = re.compile(r"^\s*(for |while |\.forEach|\.map\(|\.each\b)")
 
@@ -98,7 +127,26 @@ def _detect_missing_timeout(content: str, filepath: str) -> list[dict[str, Any]]
 
 
 def _detect_unbounded_query(content: str, filepath: str) -> list[dict[str, Any]]:
-    """Detect queries that return all rows without LIMIT/pagination."""
+    """Detect queries that return all rows without LIMIT/pagination.
+
+    Only fires when the file imports a known DB driver/ORM — the
+    `.all()`/`.findAll()` pattern otherwise matches list operations.
+    """
+    if not _file_uses_db(content):
+        # Allow raw SQL strings in any file — those are unambiguous.
+        findings: list[dict[str, Any]] = []
+        select_re = re.compile(r"SELECT\s+.*\s+FROM\s+", re.IGNORECASE)
+        for i, line in enumerate(content.splitlines(), 1):
+            if select_re.search(line) and "LIMIT" not in line.upper() and "COUNT" not in line.upper():
+                findings.append({
+                    "pattern": "unbounded_query",
+                    "location": f"{filepath}:{i}",
+                    "line": line.strip()[:120],
+                    "severity": "major",
+                    "description": "Query without LIMIT — may return unbounded rows",
+                })
+        return findings
+
     findings: list[dict[str, Any]] = []
     lines = content.splitlines()
 
