@@ -88,6 +88,8 @@ Spawn the determined auditors simultaneously, passing the resolved model for eac
 
 Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`.
 
+**Note on auditor write capability:** Most auditors are read-only (`Read, Grep, Glob` only — no Write/Edit). When such an auditor returns its report content as text in its message rather than writing the file itself, the orchestrator MUST materialize the file at the expected path using the Write tool. Auditors with Bash access (e.g. `security-auditor`, `code-quality-auditor`) can write their own reports via heredoc; check the agent's tools list before assuming.
+
 **Token & event capture (applies to all events in Steps 3-5):** After each subagent spawn AND each deterministic check, record the event:
 
 **For LLM subagent spawns** (auditors, repair-coordinator, repair executors):
@@ -274,6 +276,25 @@ python3 "${PLUGIN_HOOKS}/ctl.py" compute-reward .dynos/task-{id} --write
 ```
 
 This reads audit reports, repair-log, token-usage, execution-log, and manifest, then computes quality_score, cost_score, and efficiency_score deterministically. The model does NOT compute these scores — the Python runtime does.
+
+**Receipt: retrospective (MANDATORY).** After `compute-reward` writes the retrospective JSON, you MUST also write the retrospective receipt. Without it the `DONE` transition is blocked by `transition_task()` (the gate is in `hooks/lib_core.py`):
+
+```python
+from pathlib import Path
+from lib_receipts import receipt_retrospective
+from lib_core import load_json
+
+retro = load_json(Path(".dynos/task-{id}/task-retrospective.json"))
+receipt_retrospective(
+    task_dir=Path(".dynos/task-{id}"),
+    quality_score=retro["quality_score"],
+    cost_score=retro["cost_score"],
+    efficiency_score=retro["efficiency_score"],
+    total_tokens=retro["total_token_usage"],
+)
+```
+
+All five arguments are positional/required — the function signature is `receipt_retrospective(task_dir, quality_score, cost_score, efficiency_score, total_tokens) -> Path`.
 
 After the command writes the retrospective, the model adds the following fields that require model judgment (not arithmetic):
    - `model_used_by_agent`: map agent name to actual model used at spawn time (null if unavailable).
