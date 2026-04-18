@@ -252,7 +252,7 @@ If any condition is not met, proceed normally (no fast-track). Do not ask the us
 
 ## Step 3 — Spec Normalization
 
-**Fast-track combined spawn:** If `manifest.json` has `"fast_track": true`, skip the spawn and the spec validation. Spec is produced in Step 5 by the combined Spec + Plan planner spawn. Walk the manifest stage straight through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING` (no work between transitions; this preserves the state-machine invariants while collapsing the LLM work into a single spawn). Log: `{timestamp} [SKIP] spec-normalization-spawn — fast_track combined planner`. Skip the rest of this step and proceed to Step 4.
+**Fast-track combined spawn:** If `manifest.json` has `"fast_track": true`, skip the spawn and the spec validation. Spec is produced in Step 5 by the combined Spec + Plan planner spawn. **Do NOT advance the manifest stage here** — leave it at `SPEC_NORMALIZATION`. Walking the stage forward before `spec.md` exists breaks the artifact invariant in `hooks/lib_validate.py` (`_SPEC_REQUIRED_AFTER` requires `spec.md` once stage is `SPEC_REVIEW` or beyond), and any `/dynos-work:status` or `/dynos-work:resume` invocation in the window between Step 3 and Step 5 completing would observe `stage=PLANNING` with no spec on disk. The stage walk happens in Step 5 after `spec.md` is written. Log: `{timestamp} [SKIP] spec-normalization-spawn — fast_track combined planner (stage walk deferred to Step 5)`. Skip the rest of this step and proceed to Step 4.
 
 **Normal path:** Spawn the Planner subagent with instruction:
 
@@ -322,7 +322,9 @@ Hierarchical flow:
 3. Merge outputs into final `plan.md` and `execution-graph.json`.
 
 Fast-track combined flow (when `fast_track: true`):
-1. Spawn Planner (Opus) ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and `execution-graph.json` together. This replaces both Step 3 (Spec Normalization) and Step 5's normal planner spawn.
+1. **Stage precondition:** the manifest is still at `SPEC_NORMALIZATION` (Step 3 deferred the walk). Do NOT advance yet.
+2. Spawn Planner (Opus) ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and `execution-graph.json` together. This replaces both Step 3 (Spec Normalization) and Step 5's normal planner spawn.
+3. After the spawn returns AND `validate_task_artifacts` passes (see below), walk the stage forward through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING` (each transition is legal per `ALLOWED_STAGE_TRANSITIONS` in `hooks/lib_core.py`). Only advance once the artifacts that justify each stage exist on disk. Log each transition. Then continue with the post-validation flow below (which advances to `PLAN_REVIEW`).
 
 Standard flow:
 1. Spawn Planner (Opus) with instruction to generate `plan.md` and `execution-graph.json`.
