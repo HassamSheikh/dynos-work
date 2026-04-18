@@ -151,6 +151,14 @@ This command:
 5. Logs a `learned_agent_injected` event to `.dynos/events.jsonl`
 6. Prints the complete prompt to stdout
 
+**Routing cache (automatic — no extra steps):** `executor-plan` writes its result to `.dynos/task-{id}/router-cache/executor-plan.json` keyed by a fingerprint over every input that drives the plan (graph, policy, effectiveness scores, retrospectives, learned registry, benchmark history, prevention rules). Each `inject-prompt` call checks this cache first; on a fingerprint match it reuses the cached entry instead of re-deriving routing. This guarantees the model the executor was spawned under matches the model the prompt was injected for, even with epsilon-greedy exploration enabled. Cache lookups emit a `router_cache_lookup` event with `status: hit | fingerprint_drift | stale_segment`. Inspect freshness with:
+
+```bash
+python3 "${PLUGIN_HOOKS}/router.py" router-cache-status --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json
+```
+
+If status is `stale`, re-run `executor-plan` before continuing inject-prompt calls — otherwise per-segment routing will silently fall back to live builds.
+
 **Use the OUTPUT of this command as the prompt for the Agent tool spawn.** Do NOT construct the executor prompt yourself. Do NOT skip this step. If you spawn an executor without running inject-prompt first, the learned agent is silently ignored and the whole self-learning system is broken.
 
 If the injected prompt is weak, strengthen the base prompt before spawning. Do not accept vague executor instructions.

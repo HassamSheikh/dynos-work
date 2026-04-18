@@ -7,6 +7,14 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [Unreleased]
+
+### Performance / Determinism
+- **Router executor-plan cache**: `executor-plan` now writes a fingerprinted plan to `.dynos/task-{id}/router-cache/executor-plan.json`. Per-segment `inject-prompt` calls reuse the cached plan instead of rebuilding it from scratch, eliminating N redundant `RouterContext` rebuilds per task. Critically, this also eliminates re-rolled epsilon-greedy exploration dice between executor-plan and inject-prompt, guaranteeing the model the executor was spawned under matches the model the prompt was injected for. Cache fingerprint covers graph, policy, effectiveness scores, retrospectives, learned registry, benchmark history, and prevention rules — any drift forces a live rebuild. New `router-cache-status` subcommand reports cache freshness. New `router_cache_lookup` / `router_cache_write` events make cache hits/misses observable.
+- **`_benchmark_model_for_agent` honors `RouterContext`**: previously this helper always re-read the learned registry and benchmark history JSON files, even when called from inside a `resolve_model` path that already had both cached on its `RouterContext`. Now it accepts and uses the shared context.
+
+---
+
 ## [7.0.0] - 2026-04-16
 ### "Verified Foundry": Tool-Grounded Verification, Compliance, Least Privilege
 
