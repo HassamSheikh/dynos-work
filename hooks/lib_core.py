@@ -431,10 +431,21 @@ def _auto_log(task_dir: Path, from_stage: str, to_stage: str, forced: bool) -> N
 
 
 def _fire_task_completed(task_dir: Path) -> None:
-    """Run the post-completion pipeline: emit event → drain (policy engine, postmortem, dashboard, register).
+    """Run the post-completion pipeline: emit event synchronously, then dispatch
+    the drain in a detached background process and return immediately.
 
-    This is the ONLY trigger for the pipeline. The bash TaskCompleted hook
-    only handles auto-commit — it no longer emits events or drains.
+    The drain (policy_engine, postmortem, dashboard, register, improve,
+    agent_generator, benchmark_scheduler) used to run synchronously inside
+    transition_task, which kept the user blocked on system self-maintenance
+    even after coding/audit was complete. Latency was wasted on work that
+    aggregates value across many tasks rather than affecting any single task's
+    outcome.
+
+    Now: emit stays synchronous (must precede drain — drain has nothing to
+    consume otherwise), drain is fire-and-forget via Popen with
+    start_new_session=True so it survives the parent's exit and is detached
+    from the parent's process group. Output is redirected to
+    .dynos/events/drain.log so post-completion failures remain inspectable.
     """
     import subprocess
 
@@ -442,7 +453,7 @@ def _fire_task_completed(task_dir: Path) -> None:
     hooks_dir = root / "hooks"
     env_path = f"{hooks_dir}:{__import__('os').environ.get('PYTHONPATH', '')}"
 
-    # Step 1: Emit task-completed event with task identity
+    # Step 1: Emit task-completed event with task identity (sync — small write)
     task_id = task_dir.name
     payload = json.dumps({"task_id": task_id, "task_dir": str(task_dir)})
     try:
@@ -456,20 +467,30 @@ def _fire_task_completed(task_dir: Path) -> None:
     except Exception as exc:
         print(f"[dynos] event emit failed: {exc}")
 
-    # Step 2: Drain (flat chain: policy_engine, postmortem, dashboard, register)
+    # Step 2: Dispatch drain in a detached background process (fire-and-forget).
+    # The parent returns immediately; the child runs the full handler chain in
+    # the background, writing its output to .dynos/events/drain.log.
     try:
-        result = subprocess.run(
-            ["python3", str(hooks_dir / "eventbus.py"), "drain",
-             "--root", str(root)],
-            env={**__import__("os").environ, "PYTHONPATH": env_path},
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.stdout.strip():
-            print(f"[dynos] post-completion pipeline: {result.stdout.strip()}")
-        if result.returncode != 0 and result.stderr.strip():
-            print(f"[dynos] pipeline warning: {result.stderr.strip()}")
+        log_dir = root / ".dynos" / "events"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "drain.log"
+        # Open as binary append; the with-block closes the parent's fd after
+        # Popen has dup'd it for the child. The child keeps writing to the file.
+        with open(log_path, "ab") as log_fh:
+            log_fh.write(f"\n=== drain dispatched for {task_id} at {now_iso()} ===\n".encode())
+            log_fh.flush()
+            subprocess.Popen(
+                ["python3", str(hooks_dir / "eventbus.py"), "drain",
+                 "--root", str(root)],
+                env={**__import__("os").environ, "PYTHONPATH": env_path},
+                stdin=subprocess.DEVNULL,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
+            )
     except Exception as exc:
-        print(f"[dynos] event drain failed: {exc}")
+        print(f"[dynos] event drain dispatch failed: {exc}")
 
 
 def next_command_for_stage(stage: str) -> str:
