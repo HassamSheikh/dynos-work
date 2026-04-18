@@ -17,7 +17,9 @@ Works for ANY project type — route/model detection adapts to ecosystem.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -318,18 +320,102 @@ def analyze_data_model(plan_text: str, root: Path) -> dict[str, Any]:
 # Unified gap report
 # ---------------------------------------------------------------------------
 
+def _compute_fingerprint(root: Path, plan_text: str) -> str:
+    """Stable fingerprint over plan.md content + repo structure for caching.
+
+    Plan content drives the WHAT (which endpoints/tables to verify); repo
+    file mtimes drive the WHERE (which files to scan). If neither has
+    changed since the last gap analysis, the result is reusable.
+
+    We sample top-level directory mtimes rather than every file's mtime
+    because rglob over 2000 files for fingerprinting would defeat the
+    purpose. Top-level dir mtimes change on file add/remove, which is the
+    only repo-level change that can invalidate a cached result. Edits to
+    file CONTENT can also invalidate (a route definition changes), but
+    capturing all file content hashes here would re-introduce the cost
+    we're trying to avoid. The tradeoff: cache may be slightly stale on
+    pure content edits within an unchanged file set; the staleness window
+    is bounded by the next plan.md edit (which changes the fingerprint
+    and forces a re-scan).
+    """
+    h = hashlib.sha256()
+    h.update(plan_text.encode("utf-8", errors="ignore"))
+    h.update(b"\x00")
+    try:
+        for entry in sorted(root.iterdir()):
+            if entry.name in _SKIP_DIRS or entry.name.startswith("."):
+                continue
+            try:
+                st = entry.stat()
+                h.update(f"{entry.name}|{int(st.st_mtime)}|{st.st_size}\x00".encode("utf-8"))
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return h.hexdigest()
+
+
+def _cache_path(task_dir: Path) -> Path:
+    return task_dir / "gap-analysis-cache.json"
+
+
+def _read_cache(task_dir: Path, fingerprint: str) -> dict[str, Any] | None:
+    """Return cached report if fingerprint matches; None otherwise."""
+    cache_path = _cache_path(task_dir)
+    if not cache_path.exists():
+        return None
+    try:
+        cached = json.loads(cache_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    if cached.get("fingerprint") != fingerprint:
+        return None
+    report = cached.get("report")
+    return report if isinstance(report, dict) else None
+
+
+def _write_cache(task_dir: Path, fingerprint: str, report: dict[str, Any]) -> None:
+    """Persist gap-analysis report keyed by fingerprint. Best-effort."""
+    cache_path = _cache_path(task_dir)
+    try:
+        cache_path.write_text(json.dumps({
+            "fingerprint": fingerprint,
+            "report": report,
+        }))
+    except OSError:
+        pass  # Cache failure must not break gap analysis
+
+
 def run_gap_analysis(root: Path, task_dir: Path) -> dict[str, Any]:
-    """Run full gap analysis on plan.md. Returns structured report."""
+    """Run full gap analysis on plan.md. Returns structured report.
+
+    Cached per-task by a fingerprint over (plan.md content, top-level repo
+    dir mtimes). The same plan + same repo state produces the same report,
+    so the three per-task call sites (planning, plan-audit, execute
+    preflight) only pay the ~2000-file walk cost once. Set the env var
+    DYNOS_GAP_CACHE=0 to disable caching for debugging.
+    """
     plan_path = task_dir / "plan.md"
     if not plan_path.exists():
         return {"error": "plan.md not found", "api_contracts": None, "data_model": None}
 
     plan_text = plan_path.read_text(errors="ignore")
 
-    return {
+    cache_enabled = os.environ.get("DYNOS_GAP_CACHE", "1") != "0"
+    fingerprint = _compute_fingerprint(root, plan_text) if cache_enabled else ""
+    if cache_enabled:
+        cached = _read_cache(task_dir, fingerprint)
+        if cached is not None:
+            return cached
+
+    report = {
         "api_contracts": analyze_api_contracts(plan_text, root),
         "data_model": analyze_data_model(plan_text, root),
     }
+
+    if cache_enabled:
+        _write_cache(task_dir, fingerprint, report)
+    return report
 
 
 def findings_from_report(report: dict[str, Any]) -> list[str]:
