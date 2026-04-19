@@ -50,6 +50,17 @@ _POSTMORTEM_SKIP_REASONS = frozenset({
 })
 
 
+# Sidecar directory names. These names are the filename schema for the
+# per-spawn injected-prompt sidecars and MUST be used by both the writer
+# (router.py CLI subcommands) and the reader/asserter (receipt_* functions
+# in this module). Defining them here makes the contract unforgeable from
+# a single side — renaming requires updating this constant and every
+# importer.
+INJECTED_PROMPTS_DIR = "_injected-prompts"
+INJECTED_AUDITOR_PROMPTS_DIR = "_injected-auditor-prompts"
+INJECTED_PLANNER_PROMPTS_DIR = "_injected-planner-prompts"
+
+
 def hash_file(path: Path) -> str:
     """Return sha256 hex digest of a file's contents.
 
@@ -88,6 +99,9 @@ __all__ = [
     "receipt_calibration_applied",
     "RECEIPT_CONTRACT_VERSION",
     "CALIBRATION_POLICY_FILES",
+    "INJECTED_PROMPTS_DIR",
+    "INJECTED_AUDITOR_PROMPTS_DIR",
+    "INJECTED_PLANNER_PROMPTS_DIR",
 ]
 
 # Map receipt steps to human-readable execution-log entries
@@ -733,9 +747,65 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     tokens_used: int | None,
     model_used: str | None = None,
     agent_name: str | None = None,
+    injected_prompt_sha256: str | None = None,
 ) -> Path:
-    """Write receipt proving a planner subagent completed. Also records tokens."""
+    """Write receipt proving a planner subagent completed. Also records tokens.
+
+    When ``injected_prompt_sha256`` is non-None, asserts that the per-phase
+    planner injected-prompt sidecar at
+    ``task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR / f"{phase}.sha256"``
+    exists AND its contents (after stripping trailing whitespace) match the
+    supplied digest. On missing file or mismatch this function raises
+    ``ValueError`` naming the phase. The mismatch message contains the
+    literal substring ``hash mismatch`` so downstream tests can pin it.
+
+    When ``injected_prompt_sha256`` is ``None`` (the legacy path), no
+    assertion is performed and no sidecar file is required. This legacy
+    call mode is accepted but will be removed once all call sites are
+    migrated to invoke ``hooks/router.py planner-inject-prompt`` before the
+    receipt write. Put plainly: legacy call (no ``injected_prompt_sha256``)
+    is accepted but will be removed once all call sites are migrated.
+
+    The sidecar path is
+    ``task_dir/receipts/_injected-planner-prompts/{phase}.sha256`` — both
+    writer and reader import the directory name from
+    ``INJECTED_PLANNER_PROMPTS_DIR`` so the schema is defined in exactly
+    one place. The sidecar itself is written by the
+    ``planner-inject-prompt`` CLI subcommand in ``hooks/router.py``.
+    """
     step_name = f"planner-{phase}"
+
+    # Sidecar assertion — only active when the caller opted in by passing
+    # a non-None digest. Legacy callers (None) skip this entirely.
+    if injected_prompt_sha256 is not None:
+        if not isinstance(injected_prompt_sha256, str) or not injected_prompt_sha256:
+            raise ValueError(
+                "receipt_planner_spawn: injected_prompt_sha256 must be a "
+                "non-empty string when provided"
+            )
+        sidecar_file = (
+            task_dir / "receipts" / INJECTED_PLANNER_PROMPTS_DIR
+            / f"{phase}.sha256"
+        )
+        if not sidecar_file.exists():
+            raise ValueError(
+                f"receipt_planner_spawn: planner sidecar missing for phase "
+                f"{phase!r} at {sidecar_file}. Run `hooks/router.py "
+                f"planner-inject-prompt --task-id <id> --phase {phase}` first."
+            )
+        try:
+            on_disk = sidecar_file.read_text().strip()
+        except OSError as e:
+            raise ValueError(
+                f"receipt_planner_spawn: planner sidecar unreadable for "
+                f"phase {phase!r} at {sidecar_file}: {e}"
+            ) from e
+        if on_disk != injected_prompt_sha256:
+            raise ValueError(
+                f"receipt_planner_spawn: hash mismatch for phase {phase!r} "
+                f"— sidecar={on_disk!r}, payload={injected_prompt_sha256!r}."
+            )
+
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, f"planner-{phase}", model_used or "default", tokens_used)
     return write_receipt(
@@ -745,6 +815,7 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
         tokens_used=tokens_used,
         model_used=model_used,
         agent_name=agent_name,
+        injected_prompt_sha256=injected_prompt_sha256,
     )
 
 

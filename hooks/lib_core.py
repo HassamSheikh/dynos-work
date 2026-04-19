@@ -563,10 +563,31 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
             if read_receipt(task_dir, "plan-validated") is None:
                 gate_errors.append("receipt: plan-validated (plan was never validated)")
 
-        # CHECKPOINT_AUDIT requires executor-routing receipt
+        # CHECKPOINT_AUDIT requires executor-routing receipt + per-segment
+        # executor-{seg_id} receipts proving every planned segment actually
+        # completed. The per-segment enforcement only fires for transitions
+        # from TEST_EXECUTION or REPAIR_EXECUTION (the stages where
+        # per-segment completion is required). If executor-routing itself
+        # is missing we emit only the routing-missing message (no
+        # double-complaint). An empty segments list is treated as
+        # "no per-segment receipts required" and passes.
         if next_stage == "CHECKPOINT_AUDIT":
-            if read_receipt(task_dir, "executor-routing") is None:
+            routing_payload = read_receipt(task_dir, "executor-routing")
+            if routing_payload is None:
                 gate_errors.append("receipt: executor-routing (executor routing was never recorded)")
+            elif current_stage in {"TEST_EXECUTION", "REPAIR_EXECUTION"}:
+                segments = routing_payload.get("segments")
+                if isinstance(segments, list) and segments:
+                    for entry in segments:
+                        if not isinstance(entry, dict):
+                            continue
+                        seg_id = entry.get("segment_id")
+                        if not isinstance(seg_id, str) or not seg_id:
+                            continue
+                        if read_receipt(task_dir, f"executor-{seg_id}") is None:
+                            gate_errors.append(
+                                f"receipt: executor-{seg_id} (segment {seg_id} never completed)"
+                            )
 
         # REPAIR_PLANNING requires no finding has exceeded max retries.
         # This is the deterministic hard cap: the LLM cannot loop past 3
