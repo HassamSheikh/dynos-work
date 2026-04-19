@@ -366,18 +366,35 @@ def benchmark_policy_config(root: Path) -> dict:
 # Task state management
 # ---------------------------------------------------------------------------
 
-def get_tdd_required(manifest: dict) -> bool:
+def get_tdd_required(manifest: dict, *, strict: bool = False) -> bool:
     """Return whether the task requires TDD per its classification.
 
     Reads ``manifest["classification"]["tdd_required"]``. Missing keys (and
     non-dict ``classification``) are treated as ``False`` WITHOUT mutating the
     manifest. Truthy non-bool values are coerced to bool.
+
+    Strict mode (AC 2): when ``strict=True`` AND the manifest's
+    ``classification.risk_level`` is in ``{"high", "critical"}`` AND the
+    ``tdd_required`` key is absent (i.e. ``classification.get("tdd_required")
+    is None``), this raises ``ValueError`` with a message containing the
+    literal substring
+    ``"tdd_required must be set for risk_level=<level> (strict mode)"``.
+    Default behaviour (``strict=False``) is unchanged.
     """
     if not isinstance(manifest, dict):
         return False
     classification = manifest.get("classification")
     if not isinstance(classification, dict):
         return False
+    if strict:
+        risk_level = classification.get("risk_level")
+        if (
+            risk_level in {"high", "critical"}
+            and classification.get("tdd_required") is None
+        ):
+            raise ValueError(
+                f"tdd_required must be set for risk_level={risk_level} (strict mode)"
+            )
     return bool(classification.get("tdd_required", False))
 
 
@@ -1109,6 +1126,39 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
     """Transition a task to a new stage, enforcing allowed transitions."""
     manifest_path = task_dir / "manifest.json"
     manifest = load_json(manifest_path)
+
+    # ---- AC 2 entry hook: backfill tdd_required for any post-classify
+    # manifest that has a classification but no tdd_required field.
+    # Runs OUTSIDE the `if not force:` block so even forced transitions get
+    # the backfill — the new fail-closed gates (and downstream code) require
+    # the field to be populated by the time they read the manifest.
+    # Best-effort: failures emit a `tdd_required_backfill_failed` event but
+    # never block the transition.
+    try:
+        _classification = manifest.get("classification") if isinstance(manifest, dict) else None
+        _stage = manifest.get("stage") if isinstance(manifest, dict) else None
+        _SKIP_BACKFILL_STAGES = {"FOUNDRY_INITIALIZED", "CLASSIFY_AND_SPEC"}
+        if (
+            isinstance(_classification, dict)
+            and _classification.get("tdd_required") is None
+            and _stage not in _SKIP_BACKFILL_STAGES
+        ):
+            from lib_validate import apply_fast_track  # deferred import; lib_validate imports from lib_core
+            apply_fast_track(task_dir)
+            # Re-read manifest so subsequent gate code sees the backfilled field.
+            manifest = load_json(manifest_path)
+    except Exception as _backfill_exc:
+        try:
+            from lib_log import log_event as _log_backfill
+            _log_backfill(
+                task_dir.parent.parent,
+                "tdd_required_backfill_failed",
+                task=task_dir.name,
+                error=str(_backfill_exc),
+            )
+        except Exception:
+            pass  # Logging failure must never block the transition.
+
     current_stage = manifest.get("stage")
     if next_stage not in ALLOWED_STAGE_TRANSITIONS:
         raise ValueError(f"Unknown stage: {next_stage}")
@@ -1248,7 +1298,7 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
             default value used is ``1`` so a malformed receipt still refuses
             the transition.
             """
-            from lib_receipts import read_receipt  # noqa: F811 — lazy re-import per spec
+            from lib_receipts import read_receipt, hash_file as _hash_file  # noqa: F811 — lazy re-import per spec
 
             receipt_path = task_dir / "receipts" / "rules-check-passed.json"
             receipt = read_receipt(task_dir, "rules-check-passed")
@@ -1265,6 +1315,26 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                     f"Cannot transition {current_stage} -> {next_stage}: "
                     f"missing or failed rules-check-passed receipt at "
                     f"{receipt_path} (error_violations={n})"
+                )
+
+            # AC 16: live-hash drift check. After confirming error_violations
+            # == 0 above, recompute the live sha256 of prevention-rules.json
+            # and compare against the receipt-recorded hash. A mismatch means
+            # the rules file has changed since the receipt was written; the
+            # receipt is stale and rules-check must be re-run.
+            try:
+                live_rules_hash = _hash_file(_persistent_project_dir(task_dir.parent.parent) / "prevention-rules.json")
+            except FileNotFoundError:
+                live_rules_hash = "none"
+            receipt_rules_hash = receipt.get("rules_file_sha256", "none")
+            if not isinstance(receipt_rules_hash, str) or not receipt_rules_hash:
+                receipt_rules_hash = "none"
+            if receipt_rules_hash != live_rules_hash:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"rules_file drift "
+                    f"(receipt={receipt_rules_hash[:12]}, live={live_rules_hash[:12]}); "
+                    f"rerun rules-check"
                 )
 
         # ---- AC 9: CLASSIFY_AND_SPEC -> SPEC_NORMALIZATION requires

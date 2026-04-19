@@ -296,19 +296,17 @@ This reads audit reports, repair-log, token-usage, execution-log, and manifest, 
 ```python
 from pathlib import Path
 from lib_receipts import receipt_retrospective
-from lib_core import load_json
 
-retro = load_json(Path(".dynos/task-{id}/task-retrospective.json"))
-receipt_retrospective(
-    task_dir=Path(".dynos/task-{id}"),
-    quality_score=retro["quality_score"],
-    cost_score=retro["cost_score"],
-    efficiency_score=retro["efficiency_score"],
-    total_tokens=retro["total_token_usage"],
-)
+# Task-007 B-002: receipt_retrospective is now self-computing. It invokes
+# compute_reward(task_dir) internally to derive quality_score, cost_score,
+# efficiency_score, and total_tokens from the on-disk artifacts. This closes
+# the learning-pipeline input-trust hole: the caller cannot forge scores.
+# Passing quality_score / cost_score / efficiency_score / total_tokens raises
+# TypeError. The only argument is task_dir.
+receipt_retrospective(Path(".dynos/task-{id}"))
 ```
 
-All five arguments are positional/required — the function signature is `receipt_retrospective(task_dir, quality_score, cost_score, efficiency_score, total_tokens) -> Path`.
+The function signature is now `receipt_retrospective(task_dir) -> Path`. The writer reads `task-retrospective.json` and `manifest.json`, invokes `compute_reward(task_dir)` internally, and refuses on caller-supplied drift.
 
 After the command writes the retrospective, the model adds the following fields that require model judgment (not arithmetic):
    - `model_used_by_agent`: map agent name to actual model used at spawn time (null if unavailable).
@@ -364,8 +362,8 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem
 
 `memory/postmortem.py:generate_postmortem` (called by `postmortem.py generate`) now writes its own receipt internally as part of the same call. You do NOT need to write a receipt from this skill:
 
-- On successful generation it hashes the written `{task-id}.json` and `{task-id}.md` files and writes `receipt_postmortem_generated(task_dir, json_sha256, md_sha256, anomaly_count, pattern_count)` to `.dynos/task-{id}/receipts/postmortem-generated.json`.
-- When the deterministic engine determines there is literally nothing to learn, it short-circuits the postmortem write and instead emits `receipt_postmortem_skipped(task_dir, reason, retrospective_sha256, subsumed_by)` with `reason` from the enum `{"clean-task", "no-findings"}` and `subsumed_by` as a required list argument. The decision is deterministic: (a) `reason="clean-task"`, `subsumed_by=[]` when ≥2 auditors ran AND every auditor reported `findings: []`; (b) `reason="no-findings"`, `subsumed_by=[]` when exactly 1 auditor ran AND it reported `findings: []`; (c) in every other case — any auditor reporting ≥1 finding — the engine does NOT skip; it runs the LLM postmortem and writes `receipt_postmortem_generated` instead. If ANY auditor reports ≥1 finding (blocking or not), the LLM postmortem runs — no "quality-above-threshold" bypass. The `task-retrospective.json` is hashed at receipt-emission time.
+- On successful generation it calls `receipt_postmortem_generated(task_dir, postmortem_json_path)`; the writer itself opens the JSON, counts anomalies / recurring_patterns, and hashes both the JSON and its sibling markdown (task-007 B-001 self-compute contract). Writes `.dynos/task-{id}/receipts/postmortem-generated.json`.
+- When the deterministic engine determines there is literally nothing to learn, it short-circuits the postmortem write and instead emits `receipt_postmortem_skipped(task_dir, reason, retrospective_sha256, subsumed_by)` with `reason` from the enum `{"clean-task", "no-findings", "quality-above-threshold"}` and `subsumed_by` as a required list argument. The decision is deterministic: (a) `reason="clean-task"`, `subsumed_by=[]` when ≥2 auditors ran AND every auditor reported `findings: []`; (b) `reason="no-findings"`, `subsumed_by=[]` when exactly 1 auditor ran AND it reported `findings: []`; (c) in every other case — any auditor reporting ≥1 finding — the engine does NOT skip; it runs the LLM postmortem and writes `receipt_postmortem_generated` instead. The `task-retrospective.json` is hashed at receipt-emission time.
 - A receipt-write failure is logged as `postmortem_receipt_failed` / `postmortem_skip_receipt_failed` and does NOT corrupt the postmortem files themselves; the script returns its normal result so the audit pipeline keeps moving.
 
 This writes `postmortems/{task-id}.json` and `postmortems/{task-id}.md` to the persistent project directory. Append to log:

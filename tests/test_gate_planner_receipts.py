@@ -53,14 +53,19 @@ def _setup(tmp_path: Path, *, stage: str, fast_track: bool = False,
            slug: str = "PR") -> Path:
     """Build a task at the given stage. Fast-track flag can be set at the
     top level of the manifest OR under `classification.fast_track` — the
-    gate tolerates either (see seg-1 evidence)."""
+    gate tolerates either (see seg-1 evidence).
+
+    task-007 A-002: the transition_task entry hook calls apply_fast_track
+    when classification.tdd_required is absent, which would recompute +
+    overwrite the fast_track flag. Set tdd_required=False here so the
+    backfill short-circuits and preserves the test-supplied flag."""
     project = tmp_path / "project"
     td = project / ".dynos" / f"task-20260419-{slug}"
     td.mkdir(parents=True)
     manifest: dict = {
         "task_id": td.name,
         "stage": stage,
-        "classification": {"risk_level": "medium"},
+        "classification": {"risk_level": "medium", "tdd_required": False},
     }
     if fast_track:
         manifest["fast_track"] = True

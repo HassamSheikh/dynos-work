@@ -27,17 +27,21 @@ def _setup(tmp_path: Path, *, risk: str) -> Path:
     (td / "spec.md").write_text("# spec\n")
     (td / "plan.md").write_text("# plan\n")
     (td / "execution-graph.json").write_text('{"segments": []}\n')
+    # task-007 A-002: high/critical risk now backfills tdd_required=True,
+    # which would route the transition through TDD_REVIEW and mask the
+    # plan-audit drift check. Explicitly set tdd_required=False so this
+    # test exercises ONLY the drift check.
     (td / "manifest.json").write_text(json.dumps({
         "task_id": td.name,
         "stage": "PLAN_AUDIT",
-        "classification": {"risk_level": risk},
+        "classification": {"risk_level": risk, "tdd_required": False},
     }))
     return td
 
 
 def _write_fresh_audit(td: Path) -> None:
     # SEC-004: writer re-hashes artifacts from disk; no caller args.
-    receipt_plan_audit(td, tokens_used=100, finding_count=0)
+    receipt_plan_audit(td, tokens_used=100)
 
 
 def test_refuses_when_plan_edited_after_audit(tmp_path: Path) -> None:

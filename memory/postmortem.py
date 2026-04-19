@@ -406,18 +406,13 @@ def write_postmortem(root: Path, task_id: str) -> dict:
     # Emit receipt only if both files landed and we have a real task dir.
     # The receipt lives next to the task it post-mortems, not next to the
     # generated artifacts in the persistent project dir.
+    # Task-007 B-001: writer self-computes anomaly_count / pattern_count /
+    # json_sha256 / md_sha256 by opening postmortem_json_path. Callers
+    # supply only the JSON path; legacy positional kwargs raise TypeError.
     if task_dir.is_dir() and json_path.exists() and md_path.exists():
         try:
-            json_sha = hash_file(json_path)
-            md_sha = hash_file(md_path)
-            receipt_postmortem_generated(
-                task_dir,
-                json_sha,
-                md_sha,
-                int(anomaly_count),
-                int(pattern_count),
-            )
-        except (FileNotFoundError, OSError, ValueError) as exc:
+            receipt_postmortem_generated(task_dir, json_path)
+        except (FileNotFoundError, OSError, ValueError, TypeError) as exc:
             log_event(root, "postmortem_receipt_failed", task=task_id, error=str(exc))
 
     log_event(root, "postmortem_written", task=task_id, anomaly_count=anomaly_count, recurring_pattern_count=pattern_count, json_path=str(json_path))

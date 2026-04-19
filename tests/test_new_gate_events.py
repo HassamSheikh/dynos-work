@@ -61,7 +61,16 @@ def test_pre_exec_to_execution_tdd_tests_refusal_emits_event(tmp_path: Path):
         "stage": "PRE_EXECUTION_SNAPSHOT",
         "classification": {"risk_level": "high", "tdd_required": True},
     }))
-    receipt_plan_validated(td, 1, [1])
+    # receipt_plan_validated now hashes these artifacts; provide stubs.
+    (td / "spec.md").write_text("# Spec\n")
+    (td / "plan.md").write_text("# Plan\n")
+    (td / "execution-graph.json").write_text('{"task_id":"x","segments":[]}')
+    import os
+    os.environ["DYNOS_ALLOW_TEST_OVERRIDE"] = "1"
+    try:
+        receipt_plan_validated(td, validation_passed_override=True)
+    finally:
+        os.environ.pop("DYNOS_ALLOW_TEST_OVERRIDE", None)
     # Force evidence file but no receipt → refuse
     (td / "evidence").mkdir()
     (td / "evidence" / "tdd-tests.md").write_text("# TDD\n")

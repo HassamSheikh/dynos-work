@@ -61,7 +61,7 @@ def _setup(tmp_path: Path) -> Path:
     audit_dir.mkdir()
     (audit_dir / "report.json").write_text(json.dumps({"findings": []}))
     # The legacy DONE gate wants a `retrospective` receipt as well
-    receipt_retrospective(td, 0.95, 0.9, 0.9, 1000)
+    receipt_retrospective(td)
     # Task-005's new gate (CHECKPOINT_AUDIT->DONE) requires rules-check-passed.
     # New signature (AC 1): (task_dir, mode) — counts computed internally.
     receipt_rules_check_passed(td, "all")

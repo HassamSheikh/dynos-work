@@ -19,11 +19,19 @@ from lib_core import transition_task  # noqa: E402
 from lib_receipts import hash_file, receipt_tdd_tests  # noqa: E402
 
 
-def _setup(tmp_path: Path, *, tdd_required: bool | None = True) -> Path:
+@pytest.fixture(autouse=True)
+def _enable_test_override(monkeypatch):
+    """task-007 B-004: receipt_plan_validated honors
+    validation_passed_override only when DYNOS_ALLOW_TEST_OVERRIDE=1."""
+    monkeypatch.setenv("DYNOS_ALLOW_TEST_OVERRIDE", "1")
+
+
+def _setup(tmp_path: Path, *, tdd_required: bool | None = True,
+           risk_level: str = "high") -> Path:
     project = tmp_path / "project"
     td = project / ".dynos" / "task-20260419-TD"
     td.mkdir(parents=True)
-    classification = {"risk_level": "high"}
+    classification = {"risk_level": risk_level}
     if tdd_required is not None:
         classification["tdd_required"] = tdd_required
     (td / "manifest.json").write_text(json.dumps({
@@ -31,9 +39,13 @@ def _setup(tmp_path: Path, *, tdd_required: bool | None = True) -> Path:
         "stage": "PRE_EXECUTION_SNAPSHOT",
         "classification": classification,
     }))
+    # Self-computing receipt_plan_validated hashes these artifacts.
+    (td / "spec.md").write_text("# spec\n")
+    (td / "plan.md").write_text("# plan\n")
+    (td / "execution-graph.json").write_text('{"segments": []}\n')
     # plan-validated receipt is required for EXECUTION transition.
     from lib_receipts import receipt_plan_validated
-    receipt_plan_validated(td, 1, [1], validation_passed=True)
+    receipt_plan_validated(td, validation_passed_override=True)
     return td
 
 
@@ -54,12 +66,25 @@ def test_tdd_required_false_gate_inert(tmp_path: Path):
     assert manifest["stage"] == "EXECUTION"
 
 
-def test_tdd_required_absent_gate_inert(tmp_path: Path):
-    """AC 8: tdd_required absent → gate is inert."""
-    td = _setup(tmp_path, tdd_required=None)
+def test_tdd_required_absent_low_risk_gate_inert(tmp_path: Path):
+    """Task-007 AC 12: tdd_required absent + risk=low → apply_fast_track
+    backfills tdd_required=False → gate is inert. The historical "absent ==
+    inert" contract still holds for low-risk tasks; high/critical are handled
+    separately by test_tdd_required_absent_high_risk_backfilled_true."""
+    td = _setup(tmp_path, tdd_required=None, risk_level="low")
     transition_task(td, "EXECUTION")
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "EXECUTION"
+    assert manifest["classification"]["tdd_required"] is False
+
+
+def test_tdd_required_absent_high_risk_backfilled_true(tmp_path: Path):
+    """Task-007 AC 12: tdd_required absent + risk=high → apply_fast_track
+    backfills tdd_required=True → gate now enforces the tdd-tests receipt.
+    Without a receipt, the transition must refuse."""
+    td = _setup(tmp_path, tdd_required=None, risk_level="high")
+    with pytest.raises(ValueError, match="tdd-tests"):
+        transition_task(td, "EXECUTION")
 
 
 def test_tdd_required_true_with_valid_receipt_passes(tmp_path: Path):

@@ -147,6 +147,80 @@ def rules_healed_check(root: Path) -> bool:
     return True
 
 
+def calibration_recovery_sweep(root: Path, max_recoveries: int = 5) -> dict:
+    """AC 3: Recover tasks stranded at DONE without calibration receipt.
+
+    Scans ``.dynos/task-*`` directories. For each task where
+    ``manifest.stage == "DONE"`` AND neither ``receipts/calibration-applied.json``
+    nor ``receipts/calibration-noop.json`` is present, invokes the eventbus
+    drain in-process to produce the missing receipt.
+
+    Capped at ``max_recoveries`` per sweep to prevent runaway I/O. Emits one
+    ``calibration_recovery_attempted`` event per task visited with a
+    ``success: bool`` field. Per-task failures are logged and the sweep
+    continues — one stuck task should not block recovery of others.
+
+    Returns a summary dict: ``{recovered: int, attempted: int, errors: list}``.
+    """
+    import sys as _sys
+    tasks_root = root / ".dynos"
+    if not tasks_root.exists():
+        return {"recovered": 0, "attempted": 0, "errors": []}
+    recovered = 0
+    attempted = 0
+    errors: list[str] = []
+    for task_dir in sorted(tasks_root.glob("task-*")):
+        if attempted >= max_recoveries:
+            break
+        if not task_dir.is_dir():
+            continue
+        manifest_path = task_dir / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = load_json(manifest_path)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if manifest.get("stage") != "DONE":
+            continue
+        receipts = task_dir / "receipts"
+        if (receipts / "calibration-applied.json").exists():
+            continue
+        if (receipts / "calibration-noop.json").exists():
+            continue
+        attempted += 1
+        try:
+            _sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from eventbus import drain as _drain  # deferred
+            _drain(root)
+            # Check if drain wrote a calibration receipt this cycle
+            ok = (
+                (receipts / "calibration-applied.json").exists()
+                or (receipts / "calibration-noop.json").exists()
+            )
+            log_event(
+                root,
+                "calibration_recovery_attempted",
+                task=task_dir.name,
+                success=ok,
+            )
+            if ok:
+                recovered += 1
+        except Exception as exc:
+            errors.append(f"{task_dir.name}: {type(exc).__name__}: {exc}")
+            try:
+                log_event(
+                    root,
+                    "calibration_recovery_attempted",
+                    task=task_dir.name,
+                    success=False,
+                    error=str(exc),
+                )
+            except Exception:
+                pass
+    return {"recovered": recovered, "attempted": attempted, "errors": errors}
+
+
 def status_path(root: Path) -> Path:
     return maintenance_dir(root) / "status.json"
 
@@ -318,6 +392,7 @@ def cmd_run_once(args: argparse.Namespace) -> int:
     # stale sentinel via rules_healed_check.
     check_prevention_rules_bootstrap(root)
     rules_healed_check(root)
+    calibration_recovery_sweep(root)
     result = maintenance_cycle(root)
     print(json.dumps(result, indent=2))
     return 0
@@ -357,6 +432,7 @@ def cmd_run_loop(args: argparse.Namespace) -> int:
             # surfaces the sentinel.
             check_prevention_rules_bootstrap(root)
             rules_healed_check(root)
+            calibration_recovery_sweep(root)
             cycle = maintenance_cycle(root)
             try:
                 cycle_count = sum(1 for _ in open(log_path(root)))

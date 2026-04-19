@@ -19,6 +19,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 
+@pytest.fixture(autouse=True)
+def _enable_test_override(monkeypatch):
+    """Task-007 B-004: receipt_plan_validated now self-computes.
+    The test_override env gate must be set for these tests to supply
+    validation_passed_override without invoking the real validator.
+    """
+    monkeypatch.setenv("DYNOS_ALLOW_TEST_OVERRIDE", "1")
+
+
 def _setup_task(tmp_path: Path) -> Path:
     task_dir = tmp_path / ".dynos" / "task-001"
     task_dir.mkdir(parents=True)
@@ -37,13 +46,13 @@ class TestReceiptFreshness:
     def test_fresh_receipt_with_matching_hashes_returns_true(self, tmp_path: Path):
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated, plan_validated_receipt_matches
-        receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
+        receipt_plan_validated(task_dir, validation_passed_override=True)
         assert plan_validated_receipt_matches(task_dir) is True
 
     def test_spec_change_invalidates(self, tmp_path: Path):
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated, plan_validated_receipt_matches
-        receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
+        receipt_plan_validated(task_dir, validation_passed_override=True)
         (task_dir / "spec.md").write_text("# Spec\nv2 changed\n")
         # F1: drift now returns a descriptive string naming the artifact
         # (used by the EXECUTION gate to surface drift-vs-missing
@@ -57,7 +66,7 @@ class TestReceiptFreshness:
     def test_plan_change_invalidates(self, tmp_path: Path):
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated, plan_validated_receipt_matches
-        receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
+        receipt_plan_validated(task_dir, validation_passed_override=True)
         (task_dir / "plan.md").write_text("# Plan\nv2\n")
         result = plan_validated_receipt_matches(task_dir)
         assert isinstance(result, str) and "plan.md" in result, \
@@ -66,7 +75,7 @@ class TestReceiptFreshness:
     def test_graph_change_invalidates(self, tmp_path: Path):
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated, plan_validated_receipt_matches
-        receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
+        receipt_plan_validated(task_dir, validation_passed_override=True)
         (task_dir / "execution-graph.json").write_text('{"task_id":"x","segments":[]}\n')
         result = plan_validated_receipt_matches(task_dir)
         assert isinstance(result, str) and "execution-graph.json" in result, \
@@ -93,8 +102,7 @@ class TestReceiptFreshness:
         """A receipt where validation_passed=False must never short-circuit."""
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated, plan_validated_receipt_matches
-        receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[],
-                               validation_passed=False)
+        receipt_plan_validated(task_dir, validation_passed_override=False)
         assert plan_validated_receipt_matches(task_dir) is False
 
 
@@ -102,7 +110,7 @@ class TestUseReceiptCli:
     def test_use_receipt_skips_validation_when_fresh(self, tmp_path: Path):
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated
-        receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
+        receipt_plan_validated(task_dir, validation_passed_override=True)
 
         with mock.patch("validate_task_artifacts.validate_task_artifacts") as mock_v, \
              mock.patch("sys.argv", ["validate_task_artifacts.py", str(task_dir), "--use-receipt"]):
@@ -113,7 +121,7 @@ class TestUseReceiptCli:
     def test_use_receipt_falls_through_when_stale(self, tmp_path: Path):
         task_dir = _setup_task(tmp_path)
         from lib_receipts import receipt_plan_validated
-        receipt_plan_validated(task_dir, segment_count=0, criteria_coverage=[])
+        receipt_plan_validated(task_dir, validation_passed_override=True)
         # Drift the spec
         (task_dir / "spec.md").write_text("# Spec\ndrifted\n")
 

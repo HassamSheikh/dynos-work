@@ -36,8 +36,9 @@ def _setup(tmp_path: Path, *, risk: str, tdd_required: bool | None = None) -> Pa
 
 def _write_plan_audit(td: Path) -> None:
     """Write a plan-audit-check receipt — the writer re-hashes artifacts
-    from disk (SEC-004, no caller-supplied hashes)."""
-    receipt_plan_audit(td, tokens_used=100, finding_count=0)
+    from disk (SEC-004, no caller-supplied hashes). task-007 B-006 / AC 14
+    removed finding_count from the signature."""
+    receipt_plan_audit(td, tokens_used=100)
 
 
 def test_critical_without_receipt_refuses(tmp_path: Path):
@@ -53,7 +54,10 @@ def test_high_without_receipt_refuses(tmp_path: Path):
 
 
 def test_critical_with_receipt_passes(tmp_path: Path):
-    td = _setup(tmp_path, risk="critical")
+    # tdd_required=False keeps this test focused on the plan-audit risk gate;
+    # otherwise the task-007 tdd-required backfill would force a TDD_REVIEW
+    # detour and hide whether the plan-audit receipt actually satisfied the gate.
+    td = _setup(tmp_path, risk="critical", tdd_required=False)
     _write_plan_audit(td)
     transition_task(td, "PRE_EXECUTION_SNAPSHOT")
     assert json.loads((td / "manifest.json").read_text())["stage"] == "PRE_EXECUTION_SNAPSHOT"

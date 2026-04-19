@@ -63,24 +63,23 @@ receipt_planner_spawn(
     injected_prompt_sha256=PLAN_DIGEST,
 )
 
-# After validate_task_artifacts passes — REQUIRED before execute skill can run:
-receipt_plan_validated(
-    task_dir,
-    segment_count=N,                # from execution-graph.json segments length
-    criteria_coverage=[1, 2, ...],  # sorted unique criteria_ids covered
-    validation_passed=True,
-)
+# After validate_task_artifacts passes — REQUIRED before execute skill can run.
+# Task-007 B-004: receipt_plan_validated is now self-computing. The writer
+# invokes validate_task_artifacts + reads execution-graph.json itself; the
+# caller only supplies task_dir. Passing segment_count / criteria_coverage /
+# validation_passed raises TypeError. For test harnesses, set
+# DYNOS_ALLOW_TEST_OVERRIDE=1 to honor validation_passed_override.
+receipt_plan_validated(task_dir)
 
-# After spec-completion auditor (plan audit; only invoked for high/critical risk):
+# After spec-completion auditor (plan audit; task-007 A-006 restricts this
+# writer to high/critical risk tasks only — for low/medium risk the skill
+# logs plan_audit_skipped_by_risk and does not write the receipt):
 # The writer re-hashes spec.md / plan.md / execution-graph.json from disk
 # at write time (SEC-004: no caller-supplied hashes, no TOCTOU window).
 # The PLAN_AUDIT exit gate re-hashes these artifacts and refuses to advance
-# when any has drifted since the audit was recorded.
-receipt_plan_audit(
-    task_dir,
-    tokens_used=TOTAL_TOKENS,
-    finding_count=N,
-)
+# when any has drifted since the audit was recorded. finding_count was
+# removed from the v4 signature (task-007 B-006 / AC 14).
+receipt_plan_audit(task_dir, tokens_used=TOTAL_TOKENS)
 
 ```
 
@@ -508,17 +507,10 @@ from pathlib import Path
 from lib_receipts import receipt_plan_validated
 
 # Read segment count and criteria coverage from execution-graph.json
-import json
-graph = json.loads(Path(".dynos/task-{id}/execution-graph.json").read_text())
-segments = graph["segments"]
-criteria = sorted({c for s in segments for c in s.get("criteria_ids", [])})
-
-receipt_plan_validated(
-    task_dir=Path(".dynos/task-{id}"),
-    segment_count=len(segments),
-    criteria_coverage=criteria,
-    validation_passed=True,
-)
+# Task-007 B-004: receipt_plan_validated self-computes segment_count,
+# criteria_coverage, and validation_passed from execution-graph.json +
+# validate_task_artifacts. Caller-supplied kwargs raise TypeError.
+receipt_plan_validated(Path(".dynos/task-{id}"))
 ```
 
 Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_REVIEW` line — only the `[DONE]` line is the skill's responsibility):

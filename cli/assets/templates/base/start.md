@@ -54,16 +54,15 @@ receipt_planner_spawn(
     injected_prompt_sha256=PLAN_DIGEST,
 )
 
-# After spec-completion auditor (plan audit):
+# After spec-completion auditor (plan audit; task-007 A-006 restricts the
+# writer to high/critical risk only — for low/medium risk, skip and log
+# plan_audit_skipped_by_risk instead):
 # The writer re-hashes spec.md / plan.md / execution-graph.json from disk
 # at write time (SEC-004: no caller-supplied hashes, no TOCTOU window).
 # The PLAN_AUDIT exit gate re-hashes these artifacts at transition time and
 # refuses to advance when any has drifted since the audit was recorded.
-receipt_plan_audit(
-    task_dir,
-    tokens_used=TOTAL_TOKENS,
-    finding_count=N,
-)
+# finding_count was removed from the v4 signature (task-007 B-006 / AC 14).
+receipt_plan_audit(task_dir, tokens_used=TOTAL_TOKENS)
 
 ```
 

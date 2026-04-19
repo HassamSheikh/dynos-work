@@ -27,17 +27,17 @@ def _td(tmp_path: Path) -> Path:
     return td
 
 
-def test_contract_version_constant_is_three():
-    """AC 28: RECEIPT_CONTRACT_VERSION == 3."""
-    assert RECEIPT_CONTRACT_VERSION == 3
+def test_contract_version_constant_is_four():
+    """AC 28: RECEIPT_CONTRACT_VERSION == 4."""
+    assert RECEIPT_CONTRACT_VERSION == 4
 
 
-def test_write_receipt_embeds_contract_version_three(tmp_path: Path):
+def test_write_receipt_embeds_contract_version_four(tmp_path: Path):
     """AC 28: write_receipt embeds 3 in the payload."""
     td = _td(tmp_path)
     p = write_receipt(td, "spec-validated", criteria_count=1, spec_sha256="x" * 64)
     payload = json.loads(p.read_text())
-    assert payload["contract_version"] == 3
+    assert payload["contract_version"] == 4
 
 
 def _exercise_writer(name: str, td: Path):
@@ -45,14 +45,37 @@ def _exercise_writer(name: str, td: Path):
     sd = td / "receipts" / "_injected-prompts"
     sd.mkdir(parents=True, exist_ok=True)
 
+    # Task-007: minimal fixture for self-compute writers.
+    # Manifest needed for receipt_retrospective's compute_reward call.
+    (td / "manifest.json").write_text(json.dumps({
+        "task_id": td.name,
+        "stage": "DONE",
+        "created_at": "2026-04-19T00:00:00Z",
+        "raw_input": "test",
+        "classification": {"type": "refactor", "risk_level": "medium", "domains": ["backend"]},
+    }))
+    (td / "spec.md").write_text(
+        "## Task Summary\n\ntest\n## User Context\n\ntest\n"
+        "## Acceptance Criteria\n\n1. one\n\n## Implicit Requirements Surfaced\n\ntest\n"
+        "## Out of Scope\n\ntest\n## Assumptions\n\ntest\n## Risk Notes\n\ntest\n"
+    )
+    (td / "plan.md").write_text(
+        "## Technical Approach\n\nt\n## Reference Code\n\nt\n## Components / Modules\n\nt\n"
+        "## Data Flow\n\nt\n## Error Handling Strategy\n\nt\n## Test Strategy\n\nt\n"
+        "## Dependency Graph\n\nt\n## Open Questions\n\nt\n"
+    )
+    (td / "execution-graph.json").write_text('{"task_id":"test","segments":[]}')
+    pm_json = td / "postmortem.json"
+    pm_json.write_text('{"anomalies":[],"recurring_patterns":[]}')
+
     if name == "receipt_human_approval":
         return lib_receipts.receipt_human_approval(td, "SPEC_REVIEW", "a" * 64)
     if name == "receipt_spec_validated":
-        return lib_receipts.receipt_spec_validated(td, 1, "a" * 64)
+        return lib_receipts.receipt_spec_validated(td)
     if name == "receipt_tdd_tests":
         return lib_receipts.receipt_tdd_tests(td, ["a.py"], "a" * 64, 0, "haiku")
     if name == "receipt_postmortem_generated":
-        return lib_receipts.receipt_postmortem_generated(td, "a" * 64, "b" * 64, 0, 0)
+        return lib_receipts.receipt_postmortem_generated(td, pm_json)
     if name == "receipt_postmortem_analysis":
         return lib_receipts.receipt_postmortem_analysis(td, "a" * 64, 0, "b" * 64)
     if name == "receipt_postmortem_skipped":
@@ -61,10 +84,8 @@ def _exercise_writer(name: str, td: Path):
         return lib_receipts.receipt_calibration_applied(td, 0, 0, "a" * 64, "b" * 64)
     if name == "receipt_calibration_noop":
         return lib_receipts.receipt_calibration_noop(td, "no-retros", "a" * 64)
-    if name == "receipt_plan_routing":
-        return lib_receipts.receipt_plan_routing(td, None, None, "generic", None)
     if name == "receipt_plan_validated":
-        return lib_receipts.receipt_plan_validated(td, 0, [])
+        return lib_receipts.receipt_plan_validated(td, validation_passed_override=True)
     if name == "receipt_executor_routing":
         return lib_receipts.receipt_executor_routing(td, [])
     if name == "receipt_executor_done":
@@ -83,7 +104,8 @@ def _exercise_writer(name: str, td: Path):
             route_mode="generic", agent_path=None, injected_agent_sha256=None,
         )
     if name == "receipt_retrospective":
-        return lib_receipts.receipt_retrospective(td, 0.9, 0.9, 0.9, 100)
+        # Self-computing; compute_reward runs on the fixture task_dir.
+        return lib_receipts.receipt_retrospective(td)
     if name == "receipt_post_completion":
         return lib_receipts.receipt_post_completion(td, [])
     if name == "receipt_planner_spawn":
@@ -96,11 +118,11 @@ def _exercise_writer(name: str, td: Path):
         (psd / "spec.sha256").write_text(digest)
         return lib_receipts.receipt_planner_spawn(td, "spec", 0, injected_prompt_sha256=digest)
     if name == "receipt_plan_audit":
-        return lib_receipts.receipt_plan_audit(td, tokens_used=0, finding_count=0)
+        return lib_receipts.receipt_plan_audit(td, tokens_used=0)
     return None
 
 
-def test_every_writer_in_all_embeds_contract_version_three(tmp_path: Path, monkeypatch):
+def test_every_writer_in_all_embeds_contract_version_four(tmp_path: Path, monkeypatch):
     """AC 28: every receipt_* writer in __all__ writes contract_version=3."""
     td = _td(tmp_path)
     # receipt_rules_check_passed needs run_checks stubbed.
@@ -119,7 +141,7 @@ def test_every_writer_in_all_embeds_contract_version_three(tmp_path: Path, monke
             continue
         exercised += 1
         payload = json.loads(out.read_text())
-        assert payload["contract_version"] == 3, (
+        assert payload["contract_version"] == 4, (
             f"writer {name} did not embed contract_version=3 (got {payload.get('contract_version')!r})"
         )
     assert exercised >= 14, f"expected at least 14 writers exercised, got {exercised}"

@@ -20,16 +20,36 @@ from lib_log import log_event
 
 
 # Receipt contract version. Receipts written by this module embed
-# `contract_version: 3`. Readers MUST treat receipts without this field
+# `contract_version: 4`. Readers MUST treat receipts without this field
 # as v1 and accept them when `valid=true`.
 #
-# Bump rationale (v2 -> v3): new receipt semantics introduced —
+# Bump rationale (v3 -> v4): caller-falsification hardening. A family of
+# receipt writers now self-compute their payload fields from on-disk
+# artifacts instead of accepting caller-supplied counts/hashes. Callers
+# that still pass the legacy kwargs raise TypeError so an out-of-date
+# integration cannot silently ship a stale receipt. Affected writers:
+#   * receipt_postmortem_generated (reads postmortem JSON for counts +
+#     hashes sibling md via hash_file)
+#   * receipt_retrospective (invokes lib_validate.compute_reward)
+#   * receipt_spec_validated (parses spec.md, hashes it)
+#   * receipt_plan_validated (invokes validate_task_artifacts, reads
+#     execution-graph.json for segment_count / criteria_coverage)
+#   * receipt_plan_audit (finding_count removed from the payload)
+#   * receipt_post_completion (cross-checks each handler name against
+#     eventbus_handler events in events.jsonl)
+# receipt_audit_done additionally requires a real report_path when the
+# auditor ran in learned/ensemble mode (see ensemble_context kwarg).
+# Older v1/v2/v3 receipts remain readable; the bump signals that new
+# semantics are available and MIN_VERSION_PER_STEP floors gate receipts
+# whose consumers depend on the hardened fields.
+#
+# Bump rationale (v2 -> v3, prior): new receipt semantics introduced —
 #   * receipt_calibration_noop writer added (no-op calibration path)
 #   * receipt_audit_done self-verifies blocking_count vs report.json
 #   * receipt_rules_check_passed derives counts internally from rules_engine
 # The bump signals "new semantics available"; it does NOT retroactively
 # invalidate v2 receipts (see MIN_VERSION_PER_STEP floors below).
-RECEIPT_CONTRACT_VERSION = 3
+RECEIPT_CONTRACT_VERSION = 4
 
 
 # Files that compose the calibration policy snapshot used by the
@@ -183,7 +203,6 @@ __all__ = [
     "hash_file",
     "plan_validated_receipt_matches",
     "plan_audit_matches",
-    "receipt_plan_routing",
     "receipt_spec_validated",
     "receipt_plan_validated",
     "receipt_executor_routing",
@@ -213,7 +232,6 @@ __all__ = [
 
 # Map receipt steps to human-readable execution-log entries
 _LOG_MESSAGES: dict[str, str] = {
-    "plan-routing": "[ROUTE] plan-skill → {route_mode} agent={agent_name}",
     "spec-validated": "[DONE] spec validated — {criteria_count} acceptance criteria",
     "plan-validated": "[DONE] plan validated — {segment_count} segments, criteria {criteria_coverage}",
     "executor-routing": "[ROUTE] executor plan — {n_segments} segments routed",
@@ -439,12 +457,10 @@ def validate_chain(task_dir: Path) -> list[str]:
     manifest = json.loads(manifest_path.read_text())
     stage = manifest.get("stage", "")
 
-    # All possible receipts in order. ``plan-routing`` was pruned (AC 5):
-    # it is never a required gating receipt on any stage transition, and
-    # keeping it in this enumeration caused spurious DONE-gap reports
-    # against tasks that legitimately never wrote the receipt. The writer
-    # function ``receipt_plan_routing`` and its ``_LOG_MESSAGES`` entry
-    # remain in place for future reinstatement.
+    # All possible receipts in order. ``plan-routing`` was pruned fully
+    # (v4 AC 1): writer, __all__ export, and _LOG_MESSAGES entry have all
+    # been removed. The receipt was never a gating receipt on any stage
+    # transition and kept producing spurious DONE-gap reports.
     all_receipts = [
         "spec-validated",
         "plan-validated",
@@ -460,6 +476,14 @@ def validate_chain(task_dir: Path) -> list[str]:
     # `audit-routing` is required at DONE — without it we cannot enumerate
     # the dynamic audit receipts that should follow it.
     stage_requires: dict[str, list[str]] = {
+        # v4 AC 5: PLAN_REVIEW must carry planner-{discovery,spec,plan}.
+        # Missing → gap report so retrospectives flag unreceipted planner
+        # invocations before they progress further.
+        "PLAN_REVIEW": [
+            "planner-discovery",
+            "planner-spec",
+            "planner-plan",
+        ],
         "PRE_EXECUTION_SNAPSHOT": ["plan-validated"],
         "EXECUTION": ["plan-validated"],
         "TEST_EXECUTION": ["plan-validated", "executor-routing"],
@@ -537,6 +561,23 @@ def validate_chain(task_dir: Path) -> list[str]:
         if calib_applied is None and calib_noop is None:
             gaps.append("calibration (applied|noop)")
 
+    # v4 AC 8: gate-parity bridge. For pre-DONE / DONE audit stages,
+    # surface the same receipts that ``require_receipts_for_done`` would
+    # block the DONE transition on. This lets ``validate_chain`` diagnose
+    # ensemble / registry / postmortem gaps without duplicating the
+    # detection logic. We ADD the bridge gaps to the existing list so the
+    # prior behavior is preserved and the gate view is strictly richer.
+    if stage in ("CHECKPOINT_AUDIT", "FINAL_AUDIT", "DONE"):
+        try:
+            from lib_core import require_receipts_for_done  # noqa: PLC0415
+            bridge_gaps = require_receipts_for_done(task_dir)
+        except Exception as exc:  # pragma: no cover — diagnostic safety
+            bridge_gaps = [f"require_receipts_for_done failed: {exc}"]
+        if isinstance(bridge_gaps, list):
+            for g in bridge_gaps:
+                if g not in gaps:
+                    gaps.append(g)
+
     return gaps
 
 
@@ -544,24 +585,6 @@ def validate_chain(task_dir: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 # Convenience receipt writers for common steps
 # ---------------------------------------------------------------------------
-
-
-def receipt_plan_routing(
-    task_dir: Path,
-    agent_name: str | None,
-    agent_path: str | None,
-    route_mode: str,
-    agent_file_hash: str | None = None,
-) -> Path:
-    """Write receipt proving plan-skill routing was resolved."""
-    return write_receipt(
-        task_dir,
-        "plan-routing",
-        agent_name=agent_name,
-        agent_path=agent_path,
-        route_mode=route_mode,
-        agent_content_hash=agent_file_hash,
-    )
 
 
 def _hash_artifact(path: Path) -> str | None:
@@ -572,19 +595,40 @@ def _hash_artifact(path: Path) -> str | None:
         return None
 
 
-def receipt_spec_validated(
-    task_dir: Path,
-    criteria_count: int,
-    spec_sha256: str,
-) -> Path:
+def receipt_spec_validated(task_dir: Path, **_legacy: Any) -> Path:
     """Write receipt proving spec.md passed validation.
+
+    Self-computes ``criteria_count`` and ``spec_sha256`` from
+    ``task_dir/spec.md`` (v4 contract). Callers no longer supply these
+    fields — any legacy kwarg (``criteria_count`` or ``spec_sha256``)
+    raises ``TypeError`` so a stale integration cannot silently ship a
+    receipt whose counts/hash disagree with the on-disk spec.
 
     Payload includes {criteria_count, spec_sha256, valid: true}.
     """
-    if not isinstance(criteria_count, int) or criteria_count < 0:
-        raise ValueError("criteria_count must be a non-negative int")
-    if not isinstance(spec_sha256, str) or not spec_sha256:
-        raise ValueError("spec_sha256 must be a non-empty string")
+    if _legacy:
+        raise TypeError(
+            "receipt_spec_validated no longer accepts caller-supplied "
+            f"{sorted(_legacy)} — counts and hash are now self-computed "
+            "from task_dir/spec.md"
+        )
+    spec_path = task_dir / "spec.md"
+    if not spec_path.exists():
+        raise ValueError(
+            f"receipt_spec_validated: spec.md missing at {spec_path}"
+        )
+    # Deferred import to avoid an lib_validate <-> lib_receipts cycle
+    # (lib_validate.compute_reward imports read_receipt from here).
+    from lib_validate import parse_acceptance_criteria  # noqa: PLC0415
+
+    try:
+        spec_text = spec_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(
+            f"receipt_spec_validated: cannot read spec.md at {spec_path}: {exc}"
+        ) from exc
+    criteria_count = len(parse_acceptance_criteria(spec_text))
+    spec_sha256 = hash_file(spec_path)
     return write_receipt(
         task_dir,
         "spec-validated",
@@ -595,17 +639,80 @@ def receipt_spec_validated(
 
 def receipt_plan_validated(
     task_dir: Path,
-    segment_count: int,
-    criteria_coverage: list[int],
-    validation_passed: bool = True,
+    validation_passed_override: bool | None = None,
+    **_legacy: Any,
 ) -> Path:
     """Write receipt proving plan + execution graph passed validation.
+
+    Self-computes ``segment_count``, ``criteria_coverage``, and
+    ``validation_passed`` (v4 contract) by invoking
+    ``lib_validate.validate_task_artifacts`` and reading
+    ``execution-graph.json``. Callers no longer supply these fields —
+    passing any of ``segment_count``, ``criteria_coverage``, or
+    ``validation_passed`` raises ``TypeError``.
+
+    ``validation_passed`` is derived as ``len(errors) == 0``. As an
+    escape hatch for tests, ``validation_passed_override`` is honoured
+    IFF the environment variable ``DYNOS_ALLOW_TEST_OVERRIDE == "1"``;
+    otherwise the override is ignored and the computed value wins.
 
     Captures content hashes of spec.md, plan.md, and execution-graph.json
     so downstream consumers (e.g. execute preflight) can short-circuit
     re-validation when none of the artifacts have changed since the
     receipt was written.
     """
+    if _legacy:
+        raise TypeError(
+            "receipt_plan_validated no longer accepts caller-supplied "
+            f"{sorted(_legacy)} — segment_count, criteria_coverage, and "
+            "validation_passed are self-computed from task_dir artifacts"
+        )
+
+    # Deferred import: validate_task_artifacts lives in lib_validate,
+    # which itself imports read_receipt from this module. Importing at
+    # call time keeps the module-load graph acyclic.
+    from lib_validate import validate_task_artifacts  # noqa: PLC0415
+
+    errors = validate_task_artifacts(task_dir)
+    computed_passed = not errors
+
+    # Honour the test override only when the env knob is explicitly set.
+    if (
+        validation_passed_override is not None
+        and os.environ.get("DYNOS_ALLOW_TEST_OVERRIDE") == "1"
+    ):
+        validation_passed = bool(validation_passed_override)
+    else:
+        validation_passed = computed_passed
+
+    # Self-compute segment_count + criteria_coverage from the graph.
+    segment_count = 0
+    criteria_coverage: list[int] = []
+    graph_path = task_dir / "execution-graph.json"
+    if graph_path.exists():
+        try:
+            with graph_path.open("r", encoding="utf-8") as f:
+                graph = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"receipt_plan_validated: cannot parse execution-graph.json "
+                f"at {graph_path}: {exc}"
+            ) from exc
+        if isinstance(graph, dict):
+            segments = graph.get("segments", [])
+            if isinstance(segments, list):
+                segment_count = len(segments)
+                covered: set[int] = set()
+                for seg in segments:
+                    if not isinstance(seg, dict):
+                        continue
+                    for cid in seg.get("acceptance_criteria", []) or []:
+                        try:
+                            covered.add(int(cid))
+                        except (TypeError, ValueError):
+                            continue
+                criteria_coverage = sorted(covered)
+
     artifact_hashes = {
         "spec.md": _hash_artifact(task_dir / "spec.md"),
         "plan.md": _hash_artifact(task_dir / "plan.md"),
@@ -853,6 +960,7 @@ def receipt_audit_done(
     route_mode: str,
     agent_path: str | None,
     injected_agent_sha256: str | None,
+    ensemble_context: bool = False,
 ) -> Path:
     """Write receipt proving an auditor completed.
 
@@ -864,6 +972,13 @@ def receipt_audit_done(
 
     Raises ValueError on sidecar mismatch or missing. There is no env
     bypass — sidecar enforcement is unconditional.
+
+    v4 AC 17: when ``route_mode == "learned"`` or ``ensemble_context`` is
+    True the caller MUST supply a non-null ``report_path`` pointing at an
+    existing file (the voting harness materialises this file before the
+    receipt is written). The pre-escalation ensemble-vote bypass is thus
+    no longer available for learned/ensemble auditors — ship a real
+    report or fail the write.
 
     Also records token usage — same enforcement path as executor receipts.
     """
@@ -878,6 +993,22 @@ def receipt_audit_done(
         raise ValueError("injected_agent_sha256 must be str or None")
     if agent_path is not None and not isinstance(agent_path, str):
         raise ValueError("agent_path must be str or None")
+
+    # AC 17: learned/ensemble auditors require a real report file.
+    if route_mode == "learned" or ensemble_context:
+        if not isinstance(report_path, str) or not report_path:
+            raise ValueError(
+                "report_path required for learned/ensemble auditors "
+                f"(auditor={auditor_name!r}, route_mode={route_mode!r}, "
+                f"ensemble_context={ensemble_context!r})"
+            )
+        if not Path(report_path).exists():
+            raise ValueError(
+                "report_path required for learned/ensemble auditors "
+                f"(missing file at {report_path} for auditor "
+                f"{auditor_name!r}, route_mode={route_mode!r}, "
+                f"ensemble_context={ensemble_context!r})"
+            )
 
     if injected_agent_sha256 is not None:
         sidecar_file = (
@@ -983,20 +1114,43 @@ def receipt_audit_done(
     )
 
 
-def receipt_retrospective(
-    task_dir: Path,
-    quality_score: float,
-    cost_score: float,
-    efficiency_score: float,
-    total_tokens: int,
-) -> Path:
-    """Write receipt proving retrospective was computed."""
+def receipt_retrospective(task_dir: Path, **_legacy: Any) -> Path:
+    """Write receipt proving retrospective was computed.
+
+    Self-computes ``quality_score``, ``cost_score``, ``efficiency_score``,
+    and ``total_tokens`` (v4 contract) by invoking
+    ``lib_validate.compute_reward(task_dir)``. Callers no longer supply
+    these fields — any legacy kwarg (``quality_score``, ``cost_score``,
+    ``efficiency_score``, ``total_tokens``) raises ``TypeError``.
+    """
+    if _legacy:
+        raise TypeError(
+            "receipt_retrospective no longer accepts caller-supplied "
+            f"{sorted(_legacy)} — scores and tokens are now computed via "
+            "lib_validate.compute_reward(task_dir)"
+        )
+
+    # Deferred import to avoid an lib_validate <-> lib_receipts cycle
+    # (lib_validate.compute_reward imports read_receipt from this module).
+    from lib_validate import compute_reward  # noqa: PLC0415
+
+    result = compute_reward(task_dir)
+    if not isinstance(result, dict):
+        raise ValueError(
+            f"receipt_retrospective: compute_reward returned non-dict "
+            f"{type(result).__name__}"
+        )
+    # compute_reward uses `total_token_usage`; receipt schema uses
+    # `total_tokens`. Accept either to stay resilient to refactors.
+    total_tokens = result.get("total_tokens")
+    if total_tokens is None:
+        total_tokens = result.get("total_token_usage", 0)
     return write_receipt(
         task_dir,
         "retrospective",
-        quality_score=quality_score,
-        cost_score=cost_score,
-        efficiency_score=efficiency_score,
+        quality_score=result.get("quality_score", 0.0),
+        cost_score=result.get("cost_score", 0.0),
+        efficiency_score=result.get("efficiency_score", 0.0),
         total_tokens=total_tokens,
         retrospective_path=str(task_dir / "task-retrospective.json"),
     )
@@ -1011,7 +1165,95 @@ def receipt_post_completion(
     Per the v2 contract, post-completion no longer carries postmortem or
     pattern-update flags — those concerns belong to dedicated postmortem
     receipts (see `receipt_postmortem_*`).
+
+    v4 self-verify: when ``handlers_run`` is non-empty, cross-check each
+    declared handler name against ``eventbus_handler`` events in
+    ``events.jsonl``. Both the task-scoped log
+    (``task_dir/events.jsonl``) and the repo-level fallback
+    (``<root>/.dynos/events.jsonl``) are consulted because the eventbus
+    currently writes handler events without a ``task=`` attribution and
+    they land in the global file. Each entry in ``handlers_run`` must
+    resolve to an event whose ``handler`` or ``name`` field matches; a
+    missing handler raises
+    ``ValueError("post-completion handler not in events: <name>")``.
+
+    Fail-open on file trouble: if events.jsonl is absent, unreadable, or
+    unparseable, emit a single stderr warning and proceed with the write
+    so the post-completion pipeline is not held hostage to a missing log.
     """
+    if not isinstance(handlers_run, list):
+        raise ValueError("handlers_run must be a list")
+
+    if handlers_run:
+        root = task_dir.parent.parent
+        task_id = task_dir.name
+        repo_events = root / ".dynos" / "events.jsonl"
+        task_events = task_dir / "events.jsonl"
+
+        seen_handlers: set[str] = set()
+        any_file_readable = False
+        for path in (repo_events, task_events):
+            if not path.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for raw in f:
+                        raw = raw.strip()
+                        if not raw:
+                            continue
+                        try:
+                            record = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        if record.get("event") != "eventbus_handler":
+                            continue
+                        rec_task = record.get("task")
+                        # Repo-level handler events often carry no task
+                        # attribution (handlers run during drain, not
+                        # inside a task context). Accept records that
+                        # either match task_id OR have no task key at
+                        # all; reject mismatched tasks.
+                        if rec_task is not None and rec_task != task_id:
+                            continue
+                        for key in ("handler", "name"):
+                            name = record.get(key)
+                            if isinstance(name, str) and name:
+                                seen_handlers.add(name)
+                any_file_readable = True
+            except OSError as exc:
+                import sys as _sys
+                print(
+                    f"post-completion self-verify skipped: events.jsonl "
+                    f"unavailable ({path}: {exc})",
+                    file=_sys.stderr,
+                )
+
+        if not any_file_readable:
+            import sys as _sys
+            print(
+                "post-completion self-verify skipped: events.jsonl "
+                "unavailable",
+                file=_sys.stderr,
+            )
+        else:
+            for idx, entry in enumerate(handlers_run):
+                if not isinstance(entry, dict):
+                    raise ValueError(
+                        f"handlers_run[{idx}] must be a dict (got "
+                        f"{type(entry).__name__})"
+                    )
+                name = entry.get("name") or entry.get("handler")
+                if not isinstance(name, str) or not name:
+                    raise ValueError(
+                        f"handlers_run[{idx}] missing 'name'/'handler' key"
+                    )
+                if name not in seen_handlers:
+                    raise ValueError(
+                        f"post-completion handler not in events: {name}"
+                    )
+
     return write_receipt(
         task_dir,
         "post-completion",
@@ -1030,7 +1272,7 @@ _INJECTED_PROMPT_SHA256_MISSING = object()
 def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     task_dir: Path,
     phase: str,  # "discovery", "spec", or "plan"
-    tokens_used: int | None,
+    tokens_used: int,
     model_used: str | None = None,
     agent_name: str | None = None,
     injected_prompt_sha256: str = _INJECTED_PROMPT_SHA256_MISSING,  # type: ignore[assignment]
@@ -1074,6 +1316,14 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
             "injected_prompt_sha256 must be a non-empty sha256 hex string; "
             "legacy None path removed"
         )
+    # v4 AC 13: tokens_used MUST be a non-negative int. zero is accepted
+    # (signals a free / cached planner invocation) but emits a telemetry
+    # event so the anomaly surfaces in retrospectives.
+    if not isinstance(tokens_used, int) or isinstance(tokens_used, bool) or tokens_used < 0:
+        raise ValueError(
+            f"receipt_planner_spawn: tokens_used must be non-negative int "
+            f"(got {tokens_used!r})"
+        )
     step_name = f"planner-{phase}"
 
     # Sidecar assertion — unconditional now. Every caller must first run
@@ -1106,8 +1356,19 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
             f"— sidecar={on_disk!r}, payload={injected_prompt_sha256!r}."
         )
 
-    if tokens_used and tokens_used > 0:
+    if tokens_used > 0:
         _record_tokens(task_dir, f"planner-{phase}", model_used or "default", tokens_used)
+    else:
+        # Zero-token planner spawn is a diagnostic signal: emit an event
+        # so retrospectives can flag suspected cache-hits, handler
+        # stubs, or upstream attribution drift without failing the write.
+        root = task_dir.parent.parent
+        log_event(
+            root,
+            "planner_spawn_zero_tokens",
+            task=task_dir.name,
+            phase=phase,
+        )
     return write_receipt(
         task_dir,
         step_name,
@@ -1121,9 +1382,9 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
 
 def receipt_plan_audit(
     task_dir: Path,
-    tokens_used: int | None,
-    finding_count: int = 0,
+    tokens_used: int,
     model_used: str | None = None,
+    **_legacy: Any,
 ) -> Path:
     """Write receipt proving plan audit (spec-completion check) ran.
 
@@ -1142,9 +1403,27 @@ def receipt_plan_audit(
     fails ``plan_audit_matches`` downstream with a distinctive drift
     reason.
 
+    v4 AC 14 (task-007): ``finding_count`` has been removed from the
+    signature and the receipt payload. Callers that still pass it raise
+    ``TypeError`` — the plan-audit result is surfaced via dedicated audit
+    receipts, not embedded in this spawn receipt. ``tokens_used`` must
+    be a non-negative int.
+
     Also records token usage to ``token-usage.json`` when ``tokens_used``
     is positive.
     """
+    if _legacy:
+        raise TypeError(
+            "receipt_plan_audit no longer accepts caller-supplied "
+            f"{sorted(_legacy)} — finding_count was removed from the v4 "
+            "plan-audit receipt payload"
+        )
+    if not isinstance(tokens_used, int) or isinstance(tokens_used, bool) or tokens_used < 0:
+        raise ValueError(
+            f"receipt_plan_audit: tokens_used must be non-negative int "
+            f"(got {tokens_used!r})"
+        )
+
     def _hash_or_missing(rel: str) -> str:
         p = task_dir / rel
         if not p.exists():
@@ -1158,13 +1437,12 @@ def receipt_plan_audit(
     plan_sha256 = _hash_or_missing("plan.md")
     graph_sha256 = _hash_or_missing("execution-graph.json")
 
-    if tokens_used and tokens_used > 0:
+    if tokens_used > 0:
         _record_tokens(task_dir, "plan-audit-check", model_used or "default", tokens_used)
     return write_receipt(
         task_dir,
         "plan-audit-check",
         tokens_used=tokens_used,
-        finding_count=finding_count,
         model_used=model_used,
         spec_sha256=spec_sha256,
         plan_sha256=plan_sha256,
@@ -1247,20 +1525,55 @@ def receipt_human_approval(
 
 def receipt_postmortem_generated(
     task_dir: Path,
-    json_sha256: str,
-    md_sha256: str,
-    anomaly_count: int,
-    pattern_count: int,
+    postmortem_json_path: Path | str,
+    **_legacy: Any,
 ) -> Path:
-    """Write receipt proving a postmortem (json+md pair) was generated."""
-    if not isinstance(json_sha256, str) or not json_sha256:
-        raise ValueError("json_sha256 must be a non-empty string")
-    if not isinstance(md_sha256, str) or not md_sha256:
-        raise ValueError("md_sha256 must be a non-empty string")
-    if not isinstance(anomaly_count, int) or anomaly_count < 0:
-        raise ValueError("anomaly_count must be a non-negative int")
-    if not isinstance(pattern_count, int) or pattern_count < 0:
-        raise ValueError("pattern_count must be a non-negative int")
+    """Write receipt proving a postmortem (json+md pair) was generated.
+
+    v4 self-compute contract: counts and hashes are derived from the
+    on-disk postmortem JSON. Callers pass the path to the postmortem
+    JSON; the writer:
+      * reads it to count ``anomalies`` and ``recurring_patterns``
+      * hashes the JSON via ``hash_file``
+      * locates the sibling ``<stem>.md`` and hashes it when present
+        (writes the literal string ``"none"`` when absent)
+    Legacy kwargs (``json_sha256``, ``md_sha256``, ``anomaly_count``,
+    ``pattern_count``) raise ``TypeError`` so a stale integration cannot
+    silently ship counts that disagree with the file on disk.
+    """
+    if _legacy:
+        raise TypeError(
+            "receipt_postmortem_generated no longer accepts caller-supplied "
+            f"{sorted(_legacy)} — counts and hashes are self-computed from "
+            "postmortem_json_path"
+        )
+    json_path = Path(postmortem_json_path)
+    if not json_path.exists():
+        raise ValueError(
+            f"postmortem JSON missing at {json_path}"
+        )
+    try:
+        with json_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"receipt_postmortem_generated: cannot parse postmortem JSON at "
+            f"{json_path}: {exc}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"receipt_postmortem_generated: postmortem JSON at {json_path} "
+            f"must be an object (got {type(payload).__name__})"
+        )
+    anomalies = payload.get("anomalies", [])
+    patterns = payload.get("recurring_patterns", [])
+    anomaly_count = len(anomalies) if isinstance(anomalies, list) else 0
+    pattern_count = len(patterns) if isinstance(patterns, list) else 0
+
+    json_sha256 = hash_file(json_path)
+    md_path = json_path.with_suffix(".md")
+    md_sha256 = hash_file(md_path) if md_path.exists() else "none"
+
     return write_receipt(
         task_dir,
         "postmortem-generated",
