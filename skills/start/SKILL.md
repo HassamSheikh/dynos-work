@@ -372,6 +372,20 @@ After `spec.md` is written, run deterministic spec validation:
 
 If any rule fails, send the Planner back to fix `spec.md` before presenting it.
 
+**Receipt: spec-validated (MANDATORY).** Once the four checks pass, count the acceptance criteria and hash `spec.md`, then write the receipt. The downstream `human-approval-SPEC_REVIEW` gate (Step 6) compares the artifact hash against `spec.md` at transition time, but `receipt_spec_validated` records the validated state for retrospectives:
+
+```python
+from pathlib import Path
+from lib_receipts import receipt_spec_validated, hash_file
+
+spec_path = Path(".dynos/task-{id}/spec.md")
+receipt_spec_validated(
+    task_dir=Path(".dynos/task-{id}"),
+    criteria_count=N,                       # numbered count from spec.md
+    spec_sha256=hash_file(spec_path),
+)
+```
+
 Update `manifest.json` stage to `SPEC_REVIEW`. If available in this repo, use:
 
 ```text
@@ -386,15 +400,17 @@ python3 hooks/ctl.py transition .dynos/task-{id} SPEC_REVIEW
 
 **Normal path:** Present `spec.md` to the user and ask for approval.
 
-- If approved: append `{timestamp} [HUMAN] SPEC_REVIEW — approved` to the execution log.
-- If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, and present the updated spec again.
+- If approved: run the `approve-stage` ctl command below. It hashes the current `spec.md`, writes the `human-approval-SPEC_REVIEW` receipt with that hash, then transitions SPEC_REVIEW → PLANNING in one atomic step. Do NOT write a manual `[HUMAN]` log line — `approve-stage` is the only path that satisfies the receipt-gate in `transition_task` (which compares the receipt's `artifact_sha256` against the live `spec.md` at transition time and refuses with `human-approval-SPEC_REVIEW` / `hash mismatch` substrings on drift).
+- If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, write a new `receipt_spec_validated`, and present the updated spec again. Do NOT call `approve-stage` until the user re-approves the regenerated spec.
 - If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Spec rejected by user`, and stop.
 
-When approved, update `manifest.json` stage to `PLANNING`. If available in this repo, use:
+When approved:
 
 ```text
-python3 hooks/ctl.py transition .dynos/task-{id} PLANNING
+python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW
 ```
+
+Exit code 0 means the receipt was written and the stage advanced to PLANNING. Exit code 1 means the gate refused — the stderr text identifies the cause (missing artifact, hash drift, illegal transition). Do not retry without addressing the reported cause; in particular, do not call `python3 hooks/ctl.py transition ... --force` to bypass — that would advance the stage without a receipt and break the audit chain.
 
 ---
 
@@ -490,8 +506,16 @@ This gate always runs. For fast-track tasks it acts as the combined Spec + Plan 
 
 Present the artifact(s) to the user and ask for approval.
 
-- If approved: append `{timestamp} [HUMAN] PLAN_REVIEW — approved` to the execution log (for fast-track also append `[HUMAN] SPEC_REVIEW — approved (combined gate)`).
-- If changes are requested: append the feedback, respawn planning (combined Spec + Plan phase for fast-track, otherwise standard planning), re-run deterministic artifact validation, and present the updated artifact(s) again.
+- If approved (normal path): run `python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW`. This hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, and atomically advances PLAN_REVIEW → PLAN_AUDIT. Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`.
+- If approved (fast-track combined gate): the manifest is currently at SPEC_REVIEW (Step 5 walked it through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING → PLAN_REVIEW`). Run `approve-stage` twice in order — first for the spec, then for the plan:
+
+  ```text
+  python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW
+  python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW
+  ```
+
+  Each call hashes the live artifact, writes the matching receipt, and advances one stage. Both must succeed; if either returns exit 1, address the reported cause before retrying.
+- If changes are requested: append the feedback, respawn planning (combined Spec + Plan phase for fast-track, otherwise standard planning), re-run deterministic artifact validation, and present the updated artifact(s) again. Do NOT call `approve-stage` until the user re-approves the regenerated artifact(s) — the gate compares the receipt hash to the live file at transition time, so an approval against an out-of-date hash will be refused with `hash mismatch`.
 - If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Plan rejected by user`, and stop.
 
 ---
@@ -541,8 +565,31 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
    - No production source files may be modified in this step.
 3. Present the test file paths and summary to the user.
 4. If changes are requested, rerun the testing executor and the same deterministic validation.
-5. When approved, append `{timestamp} [HUMAN] TDD_REVIEW — approved` to the execution log.
-6. Commit the approved tests to the snapshot branch before any production code is written.
+5. When validation passes (and before asking for human approval), write the TDD receipt:
+
+   ```python
+   from pathlib import Path
+   from lib_receipts import receipt_tdd_tests, hash_file
+
+   evidence_path = Path(".dynos/task-{id}/evidence/tdd-tests.md")
+   receipt_tdd_tests(
+       task_dir=Path(".dynos/task-{id}"),
+       test_file_paths=[...],                       # list of test file paths from this run
+       tests_evidence_sha256=hash_file(evidence_path),
+       tokens_used=TOTAL_TOKENS,                    # from testing-executor spawn usage
+       model_used="opus",                           # or whichever model was used
+   )
+   ```
+
+6. When the user approves the test suite, transition out of TDD_REVIEW via the `approve-stage` ctl command. This hashes `evidence/tdd-tests.md`, writes the `human-approval-TDD_REVIEW` receipt with that hash, and advances TDD_REVIEW → PRE_EXECUTION_SNAPSHOT in one atomic step. Do NOT append a manual `[HUMAN]` log line — the receipt + approve-stage path is the only one the state machine accepts (the gate refuses with `human-approval-TDD_REVIEW` / `hash mismatch` substrings on drift):
+
+   ```text
+   python3 hooks/ctl.py approve-stage .dynos/task-{id} TDD_REVIEW
+   ```
+
+   Exit code 0 means the receipt was written and the stage advanced. Exit code 1 means the gate refused — the stderr text identifies the cause. Do not bypass with `transition --force`.
+
+7. Commit the approved tests to the snapshot branch before any production code is written.
 
 ---
 

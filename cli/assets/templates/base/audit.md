@@ -50,7 +50,26 @@ For each auditor in the plan:
 - If `action: "spawn"`: spawn with the specified `model` (null = default)
 - Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
 
-**Learned Auditor Injection (MANDATORY):** When an auditor has `route_mode` of `"replace"` or `"alongside"` and a non-null `agent_path`, you MUST read the learned agent file at that path and append its contents to the auditor's spawn prompt. This is the same enforcement as the execute skill's inject-prompt. If the file exists, read it, strip frontmatter, and append under a `## Learned Auditor Instructions` heading. Log the injection to the execution log. If the file does not exist, log `[WARN] learned auditor file missing: {agent_path}` and spawn with generic instructions.
+**Learned Auditor Injection (MANDATORY — deterministic via router):** Build the auditor's spawn prompt with `dynorouter.py audit-inject-prompt`. Pipe the base prompt over stdin and capture stdout as the prompt you pass to the Agent tool — do NOT read the learned agent file yourself or build the prompt by hand. The router does the frontmatter stripping, applies the learned-auditor block under the literal heading `## Learned Auditor Instructions`, computes the SHA-256 of the exact bytes it prints, and atomically writes the per-model sidecar at `.dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256` (with a companion `.txt` of the same bytes; when no model is specified the literal `default` is substituted in the filename).
+
+```bash
+echo "{base prompt for this auditor}" | PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynorouter.py" audit-inject-prompt \
+  --root . \
+  --task-type {task_type} \
+  --audit-plan .dynos/task-{id}/audit-plan.json \
+  --auditor-name {name} \
+  --model {model}
+```
+
+The command logs `learned_auditor_applied`, `learned_auditor_missing`, or `learned_auditor_error` to `.dynos/events.jsonl` depending on whether the named auditor's `agent_path` exists and could be read. On any IO failure the command exits 1 and prints a JSON error to stderr — fix the cause (audit-plan path, auditor name, or `--task-type`) before retrying.
+
+After each auditor spawn returns, you MUST call `receipt_audit_done` with the `route_mode`, `agent_path`, and `injected_agent_sha256` from the audit plan entry for that auditor. The captured digest must be the contents of the sidecar file the router just wrote — read it back rather than re-hashing:
+
+```bash
+INJECTED_AGENT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256)
+```
+
+`receipt_audit_done(...)` re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The `receipt_audit_routing` writer also enforces these fields per-entry, so any auditor entry missing `injected_agent_sha256` (when non-generic) or `agent_path` will hard-fail at the routing-receipt write.
 
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 

@@ -395,12 +395,29 @@ function reconcileStage(taskDir, manifest) {
             const match = last.match(/→\s*(\S+)/);
             if (match) {
                 const logStage = match[1];
-                // Only override if the log stage is "later" than manifest
+                // Only override if the log stage is "later" than manifest.
+                // Keys mirror hooks/lib_core.py:STAGE_ORDER.
                 const STAGE_ORDER = {
-                    FOUNDRY_INITIALIZED: 0, DISCOVERY: 1, SPEC_NORMALIZATION: 2,
-                    SPEC_REVIEW: 3, PLANNING: 4, PLAN_REVIEW: 5, PLAN_AUDIT: 6,
-                    PRE_EXECUTION_SNAPSHOT: 7, EXECUTION: 8, TEST_EXECUTION: 9,
-                    CHECKPOINT_AUDIT: 10, AUDITING: 11, FINAL_AUDIT: 12, DONE: 13,
+                    FOUNDRY_INITIALIZED: 0,
+                    CLASSIFY_AND_SPEC: 1,
+                    SPEC_NORMALIZATION: 2,
+                    SPEC_REVIEW: 3,
+                    PLANNING: 4,
+                    PLAN_REVIEW: 5,
+                    PLAN_AUDIT: 6,
+                    TDD_REVIEW: 7,
+                    PRE_EXECUTION_SNAPSHOT: 8,
+                    EXECUTION_GRAPH_BUILD: 9,
+                    EXECUTION: 10,
+                    TEST_EXECUTION: 11,
+                    CHECKPOINT_AUDIT: 12,
+                    FINAL_AUDIT: 13,
+                    REPAIR_PLANNING: 14,
+                    REPAIR_EXECUTION: 15,
+                    DONE: 16,
+                    CALIBRATED: 17,
+                    CANCELLED: 18,
+                    FAILED: 19,
                 };
                 if ((STAGE_ORDER[logStage] ?? 0) > (STAGE_ORDER[stage] ?? 0)) {
                     return { ...manifest, stage: logStage };

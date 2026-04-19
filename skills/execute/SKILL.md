@@ -153,7 +153,7 @@ This command:
 2. Looks up the routing decision for this segment (model, route_mode, agent_path)
 3. If `route_mode` is `replace` or `alongside`, reads the learned agent `.md` file and appends its rules to the prompt
 4. Appends prevention rules from the project's history
-5. Logs a `learned_agent_injected` event to `.dynos/events.jsonl`
+5. Logs a `learned_agent_applied` event to `.dynos/events.jsonl`
 6. Prints the complete prompt to stdout
 
 **Routing cache (automatic — no extra steps):** `executor-plan` writes its result to `.dynos/task-{id}/router-cache/executor-plan.json` keyed by a fingerprint over every input that drives the plan (graph, policy, effectiveness scores, retrospectives, learned registry, benchmark history, prevention rules). Each `inject-prompt` call checks this cache first; on a fingerprint match it reuses the cached entry instead of re-deriving routing. This guarantees the model the executor was spawned under matches the model the prompt was injected for, even with epsilon-greedy exploration enabled. Cache lookups emit a `router_cache_lookup` event with `status: hit | fingerprint_drift | stale_segment`. Inspect freshness with:
@@ -165,6 +165,14 @@ python3 "${PLUGIN_HOOKS}/router.py" router-cache-status --root . --task-type {ta
 If status is `stale`, re-run `executor-plan` before continuing inject-prompt calls — otherwise per-segment routing will silently fall back to live builds.
 
 **Use the OUTPUT of this command as the prompt for the Agent tool spawn.** Do NOT construct the executor prompt yourself. Do NOT skip this step. If you spawn an executor without running inject-prompt first, the learned agent is silently ignored and the whole self-learning system is broken.
+
+**Sidecar capture (MANDATORY).** `cmd_inject_prompt` writes the SHA-256 of the exact bytes it printed to stdout to `.dynos/task-{id}/receipts/_injected-prompts/{seg-id}.sha256` (single-line lowercase hex digest, no trailing newline) plus a companion `.txt` of the same bytes. Both files are written atomically via tempfile + `os.replace`, so a retry overwrites cleanly. Immediately after `inject-prompt` returns, read the sidecar:
+
+```bash
+INJECTED_PROMPT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-prompts/{seg-id}.sha256)
+```
+
+You MUST pass this captured digest to `receipt_executor_done(...)` below as `injected_prompt_sha256`. The receipt writer asserts the same sidecar exists and matches; a mismatch raises `ValueError` with the literal substrings `injected_prompt_sha256 sidecar missing` or `injected_prompt_sha256 mismatch`.
 
 If the injected prompt is weak, strengthen the base prompt before spawning. Do not accept vague executor instructions.
 
@@ -187,7 +195,7 @@ The base prompt for each executor (before inject-prompt) must include:
 
 Do NOT pass the full `spec.md` or `plan.md` to executors.
 
-**Receipt: executor-{seg-id} (MANDATORY):** After each executor completes, write its receipt:
+**Receipt: executor-{seg-id} (MANDATORY):** After each executor completes, write its receipt. Pass the `injected_prompt_sha256` you captured from the sidecar above. The legacy boolean kwarg has been removed; the writer now derives generic vs learned from `bool(agent_name)`:
 
 ```python
 from lib_receipts import receipt_executor_done
@@ -196,14 +204,14 @@ receipt_executor_done(
     segment_id="{seg-id}",
     executor_type="{executor from plan}",
     model_used="{model from plan or null}",
-    learned_agent_injected={True if route_mode was replace/alongside else False},
     agent_name="{agent_name from plan or None}",
     evidence_path=".dynos/task-{id}/evidence/{seg-id}.md",
     tokens_used={total_tokens from Agent result or None},
+    injected_prompt_sha256="{INJECTED_PROMPT_SHA256 captured from sidecar}",
 )
 ```
 
-This proves the segment completed with the correct routing. The receipt is checked by `validate-receipts`.
+This proves the segment completed with the correct routing AND that the bytes the executor saw are the same bytes the orchestrator hashed. The writer asserts the sidecar at `receipts/_injected-prompts/{seg-id}.sha256` exists and matches; on mismatch it raises `ValueError`. The receipt is checked by `validate-receipts`.
 
 After each batch (or cached resolution) completes, record events and verify:
 

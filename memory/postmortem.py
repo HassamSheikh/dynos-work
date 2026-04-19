@@ -20,6 +20,11 @@ from lib_core import (
     project_dir,
 )
 from lib_log import log_event
+from lib_receipts import (
+    hash_file,
+    receipt_postmortem_generated,
+    receipt_postmortem_skipped,
+)
 from lib_defaults import (
     DEFAULT_TOKEN_BUDGET,
     GENERIC_ROUTING_PATTERN_THRESHOLD,
@@ -312,13 +317,56 @@ def generate_postmortem(root: Path, task_id: str) -> dict:
 
 
 def write_postmortem(root: Path, task_id: str) -> dict:
-    """Generate and write postmortem files."""
+    """Generate and write postmortem files.
+
+    Emits one of two receipts on the task's `.dynos/task-{id}/` dir:
+      - `postmortem-generated` when files are written
+      - `postmortem-skipped` when the task is clean enough that postmortem
+        analysis would yield nothing actionable
+    """
     pm_dir = postmortems_dir(root)
     pm_dir.mkdir(parents=True, exist_ok=True)
 
+    # The receipt's task_dir is the *task* dir, NOT the persistent project dir.
+    task_dir = root / ".dynos" / task_id
+    retro_path = task_dir / "task-retrospective.json"
+
     postmortem = generate_postmortem(root, task_id)
     if "error" in postmortem:
+        # No retrospective on disk — this is a hard error, not a skip.
+        # The skip-receipt enum requires an existing retrospective hash.
         return postmortem
+
+    anomaly_count = len(postmortem.get("anomalies", []))
+    pattern_count = len(postmortem.get("recurring_patterns", []))
+    quality_score = float(postmortem.get("quality_summary", {}).get("quality_score", 0) or 0)
+    total_findings = int(postmortem.get("quality_summary", {}).get("total_findings", 0) or 0)
+
+    # SKIP branch: a task that produced no findings, no anomalies, no recurring
+    # patterns, AND scored at/above the quality threshold cannot teach us
+    # anything new. Emit the skipped receipt against the task dir and return
+    # without writing postmortem files.
+    skip_reason: str | None = None
+    if quality_score >= 0.8 and anomaly_count == 0 and pattern_count == 0 and total_findings == 0:
+        skip_reason = "clean-task"
+    elif total_findings == 0 and anomaly_count == 0 and pattern_count == 0:
+        skip_reason = "no-findings"
+    elif quality_score >= 0.8 and anomaly_count == 0 and pattern_count == 0:
+        skip_reason = "quality-above-threshold"
+
+    if skip_reason is not None and retro_path.exists() and task_dir.is_dir():
+        try:
+            retro_sha = hash_file(retro_path)
+            receipt_postmortem_skipped(task_dir, skip_reason, retro_sha)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            log_event(root, "postmortem_skip_receipt_failed", task=task_id, error=str(exc))
+        return {
+            "task_id": task_id,
+            "skipped": True,
+            "skip_reason": skip_reason,
+            "anomaly_count": anomaly_count,
+            "recurring_pattern_count": pattern_count,
+        }
 
     # Write JSON
     json_path = pm_dir / f"{task_id}.json"
@@ -329,13 +377,30 @@ def write_postmortem(root: Path, task_id: str) -> dict:
     md = _render_markdown(postmortem)
     md_path.write_text(md)
 
-    log_event(root, "postmortem_written", task=task_id, anomaly_count=len(postmortem.get("anomalies", [])), recurring_pattern_count=len(postmortem.get("recurring_patterns", [])), json_path=str(json_path))
+    # Emit receipt only if both files landed and we have a real task dir.
+    # The receipt lives next to the task it post-mortems, not next to the
+    # generated artifacts in the persistent project dir.
+    if task_dir.is_dir() and json_path.exists() and md_path.exists():
+        try:
+            json_sha = hash_file(json_path)
+            md_sha = hash_file(md_path)
+            receipt_postmortem_generated(
+                task_dir,
+                json_sha,
+                md_sha,
+                int(anomaly_count),
+                int(pattern_count),
+            )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            log_event(root, "postmortem_receipt_failed", task=task_id, error=str(exc))
+
+    log_event(root, "postmortem_written", task=task_id, anomaly_count=anomaly_count, recurring_pattern_count=pattern_count, json_path=str(json_path))
     return {
         "task_id": task_id,
         "json_path": str(json_path),
         "md_path": str(md_path),
-        "anomaly_count": len(postmortem.get("anomalies", [])),
-        "recurring_pattern_count": len(postmortem.get("recurring_patterns", [])),
+        "anomaly_count": anomaly_count,
+        "recurring_pattern_count": pattern_count,
     }
 
 

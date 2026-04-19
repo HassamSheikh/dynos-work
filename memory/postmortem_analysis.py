@@ -26,6 +26,12 @@ from lib_core import (
     now_iso,
     write_json,
 )
+from lib_log import log_event
+from lib_receipts import (
+    hash_file,
+    receipt_postmortem_analysis,
+    receipt_postmortem_skipped,
+)
 
 VALID_CATEGORIES = {"sec", "cq", "dc", "perf", "comp", "ui", "db", "test", "process", "unknown"}
 VALID_SEVERITIES = {"high", "medium", "low"}
@@ -462,27 +468,54 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
 
     Reads the LLM's JSON output and writes prevention rules.
     Returns summary of what was applied.
+
+    Emits one of two receipts on the task dir:
+      - `postmortem-analysis` when rules are merged (or analysis sanitized)
+      - `postmortem-skipped` when there is no analysis input to apply
     """
     task_dir = Path(task_dir).resolve()
-    retro = _read_artifact(task_dir / "task-retrospective.json") or {}
+    retro_path = task_dir / "task-retrospective.json"
+    retro = _read_artifact(retro_path) or {}
     task_id = retro.get("task_id", "unknown")
 
     # Determine project root from task dir
     root = task_dir.parent.parent
     persistent = _persistent_project_dir(root)
 
+    # SKIP branch: no analysis at all to consume. We still emit a receipt
+    # because the orchestrator must be able to prove this stage ran.
+    if not isinstance(analysis, dict) or not analysis:
+        if retro_path.exists() and task_dir.is_dir():
+            try:
+                retro_sha = hash_file(retro_path)
+                receipt_postmortem_skipped(task_dir, "no-findings", retro_sha)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                log_event(root, "postmortem_analysis_skip_receipt_failed", task=task_id, error=str(exc))
+        return {"task_id": task_id, "rules_added": 0, "analysis_written": False, "skipped": True, "skip_reason": "no-findings"}
+
     # Sanitize model output before persisting or promoting rules.
     sanitized = _normalize_analysis(analysis)
     sanitized["analyzed_at"] = now_iso()
     sanitized["task_id"] = task_id
-    write_json(task_dir / "postmortem-analysis.json", sanitized)
+    analysis_path = task_dir / "postmortem-analysis.json"
+    write_json(analysis_path, sanitized)
 
     # Extract and merge prevention rules
     new_rules = sanitized.get("prevention_rules", [])
-    if not new_rules:
-        return {"task_id": task_id, "rules_added": 0, "analysis_written": True}
-
     rules_path = persistent / "prevention-rules.json"
+    if not new_rules:
+        # Analysis was sanitized to zero usable rules — still emit the
+        # analysis receipt so the chain is provable. rules_sha256_after
+        # reflects the on-disk state of the rules file post-merge (which
+        # in this branch is identical to pre-merge).
+        try:
+            analysis_sha = hash_file(analysis_path)
+            rules_sha_after = hash_file(rules_path) if rules_path.exists() else "0" * 64
+            if task_dir.is_dir():
+                receipt_postmortem_analysis(task_dir, analysis_sha, 0, rules_sha_after)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            log_event(root, "postmortem_analysis_receipt_failed", task=task_id, error=str(exc))
+        return {"task_id": task_id, "rules_added": 0, "analysis_written": True}
     # Lost-update protection: two processes (e.g., two worktrees, or one
     # task completing while another is mid-analysis) can both call
     # apply_analysis concurrently. write_json is atomic (tempfile + rename)
@@ -533,6 +566,18 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 write_json(rules_path, {"rules": current_rules, "updated_at": now_iso()})
         finally:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+    # Hash analysis + rules POST-merge so the receipt records the on-disk
+    # state that downstream verifiers will see. If any hashing or receipt
+    # write fails, log it but do not raise — the merge already succeeded
+    # and re-running this branch would double-count rules.
+    try:
+        analysis_sha = hash_file(analysis_path)
+        rules_sha_after = hash_file(rules_path) if rules_path.exists() else "0" * 64
+        if task_dir.is_dir():
+            receipt_postmortem_analysis(task_dir, analysis_sha, int(added), rules_sha_after)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        log_event(root, "postmortem_analysis_receipt_failed", task=task_id, error=str(exc))
 
     return {"task_id": task_id, "rules_added": added, "analysis_written": True}
 

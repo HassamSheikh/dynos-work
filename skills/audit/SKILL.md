@@ -62,7 +62,26 @@ For each auditor in the plan:
 - If `action: "spawn"`: spawn with the specified `model` (null = default)
 - Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
 
-**Learned Auditor Injection (MANDATORY):** When an auditor has `route_mode` of `"replace"` or `"alongside"` and a non-null `agent_path`, you MUST read the learned agent file at that path and append its contents to the auditor's spawn prompt. This is the same enforcement as the execute skill's inject-prompt. If the file exists, read it, strip frontmatter, and append under a `## Learned Auditor Instructions` heading. Log the injection to the execution log. If the file does not exist, log `[WARN] learned auditor file missing: {agent_path}` and spawn with generic instructions.
+**Learned Auditor Injection (MANDATORY — deterministic via router):** Build the auditor's spawn prompt with `router.py audit-inject-prompt`. Pipe the base prompt over stdin and capture stdout as the prompt you pass to the Agent tool — do NOT read the learned agent file yourself or build the prompt by hand. The router does the frontmatter stripping, applies the learned-auditor block under the literal heading `## Learned Auditor Instructions`, computes the SHA-256 of the exact bytes it prints, and atomically writes the per-model sidecar at `.dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256` (with a companion `.txt` of the same bytes; when no model is specified the literal `default` is substituted in the filename).
+
+```bash
+echo "{base prompt for this auditor}" | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/router.py" audit-inject-prompt \
+  --root . \
+  --task-type {task_type} \
+  --audit-plan .dynos/task-{id}/audit-plan.json \
+  --auditor-name {name} \
+  --model {model}
+```
+
+The command logs `learned_auditor_applied`, `learned_auditor_missing`, or `learned_auditor_error` to `.dynos/events.jsonl` depending on whether the named auditor's `agent_path` exists and could be read. On any IO failure the command exits 1 and prints a JSON error to stderr — fix the cause (audit-plan path, auditor name, or `--task-type`) before retrying.
+
+After each auditor spawn returns, you MUST call `receipt_audit_done` with the `route_mode`, `agent_path`, and `injected_agent_sha256` from the audit plan entry for that auditor. The captured digest must be the contents of the sidecar file the router just wrote — read it back rather than re-hashing:
+
+```bash
+INJECTED_AGENT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256)
+```
+
+`receipt_audit_done(...)` re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The new `receipt_audit_routing` writer also enforces these fields per-entry, so any auditor entry missing `injected_agent_sha256` (when non-generic) or `agent_path` will hard-fail at the routing-receipt write.
 
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
@@ -341,6 +360,12 @@ Append to log:
 PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/postmortem.py" generate --root . --task-id {task-id}
 ```
 
+`memory/postmortem.py:generate_postmortem` (called by `postmortem.py generate`) now writes its own receipt internally as part of the same call. You do NOT need to write a receipt from this skill:
+
+- On successful generation it hashes the written `{task-id}.json` and `{task-id}.md` files and writes `receipt_postmortem_generated(task_dir, json_sha256, md_sha256, anomaly_count, pattern_count)` to `.dynos/task-{id}/receipts/postmortem-generated.json`.
+- When the deterministic engine determines there is nothing to learn (clean task, no findings, or quality above threshold) it short-circuits the postmortem write and instead emits `receipt_postmortem_skipped(task_dir, reason, retrospective_sha256)` with `reason` from the enum `{"clean-task", "no-findings", "quality-above-threshold"}`. The `task-retrospective.json` is hashed at receipt-emission time.
+- A receipt-write failure is logged as `postmortem_receipt_failed` / `postmortem_skip_receipt_failed` and does NOT corrupt the postmortem files themselves; the script returns its normal result so the audit pipeline keeps moving.
+
 This writes `postmortems/{task-id}.json` and `postmortems/{task-id}.md` to the persistent project directory. Append to log:
 ```
 {timestamp} [DONE] postmortem — anomalies={N}, recurring_patterns={N}
@@ -361,6 +386,12 @@ echo '${AGENT_JSON_OUTPUT}' | PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" pytho
 ```
 
 This writes `postmortem-analysis.json` to the task dir and merges new prevention rules into `prevention-rules.json`. These rules are automatically included in `project_rules.md` by the policy engine on the next task.
+
+`memory/postmortem_analysis.py:apply_analysis` (called by `postmortem_analysis.py apply`) emits its own receipt internally — do NOT write one from this skill:
+
+- When the agent JSON is empty or non-dict (the orchestrator passed nothing to apply), it emits `receipt_postmortem_skipped(task_dir, "no-findings", retrospective_sha256)`.
+- When the sanitized analysis yields zero usable rules, it emits `receipt_postmortem_analysis(task_dir, analysis_sha256, rules_added=0, rules_sha256_after=...)` (using the current on-disk hash of `prevention-rules.json`, or 64 zeros when the file does not exist).
+- When the merge appends rules, it emits `receipt_postmortem_analysis(task_dir, analysis_sha256, rules_added, rules_sha256_after)` AFTER the fcntl lock is released so the recorded hash captures the on-disk state visible to other readers.
 
 Append to log:
 ```

@@ -12,6 +12,8 @@ import argparse
 import json
 import hashlib
 import math
+import os
+import tempfile
 from pathlib import Path
 
 from lib_core import (
@@ -963,7 +965,7 @@ def build_executor_prompt(
                 )
                 log_event(
                     root,
-                    "learned_agent_injected",
+                    "learned_agent_applied",
                     agent_name=agent_name,
                     agent_path=str(agent_path),
                     route_mode=route_mode,
@@ -1199,6 +1201,53 @@ def cmd_resolve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Atomically write *data* to *path* via tempfile + os.replace.
+
+    Creates parent directories with ``mkdir(parents=True, exist_ok=True)``.
+    A retry overwrites the previous file because ``os.replace`` is atomic.
+    The temp file lives next to the destination so the replace is on the
+    same filesystem (otherwise it would not be atomic on POSIX).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=f".tmp.{os.getpid()}",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except OSError:
+        # Best-effort cleanup of the orphaned tempfile, then re-raise.
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _write_prompt_sidecar(sidecar_dir: Path, base_name: str, prompt_bytes: bytes) -> str:
+    """Write `{base_name}.sha256` and `{base_name}.txt` sidecars atomically.
+
+    Returns the hex digest. The `.sha256` file contains a single line of
+    lowercase hex with no trailing newline (per AC 13). The `.txt` file
+    contains the raw bytes that hash to that digest.
+    """
+    digest = hashlib.sha256(prompt_bytes).hexdigest()
+    sha_path = sidecar_dir / f"{base_name}.sha256"
+    txt_path = sidecar_dir / f"{base_name}.txt"
+    # Write the .txt FIRST so a reader that sees the .sha256 can always
+    # find the matching bytes. os.replace is atomic on the same FS.
+    _atomic_write_bytes(txt_path, prompt_bytes)
+    _atomic_write_bytes(sha_path, digest.encode("ascii"))
+    return digest
+
+
 def cmd_inject_prompt(args: argparse.Namespace) -> int:
     """Read base prompt from stdin, inject learned agent rules, print result.
 
@@ -1209,6 +1258,11 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
          with the model the executor was spawned under.
       2. On cache miss / corruption / fingerprint drift, fall back to
          building a single-segment plan live. Correctness is preserved.
+
+    At print time also writes atomic sidecars at
+    ``.dynos/task-{id}/receipts/_injected-prompts/{segment_id}.sha256``
+    and ``.txt`` so receipt validation (AC 12 / AC 13) can prove what
+    was actually printed.
     """
     root = Path(args.root).resolve()
     graph_path = Path(args.graph)
@@ -1273,7 +1327,173 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
 
     # Build complete prompt
     result = build_executor_prompt(root, target_seg, plan_entry, base_prompt)
-    print(result)
+
+    # Bytes that will be emitted to stdout. `print()` appends a newline,
+    # so the sidecar must hash exactly those bytes (raw text + "\n") to
+    # match what receipt validation re-hashes.
+    printed_bytes = (result + "\n").encode("utf-8")
+
+    # Sidecar write — task-local. Only attempted when we can derive a
+    # task_id (graph path under .dynos/task-{id}/). Without a task_id
+    # there is nowhere to write a per-task receipt sidecar.
+    if task_id:
+        sidecar_dir = root / ".dynos" / task_id / "receipts" / "_injected-prompts"
+        try:
+            digest = _write_prompt_sidecar(sidecar_dir, args.segment_id, printed_bytes)
+            log_event(
+                root, "injected_prompt_sidecar_written",
+                task_id=task_id,
+                segment_id=args.segment_id,
+                sha256=digest,
+                sidecar_dir=str(sidecar_dir),
+            )
+        except OSError as exc:
+            # Sidecar write failure must not silently corrupt the receipt
+            # chain. Surface it on stderr and fail the command.
+            print(
+                json.dumps({"error": f"sidecar write failed: {exc}"}),
+                file=_sys.stderr,
+            )
+            return 1
+
+    _sys.stdout.write(result + "\n")
+    _sys.stdout.flush()
+    return 0
+
+
+def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
+    """Inject learned-auditor instructions into a base auditor prompt.
+
+    Reads the audit plan JSON, locates the named auditor entry, reads the
+    base prompt from stdin, and (when ``route_mode in {"replace",
+    "alongside"}`` and ``agent_path`` is non-null) appends the learned
+    auditor file under a ``## Learned Auditor Instructions`` heading.
+
+    At print time also writes atomic sidecars at
+    ``.dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor}-{model}.sha256``
+    and ``.txt``. The ``-{model}`` suffix is required to disambiguate
+    ensemble auditors that spawn the same auditor name across multiple
+    models. When ``--model`` is unspecified or null, the literal string
+    ``default`` is used in the filename.
+
+    Final prompt is printed to stdout; sidecar receipts are atomic
+    (tempfile + os.replace).
+    """
+    import sys as _sys
+    root = Path(args.root).resolve()
+    plan_path = Path(args.audit_plan)
+    if not plan_path.exists():
+        print(json.dumps({"error": f"audit plan not found: {plan_path}"}))
+        return 1
+
+    try:
+        plan = load_json(plan_path)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(json.dumps({"error": f"audit plan unreadable: {exc}"}))
+        return 1
+    if not isinstance(plan, dict):
+        print(json.dumps({"error": "audit plan must be a JSON object"}))
+        return 1
+
+    auditors = plan.get("auditors")
+    if not isinstance(auditors, list):
+        print(json.dumps({"error": "audit plan missing 'auditors' list"}))
+        return 1
+
+    auditor_name = args.auditor_name
+    target: dict | None = None
+    for entry in auditors:
+        if isinstance(entry, dict) and entry.get("name") == auditor_name:
+            target = entry
+            break
+    if target is None:
+        print(json.dumps({"error": f"auditor not found in plan: {auditor_name}"}))
+        return 1
+
+    # Read base prompt from stdin
+    base_prompt = _sys.stdin.read()
+
+    route_mode = target.get("route_mode", "generic")
+    agent_path = target.get("agent_path")
+
+    final_text = base_prompt
+
+    if route_mode in ("replace", "alongside") and agent_path:
+        try:
+            p = Path(agent_path)
+            if not p.is_absolute():
+                p = root / p
+            if p.exists():
+                agent_content = p.read_text().strip()
+                # Strip frontmatter if present
+                if agent_content.startswith("---"):
+                    end = agent_content.find("---", 3)
+                    if end != -1:
+                        agent_content = agent_content[end + 3:].strip()
+                final_text = (
+                    base_prompt.rstrip()
+                    + "\n\n## Learned Auditor Instructions\n"
+                    + f"You are running as the **{auditor_name}** learned auditor "
+                    + f"(mode={route_mode}). These rules were learned from past audit "
+                    + "findings. Treat them as hard constraints unless the current "
+                    + "spec explicitly overrides them.\n\n"
+                    + agent_content
+                )
+                log_event(
+                    root, "learned_auditor_applied",
+                    auditor_name=auditor_name,
+                    agent_path=str(agent_path),
+                    route_mode=route_mode,
+                )
+            else:
+                log_event(
+                    root, "learned_auditor_missing",
+                    auditor_name=auditor_name,
+                    agent_path=str(agent_path),
+                )
+        except OSError as exc:
+            log_event(
+                root, "learned_auditor_error",
+                auditor_name=auditor_name,
+                error=str(exc),
+            )
+
+    printed_bytes = (final_text + "\n").encode("utf-8")
+
+    # Locate task_dir from the audit plan path: the plan lives at
+    # .dynos/task-{id}/audit-plan.json so task_dir is plan.parent.
+    task_dir = plan_path.resolve().parent
+    if not task_dir.name.startswith("task-"):
+        print(json.dumps({
+            "error": f"audit plan not under a task dir: {task_dir}",
+        }))
+        return 1
+
+    # Per-model disambiguation for ensemble auditors. Falls back to the
+    # literal "default" sentinel when --model is unspecified or empty.
+    model_label = args.model if args.model else "default"
+    base_name = f"{auditor_name}-{model_label}"
+
+    sidecar_dir = task_dir / "receipts" / "_injected-auditor-prompts"
+    try:
+        digest = _write_prompt_sidecar(sidecar_dir, base_name, printed_bytes)
+    except OSError as exc:
+        print(
+            json.dumps({"error": f"sidecar write failed: {exc}"}),
+            file=_sys.stderr,
+        )
+        return 1
+
+    log_event(
+        root, "injected_auditor_prompt_sidecar_written",
+        auditor_name=auditor_name,
+        model=model_label,
+        sha256=digest,
+        sidecar_dir=str(sidecar_dir),
+    )
+
+    _sys.stdout.write(final_text + "\n")
+    _sys.stdout.flush()
     return 0
 
 
@@ -1354,6 +1574,17 @@ def build_parser() -> argparse.ArgumentParser:
     ip.add_argument("--graph", required=True)
     ip.add_argument("--segment-id", required=True)
     ip.set_defaults(func=cmd_inject_prompt)
+
+    aip = subparsers.add_parser(
+        "audit-inject-prompt",
+        help="Inject learned auditor rules into auditor prompt and write per-model sidecar receipts",
+    )
+    aip.add_argument("--root", default=".")
+    aip.add_argument("--task-type", required=True)
+    aip.add_argument("--audit-plan", required=True, help="Path to .dynos/task-{id}/audit-plan.json")
+    aip.add_argument("--auditor-name", required=True)
+    aip.add_argument("--model", default=None, help="Model label for sidecar disambiguation; 'default' if unset")
+    aip.set_defaults(func=cmd_audit_inject_prompt)
 
     rc = subparsers.add_parser("router-cache-status", help="Inspect executor-plan cache freshness for a task")
     rc.add_argument("--root", default=".")
