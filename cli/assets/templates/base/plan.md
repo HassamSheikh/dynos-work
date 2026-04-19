@@ -69,21 +69,22 @@ Read `plan.md`. Present to the user using **AskUserQuestion**:
 Approve this plan? (yes / no + what to change)
 ```
 
-- If **approved**: append `{timestamp} [HUMAN] PLAN_REVIEW — approved` to log. Proceed to Step 4.
-- If **changes requested**: append `{timestamp} [HUMAN] PLAN_REVIEW — changes requested: {summary}` to log. Spawn planning agent again with the feedback. Re-present the updated plan. Repeat until approved.
+- If **approved**: run the `approve-stage` ctl command below. It hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, then transitions PLAN_REVIEW → PLAN_AUDIT in one atomic step. The hash is computed from the CURRENT `plan.md` content **at transition time** (the gate re-hashes the file and compares it to `receipt.artifact_sha256`), so an approval that races against a manual edit will be refused with the literal substrings `human-approval-PLAN_REVIEW` and `hash mismatch`. Do NOT add a manual `[HUMAN]` log line — the receipt is the audit trail. Then proceed to Step 4.
+
+  ```text
+  python3 hooks/dynosctl.py approve-stage .dynos/task-{id} PLAN_REVIEW
+  ```
+
+  Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`.
+- If **changes requested**: append `{timestamp} [HUMAN] PLAN_REVIEW — changes requested: {summary}` to log. Spawn planning agent again with the feedback. Re-present the updated plan. Repeat until approved. Do NOT call `approve-stage` against a stale plan.
 - If **rejected**: set `manifest.json` stage to `FAILED`, append `[FAILED] Plan rejected by user`. Stop.
 
 ### Step 4 — Spec coverage audit (PLAN_AUDIT)
 
-Update `manifest.json` stage to `PLAN_AUDIT`. If available in this repo, use:
-
-```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_AUDIT
-```
+The `approve-stage` call in Step 3 has already advanced the manifest to `PLAN_AUDIT` — do NOT call `transition .dynos/task-{id} PLAN_AUDIT` here (the state machine would refuse it as `PLAN_AUDIT → PLAN_AUDIT`).
 
 Append to log:
 ```
-{timestamp} [STAGE] → PLAN_AUDIT
 {timestamp} [SPAWN] spec-completion-auditor — verify plan covers all acceptance criteria
 ```
 

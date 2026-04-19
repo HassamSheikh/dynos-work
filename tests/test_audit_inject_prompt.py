@@ -1,0 +1,120 @@
+"""Tests for `python3 hooks/router.py audit-inject-prompt` (AC 8)."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+ROUTER = ROOT / "hooks" / "router.py"
+
+
+def _setup(tmp_path: Path, *, route_mode: str, agent_path: str | None,
+           agent_content: str = "Be careful.") -> tuple[Path, Path]:
+    project = tmp_path / "project"
+    td = project / ".dynos" / "task-20260418-X"
+    td.mkdir(parents=True)
+    # Create the agent file if specified
+    if agent_path:
+        ap = project / agent_path
+        ap.parent.mkdir(parents=True, exist_ok=True)
+        ap.write_text(agent_content)
+    plan = {
+        "auditors": [
+            {
+                "name": "security-auditor",
+                "route_mode": route_mode,
+                "agent_path": agent_path,
+            }
+        ]
+    }
+    plan_path = td / "audit-plan.json"
+    plan_path.write_text(json.dumps(plan))
+    return project, plan_path
+
+
+def _run(project: Path, plan_path: Path, *, model: str | None = None,
+         auditor: str = "security-auditor",
+         stdin: str = "base prompt body") -> subprocess.CompletedProcess:
+    args = [
+        sys.executable, str(ROUTER), "audit-inject-prompt",
+        "--root", str(project),
+        "--task-type", "feature",
+        "--audit-plan", str(plan_path),
+        "--auditor-name", auditor,
+    ]
+    if model is not None:
+        args.extend(["--model", model])
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "hooks")}
+    return subprocess.run(args, input=stdin, text=True,
+                          capture_output=True, check=False, env=env,
+                          cwd=str(ROOT))
+
+
+def _sidecar_dir(plan_path: Path) -> Path:
+    return plan_path.parent / "receipts" / "_injected-auditor-prompts"
+
+
+def test_replace_mode_sidecar_matches_stdout(tmp_path: Path):
+    project, plan_path = _setup(tmp_path, route_mode="replace",
+                                agent_path="learned/auditor.md",
+                                agent_content="Hard rule: deny all.")
+    r = _run(project, plan_path, model="haiku")
+    assert r.returncode == 0, r.stderr
+    sha_path = _sidecar_dir(plan_path) / "security-auditor-haiku.sha256"
+    assert sha_path.exists()
+    on_disk = sha_path.read_text().strip()
+    expected = hashlib.sha256(r.stdout.encode("utf-8")).hexdigest()
+    assert on_disk == expected
+    # The injected heading must appear in stdout
+    assert "## Learned Auditor Instructions" in r.stdout
+    assert "Hard rule: deny all." in r.stdout
+
+
+def test_alongside_mode_sidecar_matches_stdout(tmp_path: Path):
+    project, plan_path = _setup(tmp_path, route_mode="alongside",
+                                agent_path="learned/aud2.md",
+                                agent_content="Suggestion: deny most.")
+    r = _run(project, plan_path, model="sonnet")
+    assert r.returncode == 0, r.stderr
+    sha_path = _sidecar_dir(plan_path) / "security-auditor-sonnet.sha256"
+    on_disk = sha_path.read_text().strip()
+    expected = hashlib.sha256(r.stdout.encode("utf-8")).hexdigest()
+    assert on_disk == expected
+    assert "## Learned Auditor Instructions" in r.stdout
+
+
+def test_generic_mode_no_injection_but_sidecar_still_written(tmp_path: Path):
+    project, plan_path = _setup(tmp_path, route_mode="generic",
+                                agent_path=None)
+    r = _run(project, plan_path, model="opus")
+    assert r.returncode == 0, r.stderr
+    sha_path = _sidecar_dir(plan_path) / "security-auditor-opus.sha256"
+    assert sha_path.exists()
+    on_disk = sha_path.read_text().strip()
+    expected = hashlib.sha256(r.stdout.encode("utf-8")).hexdigest()
+    assert on_disk == expected
+    assert "## Learned Auditor Instructions" not in r.stdout
+
+
+def test_per_model_disambiguation(tmp_path: Path):
+    project, plan_path = _setup(tmp_path, route_mode="generic",
+                                agent_path=None)
+    r1 = _run(project, plan_path, model="haiku")
+    r2 = _run(project, plan_path, model=None)
+    assert r1.returncode == 0
+    assert r2.returncode == 0
+    sd = _sidecar_dir(plan_path)
+    assert (sd / "security-auditor-haiku.sha256").exists()
+    assert (sd / "security-auditor-default.sha256").exists()
+
+
+def test_unknown_auditor_exits_one(tmp_path: Path):
+    project, plan_path = _setup(tmp_path, route_mode="generic", agent_path=None)
+    r = _run(project, plan_path, auditor="ghost-auditor")
+    assert r.returncode == 1

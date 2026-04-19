@@ -280,6 +280,22 @@ def validate_task_artifacts(
         if criteria_numbers != expected:
             errors.append(f"acceptance criteria numbering must be contiguous from 1: got {criteria_numbers}")
 
+    # AC 15: if a spec-validated receipt exists, its recorded spec_sha256 must
+    # match the current sha256(spec.md). Hash-drift is a validation error.
+    try:
+        from lib_receipts import hash_file, read_receipt  # local import to avoid cycles
+        receipt = read_receipt(task_dir, "spec-validated")
+        if receipt is not None:
+            recorded = receipt.get("spec_sha256")
+            current = hash_file(spec_path)
+            if recorded and recorded != current:
+                errors.append(
+                    f"spec.md content drifted from approved spec-validated receipt "
+                    f"(expected {recorded[:12]}, got {current[:12]})"
+                )
+    except ImportError:
+        pass
+
     if plan_path.exists():
         plan_text = require(plan_path)
         classification = manifest.get("classification") or {}

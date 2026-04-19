@@ -9,11 +9,45 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from lib_core import now_iso, append_execution_log
 from lib_log import log_event
+
+
+# Receipt contract version. Receipts written by this module embed
+# `contract_version: 2`. Readers MUST treat receipts without this field
+# as v1 and accept them when `valid=true`.
+RECEIPT_CONTRACT_VERSION = 2
+
+
+# Files that compose the calibration policy snapshot used by the
+# retrospective/calibration pipeline. Receipt writers and downstream
+# consumers may use this list when computing aggregate policy hashes.
+CALIBRATION_POLICY_FILES = [
+    "effectiveness-scores.json",
+    "model-policy.json",
+    "skip-policy.json",
+    "route-policy.json",
+    "prevention-rules.json",
+    "project_rules.md",
+    "policy.json",
+    "trajectories.json",
+    "learned-agents/registry.json",
+    "benchmarks/history.json",
+]
+
+
+# Allowed reasons for receipt_postmortem_skipped. Enum-validated at write
+# time so callers cannot silently drift the skip taxonomy.
+_POSTMORTEM_SKIP_REASONS = frozenset({
+    "clean-task",
+    "no-findings",
+    "quality-above-threshold",
+})
 
 
 def hash_file(path: Path) -> str:
@@ -27,11 +61,11 @@ def hash_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+
 __all__ = [
     "write_receipt",
     "read_receipt",
     "require_receipt",
-    "require_receipts",
     "validate_chain",
     "hash_file",
     "plan_validated_receipt_matches",
@@ -47,6 +81,13 @@ __all__ = [
     "receipt_planner_spawn",
     "receipt_plan_audit",
     "receipt_tdd_tests",
+    "receipt_human_approval",
+    "receipt_postmortem_generated",
+    "receipt_postmortem_analysis",
+    "receipt_postmortem_skipped",
+    "receipt_calibration_applied",
+    "RECEIPT_CONTRACT_VERSION",
+    "CALIBRATION_POLICY_FILES",
 ]
 
 # Map receipt steps to human-readable execution-log entries
@@ -57,12 +98,19 @@ _LOG_MESSAGES: dict[str, str] = {
     "executor-routing": "[ROUTE] executor plan — {n_segments} segments routed",
     "audit-routing": "[ROUTE] audit plan — {n_auditors} auditors routed",
     "retrospective": "[DONE] retrospective — quality={quality_score} cost={cost_score} efficiency={efficiency_score}",
-    "post-completion": "[DONE] post-completion — {n_handlers} handlers, postmortem={postmortem_written}",
+    "post-completion": "[DONE] post-completion — {n_handlers} handlers",
     "planner-discovery": "[DONE] planner discovery — tokens={tokens_used}",
     "planner-spec": "[DONE] planner spec — tokens={tokens_used}",
     "planner-plan": "[DONE] planner plan — tokens={tokens_used}",
     "plan-audit-check": "[DONE] plan audit — tokens={tokens_used}",
     "tdd-tests": "[DONE] TDD tests — tokens={tokens_used}",
+    "human-approval-SPEC_REVIEW": "[DONE] human-approval SPEC_REVIEW — approver={approver}",
+    "human-approval-PLAN_REVIEW": "[DONE] human-approval PLAN_REVIEW — approver={approver}",
+    "human-approval-TDD_REVIEW": "[DONE] human-approval TDD_REVIEW — approver={approver}",
+    "postmortem-generated": "[DONE] postmortem generated — anomalies={anomaly_count} patterns={pattern_count}",
+    "postmortem-analysis": "[DONE] postmortem analysis — rules_added={rules_added}",
+    "postmortem-skipped": "[DONE] postmortem skipped — reason={reason}",
+    "calibration-applied": "[DONE] calibration applied — retros={retros_consumed} scores={scores_updated}",
 }
 
 
@@ -97,10 +145,41 @@ def _receipts_dir(task_dir: Path) -> Path:
     return task_dir / "receipts"
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomically write text to `path` via tempfile + os.replace.
+
+    Avoids partial-write torn-state if the process is killed mid-write.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _skip_sidecar_assert() -> bool:
+    """Honor DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1 env var."""
+    return os.environ.get("DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT") == "1"
+
+
 def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
     """Write a receipt proving a pipeline step completed.
 
     Returns the path to the written receipt file.
+
+    Every receipt embeds `contract_version: RECEIPT_CONTRACT_VERSION`.
+    Readers MUST tolerate older receipts without this field.
     """
     receipts = _receipts_dir(task_dir)
     receipts.mkdir(parents=True, exist_ok=True)
@@ -109,11 +188,12 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
         "step": step_name,
         "ts": now_iso(),
         "valid": True,
+        "contract_version": RECEIPT_CONTRACT_VERSION,
         **payload,
     }
 
     receipt_path = receipts / f"{step_name}.json"
-    receipt_path.write_text(json.dumps(receipt, indent=2, default=str))
+    _atomic_write_text(receipt_path, json.dumps(receipt, indent=2, default=str))
 
     # Log the receipt write to events.jsonl
     root = task_dir.parent.parent
@@ -137,8 +217,9 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
         except (KeyError, TypeError):
             append_execution_log(task_dir, f"[RECEIPT] {step_name}")
     elif step_name.startswith("executor-seg"):
-        agent = payload.get("agent_name", "generic")
-        injected = payload.get("learned_agent_injected", False)
+        agent = payload.get("agent_name", "")
+        # Distinguish learned vs generic by agent_name presence (post-v2 contract).
+        injected = bool(agent)
         append_execution_log(task_dir, f"[DONE] {step_name} — executor={payload.get('executor_type','')} agent={'learned:' + agent if injected else 'generic'} tokens={payload.get('tokens_used','?')}")
     elif step_name.startswith("audit-") and step_name != "audit-routing":
         append_execution_log(task_dir, f"[DONE] {step_name} — findings={payload.get('finding_count',0)} blocking={payload.get('blocking_count',0)}")
@@ -147,7 +228,11 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
 
 
 def read_receipt(task_dir: Path, step_name: str) -> dict | None:
-    """Read a receipt. Returns None if missing or invalid."""
+    """Read a receipt. Returns None if missing or invalid.
+
+    Backwards-compat: receipts without `contract_version` are treated as v1
+    and accepted as long as `valid=true`. Never crash on missing field.
+    """
     receipt_path = _receipts_dir(task_dir) / f"{step_name}.json"
     if not receipt_path.exists():
         return None
@@ -184,6 +269,9 @@ def validate_chain(task_dir: Path) -> list[str]:
 
     This is a diagnostic tool — it checks all possible receipts and reports
     which ones are missing, without raising exceptions.
+
+    Backwards-compat: receipts without `contract_version` are treated as v1
+    and remain valid (no field is required for legacy reads).
     """
     # Define the expected receipt chain based on task stage
     manifest_path = task_dir / "manifest.json"
@@ -206,14 +294,22 @@ def validate_chain(task_dir: Path) -> list[str]:
         "post-completion",
     ]
 
-    # What receipts should exist based on stage progression
+    # What receipts should exist based on stage progression.
+    # `audit-routing` is required at DONE — without it we cannot enumerate
+    # the dynamic audit receipts that should follow it.
     stage_requires: dict[str, list[str]] = {
         "EXECUTION": ["plan-validated"],
         "TEST_EXECUTION": ["plan-validated", "executor-routing"],
         "CHECKPOINT_AUDIT": ["plan-validated", "executor-routing"],
         "REPAIR_PLANNING": ["plan-validated", "executor-routing"],
         "REPAIR_EXECUTION": ["plan-validated", "executor-routing"],
-        "DONE": ["plan-validated", "executor-routing", "retrospective", "post-completion"],
+        "DONE": [
+            "plan-validated",
+            "executor-routing",
+            "audit-routing",
+            "retrospective",
+            "post-completion",
+        ],
     }
 
     required = stage_requires.get(stage, [])
@@ -233,7 +329,9 @@ def validate_chain(task_dir: Path) -> list[str]:
                 if seg_id and read_receipt(task_dir, f"executor-{seg_id}") is None:
                     gaps.append(f"executor-{seg_id}")
 
-    # Check audit receipts if we're at DONE
+    # Check audit receipts if we're at DONE.
+    # audit-routing absence is already reported via stage_requires above;
+    # we still enumerate dynamic audit receipts when routing IS present.
     if stage == "DONE":
         audit_routing = read_receipt(task_dir, "audit-routing")
         if audit_routing:
@@ -276,6 +374,27 @@ def _hash_artifact(path: Path) -> str | None:
         return hash_file(path)
     except (FileNotFoundError, OSError):
         return None
+
+
+def receipt_spec_validated(
+    task_dir: Path,
+    criteria_count: int,
+    spec_sha256: str,
+) -> Path:
+    """Write receipt proving spec.md passed validation.
+
+    Payload includes {criteria_count, spec_sha256, valid: true}.
+    """
+    if not isinstance(criteria_count, int) or criteria_count < 0:
+        raise ValueError("criteria_count must be a non-negative int")
+    if not isinstance(spec_sha256, str) or not spec_sha256:
+        raise ValueError("spec_sha256 must be a non-empty string")
+    return write_receipt(
+        task_dir,
+        "spec-validated",
+        criteria_count=criteria_count,
+        spec_sha256=spec_sha256,
+    )
 
 
 def receipt_plan_validated(
@@ -344,16 +463,65 @@ def receipt_executor_done(
     segment_id: str,
     executor_type: str,
     model_used: str | None,
-    learned_agent_injected: bool,
+    injected_prompt_sha256: str,
     agent_name: str | None,
     evidence_path: str | None,
     tokens_used: int | None,
 ) -> Path:
-    """Write receipt proving an executor segment completed with learned agent injection.
+    """Write receipt proving an executor segment completed.
 
-    Also records token usage to token-usage.json — this is the ONLY reliable
-    path for token recording since receipts are enforced by gates.
+    Asserts the per-segment injected prompt sidecar at
+    ``task_dir / "receipts" / "_injected-prompts" / f"{segment_id}.sha256"``
+    exists and matches `injected_prompt_sha256`. Raises:
+
+    - ``ValueError("... injected_prompt_sha256 sidecar missing ...")`` if
+      the sidecar file does not exist.
+    - ``ValueError("... injected_prompt_sha256 mismatch ...")`` if the
+      sidecar contents do not match the supplied digest.
+
+    Honors ``DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1`` to skip assertion (logs
+    ``sidecar_assert_skipped`` to events.jsonl). The bootstrap branch
+    relies on this escape hatch between landing and seg-7's prose update.
+
+    Also records token usage to token-usage.json — the only reliable path
+    for token recording since receipts are gated.
     """
+    if not isinstance(injected_prompt_sha256, str) or not injected_prompt_sha256:
+        raise ValueError("injected_prompt_sha256 must be a non-empty string")
+
+    sidecar_dir = task_dir / "receipts" / "_injected-prompts"
+    sidecar_file = sidecar_dir / f"{segment_id}.sha256"
+    root = task_dir.parent.parent
+    task_id = task_dir.name
+
+    if _skip_sidecar_assert():
+        log_event(
+            root,
+            "sidecar_assert_skipped",
+            task=task_id,
+            step=f"executor-{segment_id}",
+            sidecar=str(sidecar_file),
+            reason="DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1",
+        )
+    else:
+        if not sidecar_file.exists():
+            raise ValueError(
+                f"executor-{segment_id}: injected_prompt_sha256 sidecar missing "
+                f"at {sidecar_file}"
+            )
+        try:
+            on_disk = sidecar_file.read_text().strip()
+        except OSError as e:
+            raise ValueError(
+                f"executor-{segment_id}: injected_prompt_sha256 sidecar missing "
+                f"(unreadable {sidecar_file}: {e})"
+            ) from e
+        if on_disk != injected_prompt_sha256:
+            raise ValueError(
+                f"executor-{segment_id}: injected_prompt_sha256 mismatch "
+                f"(sidecar={on_disk!r}, payload={injected_prompt_sha256!r})"
+            )
+
     # Record tokens deterministically
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, f"{executor_type}-{segment_id}", model_used or "default", tokens_used)
@@ -364,7 +532,7 @@ def receipt_executor_done(
         segment_id=segment_id,
         executor_type=executor_type,
         model_used=model_used,
-        learned_agent_injected=learned_agent_injected,
+        injected_prompt_sha256=injected_prompt_sha256,
         agent_name=agent_name,
         evidence_path=evidence_path,
         tokens_used=tokens_used,
@@ -375,7 +543,48 @@ def receipt_audit_routing(
     task_dir: Path,
     auditors: list[dict],
 ) -> Path:
-    """Write receipt proving all auditor routing decisions were made."""
+    """Write receipt proving all auditor routing decisions were made.
+
+    Each entry in `auditors` MUST include the keys:
+      - injected_agent_sha256: str | None
+          (None only when route_mode == "generic"; otherwise required)
+      - agent_path: str | None
+    Callers are responsible for populating these; this writer enforces
+    presence so downstream consumers can rely on the schema.
+    """
+    if not isinstance(auditors, list):
+        raise ValueError("auditors must be a list")
+    for idx, entry in enumerate(auditors):
+        if not isinstance(entry, dict):
+            raise ValueError(f"auditors[{idx}] must be a dict")
+        if "injected_agent_sha256" not in entry:
+            raise ValueError(
+                f"auditors[{idx}] missing required key 'injected_agent_sha256' "
+                f"(must be str or None)"
+            )
+        if "agent_path" not in entry:
+            raise ValueError(
+                f"auditors[{idx}] missing required key 'agent_path' "
+                f"(must be str or None)"
+            )
+        route_mode = entry.get("route_mode")
+        injected = entry.get("injected_agent_sha256")
+        # injected_agent_sha256 may be None only when route_mode is generic.
+        if injected is None and route_mode != "generic":
+            raise ValueError(
+                f"auditors[{idx}] injected_agent_sha256 may be None only "
+                f"when route_mode=='generic' (got route_mode={route_mode!r})"
+            )
+        if injected is not None and not isinstance(injected, str):
+            raise ValueError(
+                f"auditors[{idx}] injected_agent_sha256 must be str or None"
+            )
+        agent_path = entry.get("agent_path")
+        if agent_path is not None and not isinstance(agent_path, str):
+            raise ValueError(
+                f"auditors[{idx}] agent_path must be str or None"
+            )
+
     return write_receipt(
         task_dir,
         "audit-routing",
@@ -391,13 +600,77 @@ def receipt_audit_done(
     blocking_count: int,
     report_path: str | None,
     tokens_used: int | None,
+    *,
+    route_mode: str,
+    agent_path: str | None,
+    injected_agent_sha256: str | None,
 ) -> Path:
     """Write receipt proving an auditor completed.
 
+    Asserts the per-(auditor, model) sidecar at
+    ``task_dir / "receipts" / "_injected-auditor-prompts"
+    / f"{auditor_name}-{model_used}.sha256"`` matches
+    `injected_agent_sha256` when non-null. Per-model disambiguation lets
+    ensemble voting compare distinct injected prompts per model.
+
+    Honors ``DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1`` to skip assertion (logs
+    ``sidecar_assert_skipped``).
+
+    Raises ValueError on sidecar mismatch.
+
     Also records token usage — same enforcement path as executor receipts.
     """
+    if not isinstance(route_mode, str) or not route_mode:
+        raise ValueError("route_mode must be a non-empty string")
+    if injected_agent_sha256 is None and route_mode != "generic":
+        raise ValueError(
+            f"injected_agent_sha256 may be None only when route_mode=='generic' "
+            f"(got route_mode={route_mode!r})"
+        )
+    if injected_agent_sha256 is not None and not isinstance(injected_agent_sha256, str):
+        raise ValueError("injected_agent_sha256 must be str or None")
+    if agent_path is not None and not isinstance(agent_path, str):
+        raise ValueError("agent_path must be str or None")
+
+    root = task_dir.parent.parent
+    task_id = task_dir.name
+
+    if injected_agent_sha256 is not None:
+        sidecar_file = (
+            task_dir / "receipts" / "_injected-auditor-prompts"
+            / f"{auditor_name}-{model_used}.sha256"
+        )
+        if _skip_sidecar_assert():
+            log_event(
+                root,
+                "sidecar_assert_skipped",
+                task=task_id,
+                step=f"audit-{auditor_name}",
+                sidecar=str(sidecar_file),
+                reason="DYNOS_SKIP_RECEIPT_SIDECAR_ASSERT=1",
+            )
+        else:
+            if not sidecar_file.exists():
+                raise ValueError(
+                    f"audit-{auditor_name}: injected auditor prompt sidecar "
+                    f"missing at {sidecar_file}"
+                )
+            try:
+                on_disk = sidecar_file.read_text().strip()
+            except OSError as e:
+                raise ValueError(
+                    f"audit-{auditor_name}: injected auditor prompt sidecar "
+                    f"unreadable at {sidecar_file}: {e}"
+                ) from e
+            if on_disk != injected_agent_sha256:
+                raise ValueError(
+                    f"audit-{auditor_name}: injected_agent_sha256 mismatch "
+                    f"(sidecar={on_disk!r}, payload={injected_agent_sha256!r})"
+                )
+
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
+
     return write_receipt(
         task_dir,
         f"audit-{auditor_name}",
@@ -407,6 +680,9 @@ def receipt_audit_done(
         blocking_count=blocking_count,
         report_path=report_path,
         tokens_used=tokens_used,
+        route_mode=route_mode,
+        agent_path=agent_path,
+        injected_agent_sha256=injected_agent_sha256,
     )
 
 
@@ -432,16 +708,17 @@ def receipt_retrospective(
 def receipt_post_completion(
     task_dir: Path,
     handlers_run: list[dict],
-    postmortem_written: bool,
-    patterns_updated: bool,
 ) -> Path:
-    """Write receipt proving post-completion pipeline ran."""
+    """Write receipt proving post-completion pipeline ran.
+
+    Per the v2 contract, post-completion no longer carries postmortem or
+    pattern-update flags — those concerns belong to dedicated postmortem
+    receipts (see `receipt_postmortem_*`).
+    """
     return write_receipt(
         task_dir,
         "post-completion",
         handlers_run=handlers_run,
-        postmortem_written=postmortem_written,
-        patterns_updated=patterns_updated,
     )
 
 
@@ -455,7 +732,6 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
     phase: str,  # "discovery", "spec", or "plan"
     tokens_used: int | None,
     model_used: str | None = None,
-    learned_agent_injected: bool = False,
     agent_name: str | None = None,
 ) -> Path:
     """Write receipt proving a planner subagent completed. Also records tokens."""
@@ -468,7 +744,6 @@ def receipt_planner_spawn(  # called dynamically from skills/start/SKILL.md
         phase=phase,
         tokens_used=tokens_used,
         model_used=model_used,
-        learned_agent_injected=learned_agent_injected,
         agent_name=agent_name,
     )
 
@@ -488,6 +763,182 @@ def receipt_plan_audit(
         tokens_used=tokens_used,
         finding_count=finding_count,
         model_used=model_used,
+    )
+
+
+def receipt_tdd_tests(
+    task_dir: Path,
+    test_file_paths: list[str],
+    tests_evidence_sha256: str,
+    tokens_used: int,
+    model_used: str,
+) -> Path:
+    """Write receipt proving TDD tests were generated.
+
+    Also records token usage. Validates inputs strictly: paths must be a
+    list of strings, the evidence digest must be non-empty.
+    """
+    if not isinstance(test_file_paths, list) or not all(
+        isinstance(p, str) for p in test_file_paths
+    ):
+        raise ValueError("test_file_paths must be a list[str]")
+    if not isinstance(tests_evidence_sha256, str) or not tests_evidence_sha256:
+        raise ValueError("tests_evidence_sha256 must be a non-empty string")
+    if not isinstance(tokens_used, int) or tokens_used < 0:
+        raise ValueError("tokens_used must be a non-negative int")
+    if not isinstance(model_used, str) or not model_used:
+        raise ValueError("model_used must be a non-empty string")
+
+    if tokens_used > 0:
+        _record_tokens(task_dir, "tdd-tests", model_used, tokens_used)
+
+    return write_receipt(
+        task_dir,
+        "tdd-tests",
+        test_file_paths=test_file_paths,
+        tests_evidence_sha256=tests_evidence_sha256,
+        tokens_used=tokens_used,
+        model_used=model_used,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Human approval, postmortem, and calibration receipts
+# ---------------------------------------------------------------------------
+
+
+def receipt_human_approval(
+    task_dir: Path,
+    stage: str,
+    artifact_sha256: str,
+    approver: str = "human",
+) -> Path:
+    """Write receipt proving a human approved an artifact at `stage`.
+
+    Writes ``receipts/human-approval-{stage}.json``.
+
+    Validates inputs: `stage` must be a non-empty identifier-safe string
+    (no path separators), `artifact_sha256` must be a non-empty string,
+    `approver` defaults to "human".
+    """
+    if not isinstance(stage, str) or not stage:
+        raise ValueError("stage must be a non-empty string")
+    if "/" in stage or "\\" in stage or stage.startswith("."):
+        raise ValueError(f"stage must not contain path separators: {stage!r}")
+    if not isinstance(artifact_sha256, str) or not artifact_sha256:
+        raise ValueError("artifact_sha256 must be a non-empty string")
+    if not isinstance(approver, str) or not approver:
+        raise ValueError("approver must be a non-empty string")
+
+    return write_receipt(
+        task_dir,
+        f"human-approval-{stage}",
+        stage=stage,
+        artifact_sha256=artifact_sha256,
+        approver=approver,
+    )
+
+
+def receipt_postmortem_generated(
+    task_dir: Path,
+    json_sha256: str,
+    md_sha256: str,
+    anomaly_count: int,
+    pattern_count: int,
+) -> Path:
+    """Write receipt proving a postmortem (json+md pair) was generated."""
+    if not isinstance(json_sha256, str) or not json_sha256:
+        raise ValueError("json_sha256 must be a non-empty string")
+    if not isinstance(md_sha256, str) or not md_sha256:
+        raise ValueError("md_sha256 must be a non-empty string")
+    if not isinstance(anomaly_count, int) or anomaly_count < 0:
+        raise ValueError("anomaly_count must be a non-negative int")
+    if not isinstance(pattern_count, int) or pattern_count < 0:
+        raise ValueError("pattern_count must be a non-negative int")
+    return write_receipt(
+        task_dir,
+        "postmortem-generated",
+        json_sha256=json_sha256,
+        md_sha256=md_sha256,
+        anomaly_count=anomaly_count,
+        pattern_count=pattern_count,
+    )
+
+
+def receipt_postmortem_analysis(
+    task_dir: Path,
+    analysis_sha256: str,
+    rules_added: int,
+    rules_sha256_after: str,
+) -> Path:
+    """Write receipt proving postmortem analysis ran and rules updated."""
+    if not isinstance(analysis_sha256, str) or not analysis_sha256:
+        raise ValueError("analysis_sha256 must be a non-empty string")
+    if not isinstance(rules_added, int) or rules_added < 0:
+        raise ValueError("rules_added must be a non-negative int")
+    if not isinstance(rules_sha256_after, str) or not rules_sha256_after:
+        raise ValueError("rules_sha256_after must be a non-empty string")
+    return write_receipt(
+        task_dir,
+        "postmortem-analysis",
+        analysis_sha256=analysis_sha256,
+        rules_added=rules_added,
+        rules_sha256_after=rules_sha256_after,
+    )
+
+
+def receipt_postmortem_skipped(
+    task_dir: Path,
+    reason: str,
+    retrospective_sha256: str,
+) -> Path:
+    """Write receipt proving postmortem was deliberately skipped.
+
+    `reason` is enum-validated against {"clean-task", "no-findings",
+    "quality-above-threshold"}.
+    """
+    if reason not in _POSTMORTEM_SKIP_REASONS:
+        raise ValueError(
+            f"invalid postmortem skip reason: {reason!r} "
+            f"(allowed: {sorted(_POSTMORTEM_SKIP_REASONS)})"
+        )
+    if not isinstance(retrospective_sha256, str) or not retrospective_sha256:
+        raise ValueError("retrospective_sha256 must be a non-empty string")
+    return write_receipt(
+        task_dir,
+        "postmortem-skipped",
+        reason=reason,
+        retrospective_sha256=retrospective_sha256,
+    )
+
+
+def receipt_calibration_applied(
+    task_dir: Path,
+    retros_consumed: int,
+    scores_updated: int,
+    policy_sha256_before: str,
+    policy_sha256_after: str,
+) -> Path:
+    """Write receipt proving calibration policy update was applied.
+
+    Calibration is deterministic — this writer does NOT call
+    ``_record_tokens``; no model invocation is involved.
+    """
+    if not isinstance(retros_consumed, int) or retros_consumed < 0:
+        raise ValueError("retros_consumed must be a non-negative int")
+    if not isinstance(scores_updated, int) or scores_updated < 0:
+        raise ValueError("scores_updated must be a non-negative int")
+    if not isinstance(policy_sha256_before, str) or not policy_sha256_before:
+        raise ValueError("policy_sha256_before must be a non-empty string")
+    if not isinstance(policy_sha256_after, str) or not policy_sha256_after:
+        raise ValueError("policy_sha256_after must be a non-empty string")
+    return write_receipt(
+        task_dir,
+        "calibration-applied",
+        retros_consumed=retros_consumed,
+        scores_updated=scores_updated,
+        policy_sha256_before=policy_sha256_before,
+        policy_sha256_after=policy_sha256_after,
     )
 
 

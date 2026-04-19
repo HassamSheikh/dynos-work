@@ -58,8 +58,9 @@ STAGE_ORDER: list[str] = [
     "PLANNING",
     "PLAN_REVIEW",
     "PLAN_AUDIT",
-    "EXECUTION_GRAPH_BUILD",
+    "TDD_REVIEW",
     "PRE_EXECUTION_SNAPSHOT",
+    "EXECUTION_GRAPH_BUILD",
     "EXECUTION",
     "TEST_EXECUTION",
     "CHECKPOINT_AUDIT",
@@ -67,6 +68,7 @@ STAGE_ORDER: list[str] = [
     "REPAIR_PLANNING",
     "REPAIR_EXECUTION",
     "DONE",
+    "CALIBRATED",
     "CANCELLED",
     "FAILED",
 ]
@@ -78,7 +80,8 @@ ALLOWED_STAGE_TRANSITIONS: dict[str, set[str]] = {
     "SPEC_REVIEW": {"SPEC_NORMALIZATION", "PLANNING", "FAILED"},
     "PLANNING": {"PLAN_REVIEW", "FAILED"},
     "PLAN_REVIEW": {"PLANNING", "PLAN_AUDIT", "FAILED"},
-    "PLAN_AUDIT": {"PLANNING", "PRE_EXECUTION_SNAPSHOT", "FAILED"},
+    "PLAN_AUDIT": {"TDD_REVIEW", "PRE_EXECUTION_SNAPSHOT", "FAILED", "PLANNING"},
+    "TDD_REVIEW": {"PRE_EXECUTION_SNAPSHOT", "FAILED"},
     "PRE_EXECUTION_SNAPSHOT": {"EXECUTION", "FAILED"},
     "EXECUTION": {"TEST_EXECUTION", "REPAIR_PLANNING", "FAILED"},
     "TEST_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
@@ -87,7 +90,8 @@ ALLOWED_STAGE_TRANSITIONS: dict[str, set[str]] = {
     "REPAIR_EXECUTION": {"CHECKPOINT_AUDIT", "REPAIR_PLANNING", "FAILED"},
     "FINAL_AUDIT": {"CHECKPOINT_AUDIT", "DONE", "FAILED"},
     "EXECUTION_GRAPH_BUILD": {"PRE_EXECUTION_SNAPSHOT", "EXECUTION", "FAILED"},
-    "DONE": set(),
+    "DONE": {"CALIBRATED", "FAILED"},
+    "CALIBRATED": set(),
     "CANCELLED": set(),
     "FAILED": set(),
 }
@@ -100,6 +104,7 @@ NEXT_COMMAND: dict[str, str] = {
     "PLANNING": "/dynos-work:plan",
     "PLAN_REVIEW": "/dynos-work:plan",
     "PLAN_AUDIT": "/dynos-work:plan",
+    "TDD_REVIEW": "/dynos-work:plan",
     "EXECUTION_GRAPH_BUILD": "/dynos-work:execute",
     "PRE_EXECUTION_SNAPSHOT": "/dynos-work:execute",
     "EXECUTION": "/dynos-work:execute",
@@ -109,6 +114,7 @@ NEXT_COMMAND: dict[str, str] = {
     "REPAIR_EXECUTION": "/dynos-work:audit",
     "FINAL_AUDIT": "/dynos-work:audit",
     "DONE": "Task complete",
+    "CALIBRATED": "Task calibrated",
     "CANCELLED": "Task cancelled",
     "FAILED": "Review failure state before continuing",
 }
@@ -360,6 +366,95 @@ def benchmark_policy_config(root: Path) -> dict:
 # Task state management
 # ---------------------------------------------------------------------------
 
+def get_tdd_required(manifest: dict) -> bool:
+    """Return whether the task requires TDD per its classification.
+
+    Reads ``manifest["classification"]["tdd_required"]``. Missing keys (and
+    non-dict ``classification``) are treated as ``False`` WITHOUT mutating the
+    manifest. Truthy non-bool values are coerced to bool.
+    """
+    if not isinstance(manifest, dict):
+        return False
+    classification = manifest.get("classification")
+    if not isinstance(classification, dict):
+        return False
+    return bool(classification.get("tdd_required", False))
+
+
+def require_receipts_for_done(task_dir: Path) -> list[str]:
+    """Return list of receipt-gap strings preventing transition to DONE.
+
+    Hard checks (in order):
+      a) ``audit-routing`` receipt MUST be present.
+      b) For every entry in ``audit-routing.auditors`` whose ``action == "spawn"``,
+         the corresponding ``audit-{name}`` receipt MUST be present.
+         (Empty ``auditors: []`` passes.)
+      c) Either ``postmortem-generated`` OR ``postmortem-skipped`` MUST be
+         present.
+      d) When ``postmortem-generated`` is present AND
+         (``anomaly_count > 0`` OR ``task-retrospective.json`` quality_score
+         < 0.8), THEN ``postmortem-analysis`` OR ``postmortem-skipped`` is
+         required.
+
+    Returns an empty list when all gates pass.
+    """
+    from lib_receipts import read_receipt
+
+    gaps: list[str] = []
+
+    # (a) audit-routing must exist
+    audit_routing = read_receipt(task_dir, "audit-routing")
+    if audit_routing is None:
+        gaps.append("audit-routing missing")
+    else:
+        # (b) every spawned auditor must have a corresponding audit-{name} receipt
+        auditors = audit_routing.get("auditors")
+        if isinstance(auditors, list):
+            for auditor in auditors:
+                if not isinstance(auditor, dict):
+                    continue
+                if auditor.get("action") != "spawn":
+                    continue
+                name = auditor.get("name")
+                if not isinstance(name, str) or not name:
+                    gaps.append("audit-routing auditor missing name")
+                    continue
+                if read_receipt(task_dir, f"audit-{name}") is None:
+                    gaps.append(f"audit-{name} missing")
+
+    # (c) postmortem-generated OR postmortem-skipped required
+    pm_generated = read_receipt(task_dir, "postmortem-generated")
+    pm_skipped = read_receipt(task_dir, "postmortem-skipped")
+    if pm_generated is None and pm_skipped is None:
+        gaps.append("postmortem-generated or postmortem-skipped missing")
+
+    # (d) when postmortem-generated AND (anomaly>0 OR quality<0.8), require analysis or skip
+    if pm_generated is not None:
+        anomaly_count = pm_generated.get("anomaly_count", 0)
+        try:
+            anomaly_count = int(anomaly_count)
+        except (TypeError, ValueError):
+            anomaly_count = 0
+
+        quality_score = 1.0
+        retro_path = task_dir / "task-retrospective.json"
+        if retro_path.exists():
+            try:
+                retro = load_json(retro_path)
+                if isinstance(retro, dict):
+                    raw = retro.get("quality_score", 1.0)
+                    quality_score = float(raw) if isinstance(raw, (int, float)) else 1.0
+            except (json.JSONDecodeError, OSError, ValueError):
+                quality_score = 1.0
+
+        if anomaly_count > 0 or quality_score < 0.8:
+            pm_analysis = read_receipt(task_dir, "postmortem-analysis")
+            if pm_analysis is None and pm_skipped is None:
+                gaps.append("postmortem-analysis or postmortem-skipped missing")
+
+    return gaps
+
+
 def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> tuple[str, dict]:
     """Transition a task to a new stage, enforcing allowed transitions."""
     manifest_path = task_dir / "manifest.json"
@@ -371,8 +466,97 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
         raise ValueError(f"Illegal stage transition: {current_stage} -> {next_stage}")
     # ---- Receipt-based transition gates (unmissable) ----
     if not force:
-        from lib_receipts import read_receipt
+        from lib_receipts import read_receipt, hash_file
+        from lib_log import log_event as _log_event
         gate_errors: list[str] = []
+        _root = task_dir.parent.parent
+
+        def _refuse(reason: str) -> "None":
+            """Emit gate_refused event then raise ValueError(reason)."""
+            try:
+                _log_event(
+                    _root,
+                    "gate_refused",
+                    task=task_dir.name,
+                    stage_from=current_stage,
+                    stage_to=next_stage,
+                    reason=reason,
+                )
+            except Exception:
+                pass  # Logging must never block the refusal itself.
+            raise ValueError(reason)
+
+        def _check_human_approval(stage_label: str, artifact_path: Path) -> None:
+            """Refuse the current transition unless an approval receipt for
+            ``stage_label`` exists and its ``artifact_sha256`` matches the
+            current hash of ``artifact_path``."""
+            from lib_receipts import _receipts_dir  # type: ignore
+
+            receipt_step = f"human-approval-{stage_label}"
+            receipt_path = _receipts_dir(task_dir) / f"{receipt_step}.json"
+            receipt = read_receipt(task_dir, receipt_step)
+            if receipt is None:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"missing receipt {receipt_step} at {receipt_path} "
+                    f"(artifact: {artifact_path})"
+                )
+            if not artifact_path.exists():
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"receipt {receipt_step} present at {receipt_path} but "
+                    f"artifact missing at {artifact_path}"
+                )
+            expected = receipt.get("artifact_sha256") or ""
+            actual = hash_file(artifact_path)
+            if not isinstance(expected, str) or expected != actual:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"hash mismatch for receipt {receipt_step} "
+                    f"(receipt: {receipt_path}, artifact: {artifact_path}) "
+                    f"expected={(expected or '')[:12]} actual={actual[:12]}"
+                )
+
+        # ---- AC 3: SPEC_REVIEW -> PLANNING requires human-approval-SPEC_REVIEW
+        # whose artifact_sha256 matches sha256(spec.md).
+        if current_stage == "SPEC_REVIEW" and next_stage == "PLANNING":
+            _check_human_approval("SPEC_REVIEW", task_dir / "spec.md")
+
+        # ---- AC 4: PLAN_REVIEW -> PLAN_AUDIT requires human-approval-PLAN_REVIEW
+        # whose artifact_sha256 matches sha256(plan.md).
+        if current_stage == "PLAN_REVIEW" and next_stage == "PLAN_AUDIT":
+            _check_human_approval("PLAN_REVIEW", task_dir / "plan.md")
+
+        # ---- AC 6: TDD_REVIEW -> PRE_EXECUTION_SNAPSHOT requires
+        # human-approval-TDD_REVIEW whose artifact_sha256 matches
+        # sha256(evidence/tdd-tests.md).
+        if current_stage == "TDD_REVIEW" and next_stage == "PRE_EXECUTION_SNAPSHOT":
+            _check_human_approval("TDD_REVIEW", task_dir / "evidence" / "tdd-tests.md")
+
+        # ---- AC 11 + tdd_required gate: EXIT from PLAN_AUDIT.
+        # (a) high/critical risk tasks MUST have a plan-audit-check receipt
+        #     before leaving PLAN_AUDIT towards either TDD_REVIEW or
+        #     PRE_EXECUTION_SNAPSHOT.
+        # (b) When tdd_required=true, PLAN_AUDIT MUST route through TDD_REVIEW
+        #     — direct PLAN_AUDIT -> PRE_EXECUTION_SNAPSHOT is refused.
+        if current_stage == "PLAN_AUDIT" and next_stage in {"TDD_REVIEW", "PRE_EXECUTION_SNAPSHOT"}:
+            classification = manifest.get("classification") or {}
+            risk_level = classification.get("risk_level") if isinstance(classification, dict) else None
+            if risk_level in {"high", "critical"}:
+                from lib_receipts import _receipts_dir  # type: ignore
+                pa_path = _receipts_dir(task_dir) / "plan-audit-check.json"
+                if read_receipt(task_dir, "plan-audit-check") is None:
+                    _refuse(
+                        f"Cannot transition {current_stage} -> {next_stage}: "
+                        f"missing receipt plan-audit-check at {pa_path} "
+                        f"(risk_level={risk_level} requires plan-audit-check)"
+                    )
+            if next_stage == "PRE_EXECUTION_SNAPSHOT" and get_tdd_required(manifest):
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"manifest.classification.tdd_required=true requires "
+                    f"routing through TDD_REVIEW (manifest: {task_dir / 'manifest.json'})"
+                )
 
         # EXECUTION requires plan-validated receipt
         if next_stage == "EXECUTION":
@@ -416,6 +600,31 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                 gate_errors.append("audit-reports/ (no audit reports found — audit was never run)")
             if read_receipt(task_dir, "retrospective") is None:
                 gate_errors.append("receipt: retrospective (reward was never computed via receipts)")
+
+            # AC 10 + AC 19: receipt-based DONE gates (audit-routing + per-auditor
+            # spawn receipts + postmortem trio). Refuses on FIRST gap with
+            # explicit log_event so the operator can see exactly which
+            # receipt is missing. Only fires when reaching DONE from
+            # CHECKPOINT_AUDIT or FINAL_AUDIT.
+            if current_stage in {"CHECKPOINT_AUDIT", "FINAL_AUDIT"}:
+                done_gaps = require_receipts_for_done(task_dir)
+                if done_gaps:
+                    from lib_receipts import _receipts_dir  # type: ignore
+                    rd = _receipts_dir(task_dir)
+                    _refuse(
+                        f"Cannot transition {current_stage} -> {next_stage}: "
+                        f"receipt gaps in {rd}: " + "; ".join(done_gaps)
+                    )
+
+        # AC 23: DONE -> CALIBRATED requires calibration-applied receipt.
+        if current_stage == "DONE" and next_stage == "CALIBRATED":
+            from lib_receipts import _receipts_dir  # type: ignore
+            ca_path = _receipts_dir(task_dir) / "calibration-applied.json"
+            if read_receipt(task_dir, "calibration-applied") is None:
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"missing receipt calibration-applied at {ca_path}"
+                )
 
         if gate_errors:
             raise ValueError(

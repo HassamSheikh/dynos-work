@@ -9,7 +9,16 @@ import sys
 from pathlib import Path
 
 from lib_core import find_active_tasks, load_json, next_command_for_stage, transition_task
+from lib_receipts import hash_file, receipt_human_approval
 from lib_validate import check_segment_ownership, validate_task_artifacts
+
+
+_APPROVE_STAGE_MAP: dict[str, tuple[str, str]] = {
+    # review_stage -> (relative artifact path, next stage)
+    "SPEC_REVIEW": ("spec.md", "PLANNING"),
+    "PLAN_REVIEW": ("plan.md", "PLAN_AUDIT"),
+    "TDD_REVIEW": ("evidence/tdd-tests.md", "PRE_EXECUTION_SNAPSHOT"),
+}
 
 
 def cmd_validate_task(args: argparse.Namespace) -> int:
@@ -31,6 +40,59 @@ def cmd_transition(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"{manifest['task_id']}: {previous} -> {manifest['stage']}")
+    return 0
+
+
+def cmd_approve_stage(args: argparse.Namespace) -> int:
+    """Record a human approval receipt for a review stage and advance the task.
+
+    stage must be one of SPEC_REVIEW / PLAN_REVIEW / TDD_REVIEW. Exits 1 on any
+    failure (unknown stage, missing artifact, receipt-write or transition
+    refusal); exits 0 only after the state machine has accepted the advance.
+    stderr carries the ValueError text; stdout is reserved for a success line.
+    """
+    stage = args.stage
+    mapping = _APPROVE_STAGE_MAP.get(stage)
+    if mapping is None:
+        allowed = ", ".join(sorted(_APPROVE_STAGE_MAP))
+        print(
+            f"unknown stage: {stage!r} (expected one of: {allowed})",
+            file=sys.stderr,
+        )
+        return 1
+    artifact_rel, next_stage = mapping
+
+    task_dir = Path(args.task_dir).resolve()
+    artifact_path = task_dir / artifact_rel
+    if not artifact_path.is_file():
+        print(
+            f"missing artifact for {stage}: {artifact_path}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        sha256_hex = hash_file(artifact_path)
+    except OSError as exc:
+        print(f"failed to hash {artifact_path}: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        receipt_human_approval(task_dir, stage, sha256_hex, approver="human")
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        previous, manifest = transition_task(task_dir, next_stage)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(
+        f"{manifest['task_id']}: approved {stage} ({sha256_hex[:12]}) "
+        f"and transitioned {previous} -> {manifest['stage']}"
+    )
     return 0
 
 
@@ -418,6 +480,17 @@ def build_parser() -> argparse.ArgumentParser:
     transition_parser.add_argument("next_stage")
     transition_parser.add_argument("--force", action="store_true")
     transition_parser.set_defaults(func=cmd_transition)
+
+    approve_stage_parser = subparsers.add_parser(
+        "approve-stage",
+        help="Record human approval for a review stage and advance the task",
+    )
+    approve_stage_parser.add_argument("task_dir")
+    approve_stage_parser.add_argument(
+        "stage",
+        help="Review stage: SPEC_REVIEW, PLAN_REVIEW, or TDD_REVIEW",
+    )
+    approve_stage_parser.set_defaults(func=cmd_approve_stage)
 
     next_parser = subparsers.add_parser("next-command", help="Resolve next command for current stage")
     next_parser.add_argument("task_dir")

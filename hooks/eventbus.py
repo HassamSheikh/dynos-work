@@ -50,7 +50,6 @@ _HANDLER_TIMEOUTS: dict[str, int] = {
     "postmortem": 60,
     "improve": 90,
     "agent_generator": 90,
-    "benchmark_scheduler": 120,
 }
 _DEFAULT_HANDLER_TIMEOUT = 60
 
@@ -275,6 +274,38 @@ def drain(root: Path, max_iterations: int = 10) -> dict:
             pass
 
 
+def _compute_policy_hash(root: Path) -> str:
+    """Compute an aggregate sha256 over CALIBRATION_POLICY_FILES.
+
+    For each file in CALIBRATION_POLICY_FILES (evaluated under
+    `_persistent_project_dir(root)`):
+    - if the file exists: hash its contents with `hash_file`
+    - if missing: contribute the literal string ``"none"``
+
+    The final digest is `sha256(concat of per-file hashes)` — concatenating
+    the per-file digests in list order so the combined hash is deterministic
+    and order-sensitive. Returns a lowercase hex string.
+    """
+    import hashlib as _hashlib
+    from lib_core import _persistent_project_dir
+    from lib_receipts import CALIBRATION_POLICY_FILES, hash_file
+
+    project_dir = _persistent_project_dir(root)
+    parts: list[str] = []
+    for rel in CALIBRATION_POLICY_FILES:
+        fp = project_dir / rel
+        try:
+            if fp.is_file():
+                parts.append(hash_file(fp))
+            else:
+                parts.append("none")
+        except (OSError, FileNotFoundError):
+            # Race between is_file() and open — treat as missing.
+            parts.append("none")
+    combined = _hashlib.sha256("".join(parts).encode("utf-8")).hexdigest()
+    return combined
+
+
 def _drain_locked(root: Path, max_iterations: int) -> dict:
     """Drain implementation; runs only when the drain.lock is held."""
     summary: dict[str, list[str]] = {}
@@ -288,13 +319,34 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
 
     from lib_core import is_learning_enabled
     learning = is_learning_enabled(root)
-    # policy_engine is the only learning handler — skipped when learning is disabled.
+    # Learning handlers — skipped when learning is disabled. Calibration +
+    # CALIBRATED transition are only attempted when EVERY handler in this
+    # set succeeds for a given task_dir (tracked via handler_all_ok_per_task).
     # postmortem, dashboard, register always run regardless.
-    _LEARNING_HANDLERS = {"policy_engine", "improve", "agent_generator", "benchmark_scheduler"}
+    _LEARNING_HANDLERS = {"policy_engine", "improve", "agent_generator"}
+
+    # Per-task success map — AC 22. One drain call can process multiple
+    # `task-completed` events (one per task), so a single drain-wide
+    # (event_type, consumer) success map is insufficient: a handler may
+    # succeed on task A's event and fail on task B's. Key by task_dir string
+    # (mirrors payload["task_dir"]) so each task's CALIBRATION gate is
+    # evaluated independently.
+    handler_all_ok_per_task: dict[str, dict[str, bool]] = {}
 
     # Track consumers that failed during this drain call — don't retry them
     # in subsequent iterations. Retries happen on the NEXT drain() invocation.
     failed_this_drain: set[tuple[str, str]] = set()  # {(event_type, consumer)}
+
+    # AC 22(a): snapshot the aggregate policy hash BEFORE any learning
+    # handlers run. Captured once per drain call. If compute fails (unlikely
+    # — all errors are swallowed into the "none" sentinel inside
+    # _compute_policy_hash), fall back to a deterministic placeholder so a
+    # later receipt can still be written.
+    try:
+        policy_sha256_before = _compute_policy_hash(root)
+    except Exception as exc:
+        print(f"  [warn] policy hash (before) failed: {exc}", file=sys.stderr)
+        policy_sha256_before = "none"
 
     while iteration < max_iterations:
         iteration += 1
@@ -323,10 +375,13 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
                     payload = event_data.get("payload", {})
 
                     # Capture task identity from task-completed events
+                    task_dir_str: str | None = None
                     if event_type == "task-completed" and isinstance(payload, dict):
                         td = payload.get("task_dir")
-                        if td and td not in completed_task_dirs:
-                            completed_task_dirs.append(td)
+                        if isinstance(td, str) and td:
+                            task_dir_str = td
+                            if td not in completed_task_dirs:
+                                completed_task_dirs.append(td)
 
                     # If this (event_type, consumer) already failed on an
                     # earlier event in this drain, don't re-invoke the handler
@@ -364,6 +419,15 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
                     # Track success with AND semantics: any failure sticks
                     prev = handler_all_ok.setdefault(event_type, {}).get(consumer_name, True)
                     handler_all_ok[event_type][consumer_name] = prev and success
+
+                    # Per-task success map (AC 22). Only meaningful for
+                    # task-completed events where payload carries task_dir.
+                    # AND-semantics: once a handler fails for a task it stays
+                    # failed, even if a later re-run somehow succeeds.
+                    if task_dir_str is not None:
+                        per_task = handler_all_ok_per_task.setdefault(task_dir_str, {})
+                        prev_t = per_task.get(consumer_name, True)
+                        per_task[consumer_name] = prev_t and success
 
                     # Only mark processed on success — failed events stay for retry
                     if success:
@@ -427,19 +491,21 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
 
     # Write post-completion receipt for EACH completed task.
     #
-    # The receipt records which handlers ran and whether two specific outcomes
-    # were achieved: the project's pattern store was updated, and a postmortem
-    # was written for this task. The previous derivation read these from
-    # `calibration-completed` and `memory-completed` summary buckets that no
-    # longer exist (the eventbus chain was flattened to task-completed only,
-    # and postmortem moved to the audit skill). The values were silently False.
+    # v2 contract (AC 20): signature is (task_dir, handlers_run) only —
+    # postmortem_written / patterns_updated moved to dedicated receipts
+    # (receipt_postmortem_* / receipt_calibration_applied below).
     #
-    # Current derivation:
-    # - patterns_updated: from policy_engine handler in the task-completed
-    #   bucket (the renamed equivalent of the old patterns handler).
-    # - postmortem_written: per-task disk check, since postmortem now runs in
-    #   the audit skill (Step 5a) and writes to the persistent project dir.
+    # Calibration gate (AC 22): after the post-completion receipt lands, if
+    # ALL _LEARNING_HANDLERS succeeded for this task (per the per-task
+    # success map) AND learning is enabled, compute a before/after policy
+    # hash snapshot, write a `calibration-applied` receipt, then transition
+    # the task to CALIBRATED. Any missing or failed learning handler for
+    # this task short-circuits: no receipt, no transition.
     if "task-completed" in summary and completed_task_dirs:
+        # Snapshot the aggregate learning-policy hash BEFORE writing any
+        # receipts. The handlers already ran by this point — this hash
+        # reflects the post-learning state on disk. We capture `before` at
+        # drain start (below), `after` here.
         handlers_run = []
         for evt_type, results in summary.items():
             if evt_type.startswith("_"):
@@ -448,24 +514,91 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
             for r in results:
                 name, status = r.split(":", 1)
                 handlers_run.append({"name": name, "success": status == "ok", "event": evt_type})
-        patterns_ok = any(r.startswith("policy_engine:ok") for r in summary.get("task-completed", []))
-        from lib_core import _persistent_project_dir
-        postmortems_dir = _persistent_project_dir(root) / "postmortems"
+
+        # AC 22(a): retros_consumed / scores_updated are derived from the
+        # handlers_run list — policy_engine (patterns.py) scores retros and
+        # writes the effectiveness/route/skip/model policies; improve
+        # aggregates postmortem repair patterns into prevention rules. There
+        # is no reliable counter emitted by those subprocess handlers today,
+        # so we use conservative binary-derived integers:
+        #   retros_consumed  = 1 if policy_engine or improve succeeded else 0
+        #   scores_updated   = 1 if policy_engine succeeded else 0
+        # This satisfies the "0 is acceptable when indeterminable" clause
+        # while still distinguishing the no-retro and fully-skipped paths
+        # for audit trail purposes. A future follow-up may plumb real counts
+        # through the handler return.
+        pe_ok = any(r.startswith("policy_engine:ok") for r in summary.get("task-completed", []))
+        improve_ok = any(r.startswith("improve:ok") for r in summary.get("task-completed", []))
+        retros_consumed = 1 if (pe_ok or improve_ok) else 0
+        scores_updated = 1 if pe_ok else 0
+
+        # Compute `after` policy hash once (cheap: <=10 small-ish files,
+        # most hits are missing files returning "none").
+        policy_sha256_after: str | None = None
+        try:
+            policy_sha256_after = _compute_policy_hash(root)
+        except Exception as exc:
+            print(f"  [warn] policy hash (after) failed: {exc}", file=sys.stderr)
+
         for td in completed_task_dirs:
+            task_dir = Path(td)
+            if not task_dir.exists():
+                continue
             try:
-                from lib_receipts import receipt_post_completion
-                task_dir = Path(td)
-                if task_dir.exists():
-                    task_id = task_dir.name
-                    postmortem_ok = (postmortems_dir / f"{task_id}.json").exists()
-                    receipt_post_completion(
-                        task_dir,
-                        handlers_run=handlers_run,
-                        postmortem_written=postmortem_ok,
-                        patterns_updated=patterns_ok,
-                    )
+                from lib_receipts import (
+                    receipt_post_completion,
+                    receipt_calibration_applied,
+                )
+                receipt_post_completion(
+                    task_dir,
+                    handlers_run=handlers_run,
+                )
             except Exception as exc:
                 print(f"  [warn] post-completion receipt failed for {td}: {exc}", file=sys.stderr)
+                # Skip calibration for this task — no post-completion base.
+                continue
+
+            # AC 22 calibration gate — per-task short-circuit.
+            if not learning:
+                continue
+            per_task = handler_all_ok_per_task.get(td, {})
+            all_learning_ok = all(
+                per_task.get(h) is True for h in _LEARNING_HANDLERS
+            )
+            if not all_learning_ok:
+                continue
+            if policy_sha256_after is None:
+                # Hash compute failed earlier — don't fabricate a receipt.
+                continue
+            try:
+                receipt_calibration_applied(
+                    task_dir,
+                    retros_consumed=retros_consumed,
+                    scores_updated=scores_updated,
+                    policy_sha256_before=policy_sha256_before,
+                    policy_sha256_after=policy_sha256_after,
+                )
+            except Exception as exc:
+                print(
+                    f"  [warn] calibration-applied receipt failed for {td}: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+
+            # AC 22(c): transition to CALIBRATED. Idempotency is enforced by
+            # load_json + ALLOWED_STAGE_TRANSITIONS — if already CALIBRATED,
+            # transition_task raises and we swallow it.
+            try:
+                from lib_core import transition_task, load_json
+                manifest = load_json(task_dir / "manifest.json")
+                if manifest.get("stage") == "CALIBRATED":
+                    continue
+                transition_task(task_dir, "CALIBRATED")
+            except Exception as exc:
+                print(
+                    f"  [warn] CALIBRATED transition failed for {td}: {exc}",
+                    file=sys.stderr,
+                )
 
     return summary
 
@@ -475,8 +608,38 @@ def _drain_locked(root: Path, max_iterations: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def cmd_drain(args) -> int:
-    """Drain all pending events."""
-    root = Path(args.root).resolve()
+    """Drain all pending events.
+
+    --sync --task-dir <dir>  runs the drain in-process (no Popen detach),
+    blocks until it returns, and exits non-zero if any _LEARNING_HANDLERS
+    failed for that task (AC 24). Idempotent: if the task is already at
+    CALIBRATED the drain is a no-op and exits 0.
+    """
+    task_dir_arg: str | None = getattr(args, "task_dir", None)
+    sync_mode: bool = bool(getattr(args, "sync", False))
+
+    # Resolve root from the explicit --root or, when --sync --task-dir is
+    # supplied, from the parent of parents (.dynos/task-xxx -> repo root).
+    if task_dir_arg:
+        task_dir = Path(task_dir_arg).resolve()
+        if sync_mode:
+            # AC 24(d): idempotency — if already CALIBRATED, no-op return 0.
+            try:
+                from lib_core import load_json
+                manifest_path = task_dir / "manifest.json"
+                if manifest_path.is_file():
+                    manifest = load_json(manifest_path)
+                    if manifest.get("stage") == "CALIBRATED":
+                        print(f"  task {task_dir.name} already CALIBRATED — no-op")
+                        return 0
+            except Exception as exc:
+                print(f"  [warn] idempotency check failed: {exc}", file=sys.stderr)
+                # Fall through — we'd rather attempt the drain than silently
+                # exit 0 on a bad manifest.
+        root = task_dir.parent.parent
+    else:
+        root = Path(args.root).resolve()
+
     summary = drain(root, max_iterations=args.max_iterations)
 
     if summary:
@@ -485,6 +648,28 @@ def cmd_drain(args) -> int:
                 print(f"  {event_type}: {result}")
     else:
         print("  No events to process")
+
+    # AC 24(c): exit non-zero when any _LEARNING_HANDLERS failed for the
+    # requested task in the sync run. The learning set is duplicated here
+    # so we don't have to reach into _drain_locked's closure.
+    if sync_mode and task_dir_arg:
+        learning_names = {"policy_engine", "improve", "agent_generator"}
+        # summary values are "name:status" strings grouped by event type.
+        task_completed_results = summary.get("task-completed", [])
+        failed_learning: list[str] = []
+        for entry in task_completed_results:
+            try:
+                name, status = entry.split(":", 1)
+            except ValueError:
+                continue
+            if name in learning_names and status != "ok":
+                failed_learning.append(name)
+        if failed_learning:
+            print(
+                f"  [fail] learning handlers failed: {', '.join(sorted(set(failed_learning)))}",
+                file=sys.stderr,
+            )
+            return 1
 
     return 0
 
@@ -497,6 +682,18 @@ def build_parser():
     drain_p = sub.add_parser("drain", help="Process all pending events")
     drain_p.add_argument("--root", default=".")
     drain_p.add_argument("--max-iterations", type=int, default=10)
+    drain_p.add_argument(
+        "--sync",
+        action="store_true",
+        help="Run drain in-process (no Popen detach); blocks until done. "
+             "Exits non-zero if any learning handler failed for --task-dir.",
+    )
+    drain_p.add_argument(
+        "--task-dir",
+        default=None,
+        help="Path to the task directory for --sync idempotency and failure "
+             "reporting. Required by --sync semantics.",
+    )
     drain_p.set_defaults(func=cmd_drain)
 
     return parser
