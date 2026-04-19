@@ -254,11 +254,37 @@ def _normalize_analysis(analysis: object) -> dict:
         })
     root_causes = [item for item in root_causes if item["root_cause"]][:20]
 
+    # Parity hardening: LLM outputs vary in top-level rule key. Accept both
+    # `prevention_rules` (canonical per build_analysis_prompt) AND
+    # `derived_rules` (commonly produced by general-purpose LLM agents).
+    # Deduplicate by rule text so neither side inflates counts. Also
+    # track each DROP so apply_analysis can report the derived-vs-added
+    # delta — silent drops were the root cause of task-20260419-002's
+    # zero-rules-promoted outcome.
     prevention_rules: list[dict] = []
-    for item in payload.get("prevention_rules", []):
+    _normalization_drops: list[dict] = []
+    seen_rule_texts: set[str] = set()
+    raw_rule_items: list[object] = list(payload.get("prevention_rules", []))
+    if isinstance(payload.get("derived_rules"), list):
+        raw_rule_items.extend(payload["derived_rules"])
+    for item in raw_rule_items:
         normalized = _normalize_rule(item)
-        if normalized is not None:
-            prevention_rules.append(normalized)
+        if normalized is None:
+            # Dropped by _normalize_rule — not a dict, or missing 'rule' text.
+            _normalization_drops.append({
+                "item": item,
+                "reason": "normalize_returned_none",
+            })
+            continue
+        text_key = normalized["rule"].strip().lower()
+        if text_key in seen_rule_texts:
+            _normalization_drops.append({
+                "item": item,
+                "reason": "duplicate_text_within_analysis",
+            })
+            continue
+        seen_rule_texts.add(text_key)
+        prevention_rules.append(normalized)
 
     repair_failures: list[dict] = []
     for item in payload.get("repair_failures", []):
@@ -301,6 +327,14 @@ def _normalize_analysis(analysis: object) -> dict:
         "repair_failures": repair_failures,
         "model_suggestions": model_suggestions,
         "hard_truth": _clean_str(payload.get("hard_truth"), 240),
+        # Parity metadata — consumers (apply_analysis) use these to
+        # detect silent drops. `_input_rule_count` is the RAW count from
+        # the LLM output before any normalization; `_normalization_drops`
+        # lists every item that was rejected and why. The leading
+        # underscore signals internal bookkeeping that shouldn't leak
+        # into persisted prevention-rules.json entries.
+        "_input_rule_count": len(raw_rule_items),
+        "_normalization_drops": _normalization_drops,
     }
 
 
@@ -619,8 +653,29 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
     sanitized = _normalize_analysis(analysis)
     sanitized["analyzed_at"] = now_iso()
     sanitized["task_id"] = task_id
+
+    # Parity accounting — how many rule items did the LLM actually emit,
+    # regardless of which top-level key it used. task-20260419-002 landed
+    # with rules_added=0 because the LLM used `derived_rules` while the
+    # ingester read `prevention_rules`, and nothing reported the silent
+    # drop. These counters close that hole: every emit → either promoted,
+    # rejected-by-schema, normalization-dropped, or duplicate-dropped.
+    _input_rule_count = int(sanitized.pop("_input_rule_count", 0))
+    _normalization_drops = sanitized.pop("_normalization_drops", [])
+
     analysis_path = task_dir / "postmortem-analysis.json"
     write_json(analysis_path, sanitized)
+
+    # Emit one event per normalization drop so the signal is not silent.
+    for drop in _normalization_drops:
+        log_event(
+            root,
+            "postmortem_rule_dropped",
+            task=task_id,
+            task_id=task_id,
+            stage="normalize",
+            reason=drop.get("reason", "unknown"),
+        )
 
     # Extract and merge prevention rules
     new_rules = sanitized.get("prevention_rules", [])
@@ -651,15 +706,44 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 "rule": rule,
                 "reason": reason,
             })
+            # Parity: every schema rejection emits an event so no drop is
+            # silent. The event carries the template + reason so a CI
+            # reviewer can trace which normalized rule failed which rule.
+            log_event(
+                root,
+                "postmortem_rule_dropped",
+                task=task_id,
+                task_id=task_id,
+                stage="schema",
+                template=str(template) if template is not None else "none",
+                reason=reason,
+            )
     new_rules = accepted_rules
     rejected_count = len(rejected_rules)
 
     rules_path = persistent / "prevention-rules.json"
     if not new_rules:
         # Analysis was sanitized to zero usable rules — still emit the
-        # analysis receipt so the chain is provable. rules_sha256_after
-        # reflects the on-disk state of the rules file post-merge (which
-        # in this branch is identical to pre-merge).
+        # analysis receipt so the chain is provable. Loudly flag the
+        # derived-vs-added drop so the signal doesn't silently vanish.
+        # task-20260419-002 hit this path with _input_rule_count=8 and
+        # rules_added=0 (wrong top-level key); now it's at least an
+        # event a reviewer can grep for.
+        if _input_rule_count > 0:
+            log_event(
+                root,
+                "postmortem_rule_promotion_dropped",
+                task=task_id,
+                task_id=task_id,
+                input_rule_count=_input_rule_count,
+                rules_added=0,
+                rejected_count=rejected_count,
+                normalization_drops=len(_normalization_drops),
+                reason=(
+                    "input had rules but zero were promoted — see "
+                    "postmortem_rule_dropped events for per-rule reason"
+                ),
+            )
         try:
             analysis_sha = hash_file(analysis_path)
             rules_sha_after = hash_file(rules_path) if rules_path.exists() else "0" * 64
@@ -671,7 +755,9 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
             "task_id": task_id,
             "rules_added": 0,
             "analysis_written": True,
+            "input_rule_count": _input_rule_count,
             "rejected_count": rejected_count,
+            "normalization_drops": len(_normalization_drops),
         }
     # Lost-update protection: two processes (e.g., two worktrees, or one
     # task completing while another is mid-analysis) can both call
@@ -747,7 +833,9 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
         "task_id": task_id,
         "rules_added": added,
         "analysis_written": True,
+        "input_rule_count": _input_rule_count,
         "rejected_count": rejected_count,
+        "normalization_drops": len(_normalization_drops),
     }
 
 
