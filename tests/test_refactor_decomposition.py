@@ -612,6 +612,8 @@ class TestBinDynosUnchanged:
         "proactive",
         "daemon",
         "worktree",
+        "cloud",
+        "rules-check",
     ]
 
     def test_bin_dynos_exists(self) -> None:

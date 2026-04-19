@@ -528,6 +528,26 @@ def compute_reward(task_dir: Path) -> dict:
 
     Reads audit reports, repair-log, token-usage, execution-log, and manifest.
     Returns the full task-retrospective dict ready to be written to disk.
+
+    Idempotence contract (consumed by B-002 self-compute callers):
+        Two calls with the same on-disk task artifacts produce an identical
+        return value. No module-level caching; every call re-reads the
+        underlying files fresh.
+
+    Side effects (telemetry-only — do not feed back into the return value):
+        * Appends structured events to ``.dynos/{task}/events.jsonl`` for
+          anomalies (missing audit-routing receipt, auditor-not-in-routing
+          reports, finding contradictions). These are append-only telemetry
+          writes; repeated calls produce duplicate events in the log but do
+          NOT change the returned dict.
+        * ``lib_tokens.get_summary`` rewrites ``token-usage.json`` with
+          resolved model names. The rewrite is content-idempotent once
+          converged (legacy ``'default'`` entries get upgraded on first call;
+          subsequent calls write the same bytes).
+
+    Returned dict always contains at least: ``quality_score``, ``cost_score``,
+    ``efficiency_score``, ``total_tokens`` (alias of ``total_token_usage``),
+    plus the full retrospective shape validated by ``validate_retrospective``.
     """
     task_dir = Path(task_dir)
     task_id = task_dir.name
@@ -865,6 +885,10 @@ def compute_reward(task_dir: Path) -> dict:
         "wasted_spawns": wasted_spawns,
         "token_usage_by_agent": token_usage_by_agent,
         "total_token_usage": total_token_usage,
+        # Alias exposed for self-compute callers (e.g. receipt_retrospective
+        # under B-002). The canonical key remains ``total_token_usage`` for
+        # backwards compatibility with dashboards and downstream consumers.
+        "total_tokens": total_token_usage,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "input_tokens_by_agent": input_tokens_by_agent,

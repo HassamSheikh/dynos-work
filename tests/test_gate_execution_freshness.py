@@ -46,7 +46,7 @@ def test_gate_refuses_when_plan_drifts(tmp_path: Path) -> None:
     literal substring `plan.md hash` so operators can tell drift from
     a missing-receipt failure."""
     td = _setup_task(tmp_path)
-    receipt_plan_validated(td, segment_count=0, criteria_coverage=[])
+    import os; os.environ["DYNOS_ALLOW_TEST_OVERRIDE"]="1"; receipt_plan_validated(td, validation_passed_override=True)
     # Mutate plan.md AFTER the receipt was written. The receipt's
     # captured hash is now stale.
     (td / "plan.md").write_text("# plan v2 DRIFTED\n")
@@ -66,7 +66,7 @@ def test_gate_accepts_when_plan_unchanged(tmp_path: Path) -> None:
     """With a fresh receipt and unchanged artifacts, the EXECUTION
     transition must succeed and the manifest must reflect the new stage."""
     td = _setup_task(tmp_path)
-    receipt_plan_validated(td, segment_count=0, criteria_coverage=[])
+    import os; os.environ["DYNOS_ALLOW_TEST_OVERRIDE"]="1"; receipt_plan_validated(td, validation_passed_override=True)
 
     transition_task(td, "EXECUTION")
     manifest = json.loads((td / "manifest.json").read_text())
@@ -101,7 +101,7 @@ def test_drift_and_missing_produce_distinct_messages(tmp_path: Path) -> None:
     """
     # --- drift path -------------------------------------------------
     td_drift = _setup_task(tmp_path)
-    receipt_plan_validated(td_drift, segment_count=0, criteria_coverage=[])
+    import os; os.environ["DYNOS_ALLOW_TEST_OVERRIDE"]="1"; receipt_plan_validated(td_drift, validation_passed_override=True)
     (td_drift / "plan.md").write_text("# drifted\n")
     with pytest.raises(ValueError) as drift_excinfo:
         transition_task(td_drift, "EXECUTION")

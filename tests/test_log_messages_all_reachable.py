@@ -106,8 +106,12 @@ def test_calibration_noop_message_format():
     assert "{reason}" in template
 
 
-def test_plan_routing_key_remains_for_future_use():
-    """AC 23: plan-routing key stays in _LOG_MESSAGES even though pruned
-    from required-chain (writer still exists for reinstatement)."""
-    assert "plan-routing" in _LOG_MESSAGES
-    assert hasattr(lib_receipts, "receipt_plan_routing")
+def test_plan_routing_key_deleted():
+    """Task-007 A-001: plan-routing writer and log message are DELETED —
+    the ghost receipt (silently vacuous gate) is fully removed. The
+    post-task-006 investigator flagged the leftover ALLOWLIST entry as
+    the root cause; task-007 closes it by deleting the writer, the log
+    template, and the receipt step itself."""
+    assert "plan-routing" not in _LOG_MESSAGES
+    assert not hasattr(lib_receipts, "receipt_plan_routing")
+    assert "receipt_plan_routing" not in lib_receipts.__all__

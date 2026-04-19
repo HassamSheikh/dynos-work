@@ -44,7 +44,7 @@ def _setup_artifacts(tmp_path: Path) -> Path:
 def _write_fresh_receipt(td: Path) -> None:
     """Write a plan-audit-check receipt — the writer re-hashes current
     disk contents (SEC-004: no caller-supplied hashes)."""
-    receipt_plan_audit(td, tokens_used=100, finding_count=0)
+    receipt_plan_audit(td, tokens_used=100)
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ def test_payload_contains_three_hashes(tmp_path: Path) -> None:
     hashes — so the only way for the payload to be right is for the
     writer to read the artifacts itself."""
     td = _setup_artifacts(tmp_path)
-    receipt_path = receipt_plan_audit(td, tokens_used=0, finding_count=0)
+    receipt_path = receipt_plan_audit(td, tokens_used=0)
     payload = json.loads(receipt_path.read_text())
     assert payload["spec_sha256"] == hash_file(td / "spec.md")
     assert payload["plan_sha256"] == hash_file(td / "plan.md")
@@ -74,7 +74,7 @@ def test_missing_artifact_writes_literal_missing(tmp_path: Path) -> None:
     never equals a real sha256 hex digest."""
     td = _setup_artifacts(tmp_path)
     (td / "plan.md").unlink()
-    receipt_path = receipt_plan_audit(td, tokens_used=0, finding_count=0)
+    receipt_path = receipt_plan_audit(td, tokens_used=0)
     payload = json.loads(receipt_path.read_text())
     assert payload["plan_sha256"] == "missing"
     # Spec and graph are still real hashes.
@@ -92,7 +92,6 @@ def test_signature_rejects_caller_supplied_hashes(tmp_path: Path) -> None:
         receipt_plan_audit(
             td,
             tokens_used=0,
-            finding_count=0,
             spec_sha256="a" * 64,  # type: ignore[call-arg]
         )
 

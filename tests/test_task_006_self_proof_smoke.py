@@ -82,43 +82,43 @@ def test_learned_agent_injected_symbol_absent_from_runtime_dirs():
         f"PR #123 invariant violated — learned_agent_injected symbol present: {real_hits}"
 
 
-def test_every_writer_in_all_is_either_called_or_allowlisted():
-    """AC 27: every receipt_* in __all__ must be reachable from runtime code
-    OR be on a documented allowlist of intentionally unused writers."""
-    # Allowlist for writers known to be called dynamically only (e.g. via
-    # importlib in skills) or staged for future use.
-    ALLOWLIST = {
-        "receipt_plan_routing",  # AC 5: pruned from required chain, kept for future
-        # rules-check-passed receipt is consumed by lib_core.transition_task
-        # gates (TEST_EXECUTION + DONE) but the *writer* is invoked from a
-        # rules-check skill runner that lives outside this repo's hooks/. The
-        # gate-side reference is enough to prove the receipt's lifecycle.
-        "receipt_rules_check_passed",
-    }
+def test_every_writer_in_all_is_called_in_runtime_code():
+    """Task-007 hard constraint: ALLOWLIST grandfathering REMOVED.
+
+    Every ``receipt_*`` in ``lib_receipts.__all__`` must have at least
+    one real call site in ``hooks/`` / ``skills/`` / ``memory/`` /
+    ``sandbox/`` / ``bin/``. The previous ALLOWLIST exception
+    (``receipt_plan_routing`` and ``receipt_rules_check_passed``) is
+    closed:
+
+      * ``receipt_plan_routing`` deleted entirely (task-007 A-001) —
+        no longer in __all__, so this loop never sees it.
+      * ``receipt_rules_check_passed`` now has the
+        ``bin/dynos rules-check <task_dir>`` CLI shim (task-007 A-004)
+        as its in-tree caller, so the allowlist exemption is no
+        longer needed.
+
+    A writer added to __all__ without a runtime caller fails this test.
+    No escape hatch."""
     writer_names = [
         n for n in lib_receipts.__all__
         if n.startswith("receipt_") and callable(getattr(lib_receipts, n, None))
     ]
 
-    # Search for `writer_name(` invocations across runtime dirs.
     unreferenced = []
     for name in writer_names:
-        if name in ALLOWLIST:
-            continue
-        # Match: name followed by paren OR import statement
         matches = _ripgrep(
             rf"\b{name}\b",
             "hooks", "skills", "memory", "sandbox", "bin",
         )
-        # Filter out the definition site itself
         real_hits = [m for m in matches if "lib_receipts.py" not in m]
         if not real_hits:
             unreferenced.append(name)
 
     assert not unreferenced, (
-        f"writer(s) in lib_receipts.__all__ are exported but unreferenced "
-        f"in runtime code: {unreferenced}\n"
-        "Either add a real call site OR add the name to ALLOWLIST."
+        f"writer(s) in lib_receipts.__all__ are exported but have no "
+        f"runtime caller anywhere in hooks/ / skills/ / bin/: {unreferenced}. "
+        "Add a real call site — task-007 closed the ALLOWLIST escape hatch."
     )
 
 
@@ -148,6 +148,6 @@ def test_calibration_noop_writer_exported():
     assert "receipt_calibration_noop" in lib_receipts.__all__
 
 
-def test_receipt_contract_version_constant_is_three():
-    """AC 27: contract bump landed (RECEIPT_CONTRACT_VERSION == 3)."""
-    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 3
+def test_receipt_contract_version_constant_is_four():
+    """AC 27: contract bump landed (RECEIPT_CONTRACT_VERSION == 4)."""
+    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 4

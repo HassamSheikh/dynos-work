@@ -225,16 +225,12 @@ def cmd_compute_reward(args: argparse.Namespace) -> int:
         from lib_core import write_json
         write_json(task_dir / "task-retrospective.json", result)
         print(f"Written to {task_dir / 'task-retrospective.json'}")
-        # Write retrospective receipt
+        # Write retrospective receipt. B-002 (task-007): writer self-computes
+        # scores via compute_reward(task_dir) internally — caller supplies only
+        # task_dir. Legacy score kwargs would now raise TypeError.
         try:
             from lib_receipts import receipt_retrospective
-            receipt_retrospective(
-                task_dir,
-                quality_score=result.get("quality_score", 0),
-                cost_score=result.get("cost_score", 0),
-                efficiency_score=result.get("efficiency_score", 0),
-                total_tokens=result.get("total_token_usage", 0),
-            )
+            receipt_retrospective(task_dir)
         except Exception as exc:
             print(f"[warn] retrospective receipt failed: {exc}", file=sys.stderr)
     else:

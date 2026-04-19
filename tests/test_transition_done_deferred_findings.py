@@ -89,7 +89,7 @@ def _setup_done_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     audit_dir.mkdir()
     (audit_dir / "report.json").write_text(json.dumps({"findings": []}))
     # receipt_retrospective (proves reward was computed).
-    receipt_retrospective(td, 0.95, 0.9, 0.9, 1000)
+    receipt_retrospective(td)
     # PR #127 (task-006) AC 1: receipt_rules_check_passed self-computes;
     # callers pass only (task_dir, mode). Stub run_checks to a clean pass.
     import rules_engine

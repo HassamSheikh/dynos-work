@@ -256,7 +256,7 @@ def test_forced_transition_does_not_corrupt_normal_gate_state(tmp_path: Path) ->
     # Write a valid plan-validated receipt so the gate passes legitimately.
     td_b = _setup_pre_exec_task(tmp_path, slug="ISO-B")
     from lib_receipts import receipt_plan_validated
-    receipt_plan_validated(td_b, segment_count=0, criteria_coverage=[])
+    import os; os.environ["DYNOS_ALLOW_TEST_OVERRIDE"]="1"; receipt_plan_validated(td_b, validation_passed_override=True)
     # No force this time — the gate must evaluate clean with no leak
     # from the prior force=True call in the same process.
     transition_task(td_b, "EXECUTION")

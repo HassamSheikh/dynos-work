@@ -13,7 +13,11 @@
 set -euo pipefail
 HOOKS_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
 MEMORY_DIR="$(cd "$(dirname "$0")/../memory" && pwd)"
-export PYTHONPATH="${HOOKS_DIR}:${PYTHONPATH:-}"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# HOOKS_DIR enables legacy `from foo import bar` imports inside hooks/.
+# REPO_DIR enables the newer `from hooks.cloud import ...` imports used
+# by the cloud module.
+export PYTHONPATH="${HOOKS_DIR}:${REPO_DIR}:${PYTHONPATH:-}"
 
 usage() {
   cat <<EOF
@@ -262,10 +266,44 @@ print('no')
   postmortem) exec python3 "${HOOKS_DIR}/postmortem.py" "$@" ;;
   calibration|evolve) exec python3 "${MEMORY_DIR}/agent_generator.py" "$@" ;;
   worktree)   exec python3 "${HOOKS_DIR}/worktree.py" "$@" ;;
+  rules-check)
+    # AC 4 (task-007): invoke receipt_rules_check_passed on <task_dir>.
+    # Exit 0 on success, 1 on ValueError refusal, 2 on missing arg or internal error.
+    if [ $# -lt 1 ]; then
+      echo "usage: dynos rules-check <task_dir>" >&2
+      exit 2
+    fi
+    exec python3 -c "
+import sys
+from pathlib import Path
+sys.path.insert(0, '${HOOKS_DIR}')
+from lib_receipts import receipt_rules_check_passed
+td = Path(sys.argv[1])
+if not td.exists() or not td.is_dir():
+    print(f'task_dir not found: {td}', file=sys.stderr); sys.exit(2)
+try:
+    p = receipt_rules_check_passed(td, mode='all')
+    print(f'rules-check-passed: {p}'); sys.exit(0)
+except ValueError as e:
+    print(f'ValueError: {e}', file=sys.stderr); sys.exit(1)
+except Exception as e:
+    print(f'{type(e).__name__}: {e}', file=sys.stderr); sys.exit(2)
+" "$@"
+    ;;
   memory)     exec python3 "${HOOKS_DIR}/patterns.py" "$@" ;;
   trajectory) exec python3 "${HOOKS_DIR}/trajectory.py" "$@" ;;
   bench)      exec python3 "${HOOKS_DIR}/bench.py" "$@" ;;
   report)     exec python3 "${HOOKS_DIR}/report.py" "$@" ;;
+
+  # --- Cloud subcommands (enterprise, opt-in) ---
+  login|logout|status|config)
+    # Forward to hooks.cloud.cli — keep the subcommand name as argv[1].
+    exec python3 -m hooks.cloud.cli "$cmd" "$@"
+    ;;
+  cloud)
+    # `dynos cloud <sub>` — explicit namespace if users prefer.
+    exec python3 -m hooks.cloud.cli "$@"
+    ;;
 
   help|-h|--help) usage ;;
   *) echo "Unknown subcommand: $cmd" >&2; usage >&2; exit 1 ;;

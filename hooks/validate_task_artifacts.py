@@ -86,19 +86,12 @@ def main() -> int:
         graph_path = task_dir / "execution-graph.json"
         spec_path = task_dir / "spec.md"
         if graph_path.exists() and spec_path.exists():
-            graph = _load_json(graph_path)
-            segments = graph.get("segments", [])
-            # Collect all criteria_ids across segments
-            all_criteria: list[int] = []
-            for seg in segments:
-                for cid in seg.get("criteria_ids", []):
-                    if cid not in all_criteria:
-                        all_criteria.append(cid)
-            receipt_plan_validated(
-                task_dir,
-                segment_count=len(segments),
-                criteria_coverage=sorted(all_criteria),
-            )
+            # Task-007 B-004: writer now self-computes segment_count and
+            # criteria_coverage from execution-graph.json internally, and
+            # validation_passed from validate_task_artifacts directly.
+            # This call passed artifact validation (we are at this point in
+            # main()), so the writer's own validation will also succeed.
+            receipt_plan_validated(task_dir)
     except Exception:
         pass  # Never let receipt writing break validation
 
