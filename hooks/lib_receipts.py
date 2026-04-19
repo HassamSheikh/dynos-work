@@ -86,6 +86,7 @@ __all__ = [
     "receipt_postmortem_analysis",
     "receipt_postmortem_skipped",
     "receipt_calibration_applied",
+    "receipt_rules_check_passed",
     "RECEIPT_CONTRACT_VERSION",
     "CALIBRATION_POLICY_FILES",
 ]
@@ -111,6 +112,7 @@ _LOG_MESSAGES: dict[str, str] = {
     "postmortem-analysis": "[DONE] postmortem analysis — rules_added={rules_added}",
     "postmortem-skipped": "[DONE] postmortem skipped — reason={reason}",
     "calibration-applied": "[DONE] calibration applied — retros={retros_consumed} scores={scores_updated}",
+    "rules-check-passed": "[DONE] rules check — {rules_evaluated} rules evaluated, {violations_count} violations",
 }
 
 
@@ -939,6 +941,72 @@ def receipt_calibration_applied(
         scores_updated=scores_updated,
         policy_sha256_before=policy_sha256_before,
         policy_sha256_after=policy_sha256_after,
+    )
+
+
+def receipt_rules_check_passed(
+    task_dir: Path,
+    rules_evaluated: int,
+    violations_count: int,
+    error_violations: int,
+    mode: str,
+    advisory_violations: int = 0,
+    rules_file_sha256: str = "none",
+) -> Path:
+    """Write receipt proving a rules-check pass (no error-severity violations).
+
+    This writer is a *passed-receipt by construction*: it REFUSES to write if
+    ``error_violations != 0``. The rules-check pipeline must take a different
+    path (failure path) when errors are present — this receipt proves the
+    clean outcome only.
+
+    Validates:
+      - All four counts are non-negative ints.
+      - ``error_violations <= violations_count``.
+      - ``error_violations == 0`` (else raises ValueError).
+      - ``mode`` is one of {"staged", "all"}.
+
+    ``engine_version`` is hardcoded to ``"1"`` to avoid importing rules_engine
+    (which may not exist yet during early bootstrap of this feature).
+    ``checked_at`` is stamped via ``now_iso()``.
+    """
+    if not isinstance(rules_evaluated, int) or isinstance(rules_evaluated, bool) or rules_evaluated < 0:
+        raise ValueError("rules_evaluated must be a non-negative int")
+    if not isinstance(violations_count, int) or isinstance(violations_count, bool) or violations_count < 0:
+        raise ValueError("violations_count must be a non-negative int")
+    if not isinstance(error_violations, int) or isinstance(error_violations, bool) or error_violations < 0:
+        raise ValueError("error_violations must be a non-negative int")
+    if not isinstance(advisory_violations, int) or isinstance(advisory_violations, bool) or advisory_violations < 0:
+        raise ValueError("advisory_violations must be a non-negative int")
+    if error_violations > violations_count:
+        raise ValueError(
+            f"error_violations ({error_violations}) must be <= violations_count "
+            f"({violations_count})"
+        )
+    if error_violations != 0:
+        raise ValueError(
+            f"receipt_rules_check_passed REFUSES to write: error_violations="
+            f"{error_violations} (must be 0 — this receipt is a passed-receipt "
+            f"by construction; use a failure-path receipt when errors exist)"
+        )
+    if mode not in ("staged", "all"):
+        raise ValueError(
+            f"mode must be 'staged' or 'all' (got mode={mode!r})"
+        )
+    if not isinstance(rules_file_sha256, str) or not rules_file_sha256:
+        raise ValueError("rules_file_sha256 must be a non-empty string")
+
+    return write_receipt(
+        task_dir,
+        "rules-check-passed",
+        rules_evaluated=rules_evaluated,
+        violations_count=violations_count,
+        error_violations=error_violations,
+        advisory_violations=advisory_violations,
+        engine_version="1",
+        rules_file_sha256=rules_file_sha256,
+        checked_at=now_iso(),
+        mode=mode,
     )
 
 

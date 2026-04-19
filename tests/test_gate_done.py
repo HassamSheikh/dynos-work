@@ -15,6 +15,7 @@ from lib_receipts import (  # noqa: E402
     receipt_audit_done,
     receipt_postmortem_skipped,
     receipt_retrospective,
+    receipt_rules_check_passed,
     write_receipt,
 )
 
@@ -35,6 +36,9 @@ def _setup(tmp_path: Path) -> Path:
     (audit_dir / "report.json").write_text(json.dumps({"findings": []}))
     # The legacy DONE gate wants a `retrospective` receipt as well
     receipt_retrospective(td, 0.95, 0.9, 0.9, 1000)
+    # Task-005's new gate (CHECKPOINT_AUDIT->DONE) requires rules-check-passed
+    receipt_rules_check_passed(td, rules_evaluated=0, violations_count=0,
+                                error_violations=0, mode="all")
     return td
 
 

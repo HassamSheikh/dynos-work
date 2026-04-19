@@ -45,6 +45,8 @@ def _worker_apply_analysis(task_dir_str: str, rule_text: str, delay: float = 0.0
             "source_finding": f"finding-for-{rule_text}",
             "rationale": "test",
             "enforcement": "prompt-constraint",
+            "template": "advisory",
+            "params": {},
         }],
     })
 
@@ -67,11 +69,13 @@ class TestPreventionRulesLock:
         from postmortem_analysis import apply_analysis
         apply_analysis(task_dir, {"summary": "t", "prevention_rules": [
             {"executor": "all", "category": "sec", "rule": "rule-A",
-             "source_finding": "f-A", "rationale": "r", "enforcement": "prompt-constraint"}
+             "source_finding": "f-A", "rationale": "r", "enforcement": "prompt-constraint",
+             "template": "advisory", "params": {}}
         ]})
         apply_analysis(task_dir, {"summary": "t", "prevention_rules": [
             {"executor": "all", "category": "sec", "rule": "rule-B",
-             "source_finding": "f-B", "rationale": "r", "enforcement": "prompt-constraint"}
+             "source_finding": "f-B", "rationale": "r", "enforcement": "prompt-constraint",
+             "template": "advisory", "params": {}}
         ]})
         # Find the rules file
         from lib_core import _persistent_project_dir

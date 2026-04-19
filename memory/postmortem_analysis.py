@@ -57,6 +57,84 @@ VALID_EXECUTORS = {
     "all",
 }
 
+# Mirrors `hooks.rules_engine.TEMPLATE_SCHEMAS`. Kept inline here to keep
+# postmortem writes independent of the rules_engine module (which is
+# authored in seg-1 of this task, running in parallel). A seg-6 test
+# verifies that the two dicts stay structurally aligned; if you change
+# one you MUST change the other.
+TEMPLATE_SCHEMAS: dict = {
+    "every_name_in_X_satisfies_Y": {
+        "required": ["module", "container", "predicate"],
+        "enums": {"predicate": ["callable", "hasattr", "in_registry"]},
+        "types": {"module": str, "container": str, "predicate": str},
+    },
+    "pattern_must_not_appear": {
+        "required": ["regex", "scope"],
+        "types": {"regex": str, "scope": str},
+    },
+    "co_modification_required": {
+        "required": ["trigger_glob", "must_modify_glob"],
+        "types": {"trigger_glob": str, "must_modify_glob": str},
+    },
+    "signature_lock": {
+        "required": ["module", "function", "expected_params"],
+        "types": {"module": str, "function": str, "expected_params": list},
+    },
+    "caller_count_required": {
+        "required": ["symbol", "scope", "min_count"],
+        "types": {"symbol": str, "scope": str, "min_count": int},
+    },
+    "import_constant_only": {
+        "required": ["literal_pattern", "allowed_files"],
+        "types": {"literal_pattern": str, "allowed_files": list},
+    },
+    "advisory": {"required": []},
+}
+
+
+def _validate_rule_schema(rule: object) -> tuple[bool, str]:
+    """Validate one prevention rule against TEMPLATE_SCHEMAS.
+
+    Returns (ok, reason). When ok is False, *reason* names the exact
+    check that failed so the REJECT stderr line is actionable.
+    """
+    if not isinstance(rule, dict):
+        return False, "rule is not a dict"
+    template = rule.get("template")
+    if template is None:
+        return False, "missing template field"
+    if template not in TEMPLATE_SCHEMAS:
+        return False, f"unknown template: {template}"
+    schema = TEMPLATE_SCHEMAS[template]
+    params = rule.get("params")
+    if not isinstance(params, dict):
+        # advisory has no required keys, but still must have a (possibly
+        # empty) params dict — callers may extend advisory later.
+        if schema.get("required"):
+            return False, "params is not a dict"
+        params = {}
+    # (b) required keys present & non-None
+    for key in schema.get("required", []):
+        if params.get(key) is None:
+            return False, f"missing required param: {key}"
+    # (c) enum check
+    for key, allowed in schema.get("enums", {}).items():
+        if params.get(key) not in allowed:
+            return False, f"param {key}={params.get(key)!r} not in enum {allowed}"
+    # (d) type check
+    for key, typ in schema.get("types", {}).items():
+        value = params.get(key)
+        # bool is a subclass of int; reject bools where int is required
+        # unless the schema explicitly permits bool.
+        if typ is int and isinstance(value, bool):
+            return False, f"param {key} expected {typ.__name__}, got bool"
+        if not isinstance(value, typ):
+            return False, (
+                f"param {key} expected {typ.__name__}, "
+                f"got {type(value).__name__}"
+            )
+    return True, ""
+
 
 def _read_artifact(path: Path) -> dict | list | None:
     """Read a JSON artifact, returning None if missing or broken."""
@@ -139,7 +217,7 @@ def _normalize_rule(item: object) -> dict | None:
     enforcement = _clean_str(item.get("enforcement"), 32).lower()
     if enforcement not in VALID_ENFORCEMENT:
         enforcement = "prompt-constraint"
-    return {
+    normalized: dict = {
         "executor": _normalize_executor(item.get("executor")) or "all",
         "category": _normalize_category(item.get("category")),
         "rule": rule,
@@ -147,6 +225,14 @@ def _normalize_rule(item: object) -> dict | None:
         "rationale": _clean_str(item.get("rationale"), 300),
         "enforcement": enforcement,
     }
+    # Preserve structured template + params for AC 11 validation and AC 13
+    # template-aware routing. We deliberately keep the raw LLM values so
+    # the validator can reject ill-formed rules with a precise reason.
+    if "template" in item:
+        normalized["template"] = item.get("template")
+    if isinstance(item.get("params"), dict):
+        normalized["params"] = item.get("params")
+    return normalized
 
 
 def _normalize_analysis(analysis: object) -> dict:
@@ -414,6 +500,8 @@ The JSON must have this exact top-level shape:
   ],
   "prevention_rules": [
     {{
+      "template": "every_name_in_X_satisfies_Y|pattern_must_not_appear|co_modification_required|signature_lock|caller_count_required|import_constant_only|advisory",
+      "params": {{}},
       "executor": "backend-executor|ui-executor|db-executor|integration-executor|testing-executor|docs-executor|refactor-executor|ml-executor|all",
       "rule": "Specific preventive rule in imperative voice, max 100 chars",
       "category": "sec|cq|dc|perf|comp|ui|db|test|process|unknown",
@@ -441,6 +529,37 @@ The JSON must have this exact top-level shape:
   ],
   "hard_truth": "One sentence naming the biggest systemic weakness exposed by this task"
 }}
+
+## Prevention rule schema
+
+Each prevention_rules entry MUST use this structured format:
+{{
+  "template": "<one of: every_name_in_X_satisfies_Y | pattern_must_not_appear | co_modification_required | signature_lock | caller_count_required | import_constant_only | advisory>",
+  "params": {{...template-specific keys...}},
+  "rule": "<short human-readable rule text, max 100 chars>",
+  "executor": "<executor name or 'all'>",
+  "category": "sec|cq|dc|perf|comp|test|process|unknown",
+  "source_finding": "<finding ID or description>",
+  "rationale": "<why this rule prevents recurrence>",
+  "enforcement": "test|lint|static-check|runtime-guard|ci-gate|review-checklist|prompt-constraint"
+}}
+
+### Template params:
+- every_name_in_X_satisfies_Y: {{module: str, container: str, predicate: "callable"|"hasattr"|"in_registry"}}
+    Example: {{"template": "every_name_in_X_satisfies_Y", "params": {{"module": "hooks.lib_receipts", "container": "__all__", "predicate": "callable"}}, ...}}
+- pattern_must_not_appear: {{regex: str, scope: glob-str, context_required?: regex-str}}
+    Example: {{"template": "pattern_must_not_appear", "params": {{"regex": "time\\.time\\(\\)", "scope": "hooks/*.py"}}, ...}}
+- co_modification_required: {{trigger_glob: str, must_modify_glob: str}}
+    Example: {{"template": "co_modification_required", "params": {{"trigger_glob": "hooks/lib_*.py", "must_modify_glob": ".dynos/task-*/spec.md"}}, ...}}
+- signature_lock: {{module: str, function: str, expected_params: list[str]}}
+    Example: {{"template": "signature_lock", "params": {{"module": "hooks.lib_receipts", "function": "receipt_post_completion", "expected_params": ["task_dir", "handlers_run"]}}, ...}}
+- caller_count_required: {{symbol: str, scope: glob-str, min_count: int}}
+    Example: {{"template": "caller_count_required", "params": {{"symbol": "receipt_calibration_applied", "scope": "hooks/*.py", "min_count": 1}}, ...}}
+- import_constant_only: {{literal_pattern: regex-str, allowed_files: list[glob-str]}}
+    Example: {{"template": "import_constant_only", "params": {{"literal_pattern": "receipts/_injected-", "allowed_files": ["hooks/lib_receipts.py", "hooks/router.py"]}}, ...}}
+- advisory: {{}} (free-text rule; used when failure pattern is judgment-based)
+
+When the rule cannot be structurally expressed (e.g. "apply scrutiny for SEC-class issues"), you MUST emit `template: "advisory"` explicitly. NEVER omit the template field.
 
 Rules:
 - Every claim must be grounded in the provided task data.
@@ -502,6 +621,36 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
 
     # Extract and merge prevention rules
     new_rules = sanitized.get("prevention_rules", [])
+
+    # AC 11: schema-validate every LLM-authored rule against
+    # TEMPLATE_SCHEMAS. Rejected rules are NOT merged, are logged to
+    # stderr with the failing check, and tallied into the return dict
+    # so downstream callers (and tests) can assert on rejection counts.
+    #
+    # Why this lives BEFORE the lock: validation is pure / side-effect
+    # free aside from stderr; we want rejections visible regardless of
+    # whether the merge ultimately runs. The merge below operates only
+    # on the validated `new_rules` slice.
+    rejected_rules: list[dict] = []
+    accepted_rules: list[dict] = []
+    for rule in new_rules:
+        ok, reason = _validate_rule_schema(rule)
+        if ok:
+            accepted_rules.append(rule)
+        else:
+            template = rule.get("template") if isinstance(rule, dict) else None
+            print(
+                f"[postmortem_analysis] REJECT rule template={template} "
+                f"reason={reason}",
+                file=_sys.stderr,
+            )
+            rejected_rules.append({
+                "rule": rule,
+                "reason": reason,
+            })
+    new_rules = accepted_rules
+    rejected_count = len(rejected_rules)
+
     rules_path = persistent / "prevention-rules.json"
     if not new_rules:
         # Analysis was sanitized to zero usable rules — still emit the
@@ -515,7 +664,12 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 receipt_postmortem_analysis(task_dir, analysis_sha, 0, rules_sha_after)
         except (FileNotFoundError, OSError, ValueError) as exc:
             log_event(root, "postmortem_analysis_receipt_failed", task=task_id, error=str(exc))
-        return {"task_id": task_id, "rules_added": 0, "analysis_written": True}
+        return {
+            "task_id": task_id,
+            "rules_added": 0,
+            "analysis_written": True,
+            "rejected_count": rejected_count,
+        }
     # Lost-update protection: two processes (e.g., two worktrees, or one
     # task completing while another is mid-analysis) can both call
     # apply_analysis concurrently. write_json is atomic (tempfile + rename)
@@ -549,7 +703,7 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 text = rule.get("rule", "").strip()
                 if not text or text.lower() in existing_rule_texts:
                     continue
-                current_rules.append({
+                merged = {
                     "executor": rule.get("executor", "all"),
                     "category": rule.get("category", "unknown"),
                     "rule": text,
@@ -558,7 +712,14 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                     "rationale": rule.get("rationale", ""),
                     "enforcement": rule.get("enforcement", "prompt-constraint"),
                     "added_at": now_iso(),
-                })
+                    # Persist the validated template + params so the
+                    # router (AC 13) can route enforced rules out of
+                    # the executor prompt and the rules engine (seg-1)
+                    # can compile them into runtime guards.
+                    "template": rule.get("template", "advisory"),
+                    "params": rule.get("params", {}) if isinstance(rule.get("params"), dict) else {},
+                }
+                current_rules.append(merged)
                 existing_rule_texts.add(text.lower())
                 added += 1
 
@@ -579,7 +740,12 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
     except (FileNotFoundError, OSError, ValueError) as exc:
         log_event(root, "postmortem_analysis_receipt_failed", task=task_id, error=str(exc))
 
-    return {"task_id": task_id, "rules_added": added, "analysis_written": True}
+    return {
+        "task_id": task_id,
+        "rules_added": added,
+        "analysis_written": True,
+        "rejected_count": rejected_count,
+    }
 
 
 def cmd_build_prompt(args: argparse.Namespace) -> int:

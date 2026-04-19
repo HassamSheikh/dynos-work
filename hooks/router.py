@@ -862,6 +862,7 @@ def build_executor_plan(
     segments: list[dict],
     *,
     ctx: RouterContext | None = None,
+    include_enforced: bool = False,
 ) -> dict:
     """Build a complete, deterministic execution spawn plan.
 
@@ -870,6 +871,21 @@ def build_executor_plan(
     When *ctx* is provided, its cached reads are reused. When *ctx* is None,
     a fresh RouterContext is constructed locally so external callers keep
     working unchanged.
+
+    Prevention-rule filtering (AC 13):
+        Rules with a structured `template` other than "advisory" are
+        considered "enforced" — they have a runtime / static-check
+        backstop and shipping their text into the executor prompt
+        wastes tokens. By default only `advisory` rules (and legacy
+        rules missing a `template` field, for backward-compat during
+        the migration window) reach the prompt.
+
+        Pass `include_enforced=True` to disable the filter and include
+        every rule, e.g. for diagnostics or for audits that want to
+        verify the LLM still sees enforced-rule rationale.
+
+        Each segment plan entry exposes `prevention_rules_omitted: int`
+        so callers can prove the filter ran.
     """
     ctx = ctx or RouterContext(root)
     all_rules = load_prevention_rules(root)
@@ -886,12 +902,32 @@ def build_executor_plan(
         model_decision = resolve_model(root, executor, task_type, ctx=ctx)
         route_decision = resolve_route(root, executor, task_type, ctx=ctx)
 
-        # Filter prevention rules relevant to this executor
-        executor_rules = [
-            r["rule"] for r in all_rules
+        # Step 1: filter to rules that target this executor (or all).
+        executor_scoped: list[dict] = [
+            r for r in all_rules
             if isinstance(r, dict) and r.get("rule")
             and (not r.get("executor") or r.get("executor") == executor)
         ]
+
+        # Step 2: AC 13 template filter. Advisory + missing-template
+        # stay; everything else is omitted unless include_enforced is set.
+        prevention_rules_omitted = 0
+        if include_enforced:
+            kept = executor_scoped
+        else:
+            kept = []
+            for r in executor_scoped:
+                tmpl = r.get("template")
+                # Missing template → backward-compat advisory; keep.
+                # Explicit "advisory" → keep.
+                # Anything else (every_name_in_X_satisfies_Y, signature_lock, ...)
+                # has a runtime/static backstop, so omit it from the prompt.
+                if tmpl is None or tmpl == "advisory":
+                    kept.append(r)
+                else:
+                    prevention_rules_omitted += 1
+
+        executor_rules = [r["rule"] for r in kept]
 
         plan["segments"].append({
             "segment_id": seg_id,
@@ -904,9 +940,10 @@ def build_executor_plan(
             "agent_name": route_decision["agent_name"],
             "composite_score": route_decision["composite_score"],
             "prevention_rules": executor_rules,
+            "prevention_rules_omitted": prevention_rules_omitted,
         })
 
-    log_event(root, "router_executor_plan", task_type=task_type, segment_count=len(plan["segments"]), segments=[{"segment_id": s["segment_id"], "executor": s["executor"], "model": s.get("model"), "model_source": s.get("model_source")} for s in plan["segments"]])
+    log_event(root, "router_executor_plan", task_type=task_type, segment_count=len(plan["segments"]), include_enforced=include_enforced, segments=[{"segment_id": s["segment_id"], "executor": s["executor"], "model": s.get("model"), "model_source": s.get("model_source"), "prevention_rules_omitted": s.get("prevention_rules_omitted", 0)} for s in plan["segments"]])
     return plan
 
 
@@ -1166,7 +1203,14 @@ def cmd_executor_plan(args: argparse.Namespace) -> int:
 
     # Build plan once. Write to the task-local cache so per-segment
     # `inject-prompt` invocations can reuse it without rebuilding.
-    plan = build_executor_plan(root, args.task_type, graph.get("segments", []))
+    # AC 13: --include-enforced overrides the template filter so audits
+    # / debugging can see every rule, not just advisory ones.
+    plan = build_executor_plan(
+        root,
+        args.task_type,
+        graph.get("segments", []),
+        include_enforced=getattr(args, "include_enforced", False),
+    )
 
     task_id = _task_id_from_graph_path(graph_path)
     if task_id:
@@ -1306,8 +1350,15 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
                 cache_status = "fingerprint_drift"
 
     if plan_entry is None:
-        # Fallback: live build for this single segment
-        plan = build_executor_plan(root, args.task_type, [target_seg])
+        # Fallback: live build for this single segment.
+        # AC 13: respect --include-enforced so the fallback path agrees
+        # with what `executor-plan` would have produced.
+        plan = build_executor_plan(
+            root,
+            args.task_type,
+            [target_seg],
+            include_enforced=getattr(args, "include_enforced", False),
+        )
         if not plan["segments"]:
             print(json.dumps({"error": "no plan entry for segment"}))
             return 1
@@ -1566,6 +1617,16 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--root", default=".")
     ep.add_argument("--task-type", required=True)
     ep.add_argument("--graph", required=True)
+    ep.add_argument(
+        "--include-enforced",
+        action="store_true",
+        default=False,
+        help=(
+            "Include enforced (template != advisory) prevention rules in "
+            "executor prompts. Default: omit them, since they have a "
+            "runtime/static backstop."
+        ),
+    )
     ep.set_defaults(func=cmd_executor_plan)
 
     ip = subparsers.add_parser("inject-prompt", help="Inject learned agent rules into executor prompt")
@@ -1573,6 +1634,15 @@ def build_parser() -> argparse.ArgumentParser:
     ip.add_argument("--task-type", required=True)
     ip.add_argument("--graph", required=True)
     ip.add_argument("--segment-id", required=True)
+    ip.add_argument(
+        "--include-enforced",
+        action="store_true",
+        default=False,
+        help=(
+            "Include enforced (template != advisory) prevention rules in "
+            "the injected prompt. Default: omit them."
+        ),
+    )
     ip.set_defaults(func=cmd_inject_prompt)
 
     aip = subparsers.add_parser(
