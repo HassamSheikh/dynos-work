@@ -1,0 +1,182 @@
+{
+  "aborted": false,
+  "dry_run": false,
+  "entries": [
+    {
+      "candidate_count": 0,
+      "index": 0,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 1,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 2,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 3,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 4,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 5,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 6,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 7,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 8,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 9,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 10,
+      "status": "advisory-default"
+    },
+    {
+      "classifier": "time.time()+throttle",
+      "index": 11,
+      "status": "auto",
+      "template": "pattern_must_not_appear"
+    },
+    {
+      "candidate_count": 0,
+      "index": 12,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 13,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 14,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 15,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 16,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 17,
+      "status": "advisory-default"
+    },
+    {
+      "classifier": "O_NOFOLLOW+lock",
+      "index": 18,
+      "status": "auto",
+      "template": "pattern_must_not_appear"
+    },
+    {
+      "candidate_count": 0,
+      "index": 19,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 20,
+      "status": "advisory-default"
+    },
+    {
+      "classifier": "all+callable/defined",
+      "index": 21,
+      "status": "auto",
+      "template": "every_name_in_X_satisfies_Y"
+    },
+    {
+      "candidate_count": 0,
+      "index": 22,
+      "status": "advisory-default"
+    },
+    {
+      "classifier": "handler+register",
+      "index": 23,
+      "status": "auto",
+      "template": "every_name_in_X_satisfies_Y"
+    },
+    {
+      "classifier": "handler+register",
+      "index": 24,
+      "status": "auto",
+      "template": "every_name_in_X_satisfies_Y"
+    },
+    {
+      "candidate_count": 0,
+      "index": 25,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 26,
+      "status": "advisory-default"
+    },
+    {
+      "classifier": "co-modify/spec-amendment",
+      "index": 27,
+      "status": "auto",
+      "template": "co_modification_required"
+    },
+    {
+      "candidate_count": 0,
+      "index": 28,
+      "status": "advisory-default"
+    },
+    {
+      "classifier": "literal+only-in",
+      "index": 29,
+      "status": "auto",
+      "template": "import_constant_only"
+    },
+    {
+      "candidate_count": 0,
+      "index": 30,
+      "status": "advisory-default"
+    },
+    {
+      "candidate_count": 0,
+      "index": 31,
+      "status": "advisory-default"
+    }
+  ],
+  "non_interactive": true,
+  "rules_path": "/Users/hassam/.dynos/projects/Users-hassam-Documents-dynos-work/prevention-rules.json",
+  "summary": {
+    "advisory_default": 25,
+    "auto": 7,
+    "operator_chosen": 0,
+    "skipped": 0,
+    "total_input": 32
+  }
+}

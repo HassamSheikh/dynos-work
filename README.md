@@ -15,6 +15,16 @@ claude plugin marketplace add dynos-fit/dynos-work
 claude plugin install dynos-work
 ```
 
+## Install commit-time rules check
+
+After cloning, install the deterministic rules engine pre-commit hook:
+
+```bash
+python3 hooks/rules_engine.py install-hook
+```
+
+This writes a `.git/hooks/pre-commit` script that runs the dynos rules engine on staged files at commit time. The hook enforces project-specific prevention rules (defined in `~/.dynos/projects/{slug}/prevention-rules.json`) and refuses commits with errors. New clones MUST run this command — git does not version `.git/hooks/`. Bypass via `git commit --no-verify` is supported but discouraged.
+
 ## Use
 
 ```

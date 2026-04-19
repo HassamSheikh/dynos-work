@@ -517,6 +517,37 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                     f"expected={(expected or '')[:12]} actual={actual[:12]}"
                 )
 
+        def _check_rules_check_passed(
+            task_dir: Path, current_stage: str, next_stage: str
+        ) -> None:
+            """Refuse the current transition unless a ``rules-check-passed``
+            receipt exists and reports ``error_violations == 0``.
+
+            Fail-closed semantics: when the receipt is missing entirely the
+            count is reported as ``"missing"`` in the refusal message, and
+            when the ``error_violations`` key is absent from the receipt the
+            default value used is ``1`` so a malformed receipt still refuses
+            the transition.
+            """
+            from lib_receipts import read_receipt  # noqa: F811 — lazy re-import per spec
+
+            receipt_path = task_dir / "receipts" / "rules-check-passed.json"
+            receipt = read_receipt(task_dir, "rules-check-passed")
+            if receipt is None:
+                n = "missing"
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"missing or failed rules-check-passed receipt at "
+                    f"{receipt_path} (error_violations={n})"
+                )
+            if receipt.get("error_violations", 1) != 0:
+                n = receipt.get("error_violations", "missing")
+                _refuse(
+                    f"Cannot transition {current_stage} -> {next_stage}: "
+                    f"missing or failed rules-check-passed receipt at "
+                    f"{receipt_path} (error_violations={n})"
+                )
+
         # ---- AC 3: SPEC_REVIEW -> PLANNING requires human-approval-SPEC_REVIEW
         # whose artifact_sha256 matches sha256(spec.md).
         if current_stage == "SPEC_REVIEW" and next_stage == "PLANNING":
@@ -675,6 +706,14 @@ def transition_task(task_dir: Path, next_stage: str, *, force: bool = False) -> 
                     f"Cannot transition {current_stage} -> {next_stage}: "
                     f"missing receipt calibration-applied at {ca_path}"
                 )
+
+        # AC 19: rules-check-passed receipt required at two transition points.
+        # Fires AFTER all other gate clauses so existing checks order is
+        # preserved. Bypassed by force=True (we are inside `if not force:`).
+        if next_stage == "TEST_EXECUTION":
+            _check_rules_check_passed(task_dir, current_stage, next_stage)
+        if current_stage == "CHECKPOINT_AUDIT" and next_stage == "DONE":
+            _check_rules_check_passed(task_dir, current_stage, next_stage)
 
         if gate_errors:
             raise ValueError(
