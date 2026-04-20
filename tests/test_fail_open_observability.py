@@ -29,10 +29,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "hooks"))
 
 
-def _setup_done_ready(tmp_path: Path, slug: str = "FOD") -> Path:
+def _setup_done_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slug: str = "FOD",
+) -> Path:
     """Build a task at CHECKPOINT_AUDIT ready for DONE — but WITHOUT
     actually wiring all DONE receipts. We only need the transition to
     reach the deferred-findings branch.
+
+    Mocks ``router._load_auditor_registry`` to return empty lists so
+    ``require_receipts_for_done``'s registry-eligible cross-check is
+    vacuous and the transition actually reaches the AC13/AC14
+    deferred-findings branch under test (otherwise it would refuse at
+    the audit-routing cross-check with "audit-routing missing
+    registry-eligible auditor: <name>" BEFORE the fail-open branch runs).
     """
     from lib_receipts import (  # noqa: PLC0415
         receipt_retrospective,
@@ -40,6 +51,13 @@ def _setup_done_ready(tmp_path: Path, slug: str = "FOD") -> Path:
         receipt_audit_routing,
         receipt_postmortem_skipped,
     )
+
+    # Prevent the registry-eligible auditor cross-check from short-circuiting
+    # the DONE transition before it reaches the deferred-findings branch.
+    import router  # noqa: PLC0415
+    monkeypatch.setattr(router, "_load_auditor_registry", lambda root: {
+        "always": [], "fast_track": [], "domain_conditional": {},
+    })
 
     project = tmp_path / "project"
     td = project / ".dynos" / f"task-20260419-{slug}"
@@ -106,7 +124,7 @@ def test_deferred_findings_check_unavailable_emitted_on_import_error(
     from lib_core import transition_task  # noqa: PLC0415
     from lib_receipts import RECEIPT_CONTRACT_VERSION  # noqa: F401, PLC0415
 
-    td = _setup_done_ready(tmp_path, slug="UNAVAIL")
+    td = _setup_done_ready(tmp_path, monkeypatch, slug="UNAVAIL")
     # The DONE transition should still succeed (fail-open).
     transition_task(td, "DONE")
 
@@ -129,6 +147,12 @@ def test_deferred_findings_unavailable_fail_open_if_log_event_raises(
     deferred_findings_check_unavailable event, the DONE transition must
     still succeed.
     """
+    from lib_core import transition_task  # noqa: PLC0415
+    # IMPORTANT: build the fixture BEFORE installing the log_event-explodes
+    # patch — the fixture writers legitimately emit events and must not be
+    # torched by the D3 probe (which is scoped to the DONE transition).
+    td = _setup_done_ready(tmp_path, monkeypatch, slug="UNA-FOP")
+
     monkeypatch.delitem(sys.modules, "check_deferred_findings", raising=False)
 
     import builtins
@@ -146,8 +170,6 @@ def test_deferred_findings_unavailable_fail_open_if_log_event_raises(
         raise Exception("forced log_event failure")
     monkeypatch.setattr(lib_log, "log_event", _explode)
 
-    from lib_core import transition_task  # noqa: PLC0415
-    td = _setup_done_ready(tmp_path, slug="UNA-FOP")
     # Must not raise.
     transition_task(td, "DONE")
 
@@ -172,7 +194,7 @@ def test_deferred_findings_check_errored_emitted_on_exception(
 
     monkeypatch.setattr(cdf, "check_deferred_findings", _boom)
 
-    td = _setup_done_ready(tmp_path, slug="ERRORED")
+    td = _setup_done_ready(tmp_path, monkeypatch, slug="ERRORED")
     transition_task(td, "DONE")
 
     events = _read_events(td)
@@ -196,6 +218,10 @@ def test_deferred_findings_errored_fail_open_if_log_event_raises(
     from lib_core import transition_task  # noqa: PLC0415
     import check_deferred_findings as cdf
 
+    # IMPORTANT: build the fixture BEFORE installing the log_event-explodes
+    # patch so fixture writers can legitimately emit events.
+    td = _setup_done_ready(tmp_path, monkeypatch, slug="ERR-FOP")
+
     def _boom(root, changed_files):
         raise RuntimeError("simulated failure")
 
@@ -206,7 +232,6 @@ def test_deferred_findings_errored_fail_open_if_log_event_raises(
         raise Exception("forced log_event failure")
     monkeypatch.setattr(lib_log, "log_event", _explode)
 
-    td = _setup_done_ready(tmp_path, slug="ERR-FOP")
     transition_task(td, "DONE")
     manifest = json.loads((td / "manifest.json").read_text())
     assert manifest["stage"] == "DONE"
