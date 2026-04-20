@@ -1147,13 +1147,16 @@ def transition_task(
     # reach the receipt writer. Order matters: reason first, then
     # approver, so the ValueError names the first missing arg.
     if force:
-        if not isinstance(force_reason, str) or not force_reason:
+        if not isinstance(force_reason, str) or not force_reason.strip():
             raise ValueError(
-                "force_reason must be a non-empty string when force=True"
+                "force_reason must be a non-empty string when force=True "
+                "(whitespace-only values are rejected — whitespace carries no "
+                "human-readable justification)"
             )
-        if not isinstance(force_approver, str) or not force_approver:
+        if not isinstance(force_approver, str) or not force_approver.strip():
             raise ValueError(
-                "force_approver must be a non-empty string when force=True"
+                "force_approver must be a non-empty string when force=True "
+                "(whitespace-only values are rejected)"
             )
 
     manifest_path = task_dir / "manifest.json"

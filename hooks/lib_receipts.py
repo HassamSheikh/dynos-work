@@ -32,7 +32,15 @@ from lib_log import log_event
 # that is not derivable from on-disk state. Pre-v5 force-override
 # receipts are NOT retroactively invalidated — the floor in
 # MIN_VERSION_PER_STEP applies to v5+ writes only and existing receipts
-# remain readable.
+# remain readable. F2-F6 findings close alongside F1 as additive
+# observability/attribution changes that ride the same v5 bump without
+# introducing new caller-supplied fields: F2/F3 are skill-prose and
+# template-scope hardening (no receipt-shape impact); F4 adds a
+# self-computing ``self_verify`` enum on receipt_post_completion; F5
+# tightens receipt-side event-attribution filtering paired with
+# eventbus source-side ``task=task_id`` emission; F6 tags unverified
+# persistent retrospectives with ``_source: "persistent-unverified"``
+# and emits ``retrospective_trusted_without_flush_event``.
 #
 # Bump rationale (v3 -> v4, prior): caller-falsification hardening. A
 # family of receipt writers now self-compute their payload fields from
@@ -1594,8 +1602,12 @@ def receipt_human_approval(
         raise ValueError(f"stage must not contain path separators: {stage!r}")
     if not isinstance(artifact_sha256, str) or not artifact_sha256:
         raise ValueError("artifact_sha256 must be a non-empty string")
-    if not isinstance(approver, str) or not approver:
-        raise ValueError("approver must be a non-empty string")
+    if not isinstance(approver, str) or not approver.strip():
+        raise ValueError(
+            "approver must be a non-empty string "
+            "(whitespace-only values are rejected — whitespace carries no "
+            "human identity)"
+        )
 
     return write_receipt(
         task_dir,
@@ -2030,11 +2042,19 @@ def receipt_force_override(
                 f"bypassed_gates[{idx}] must be a string (got {type(entry).__name__})"
             )
     # F1 (v4 -> v5): reason + approver required. Validation mirrors
-    # receipt_human_approval — non-empty strings only.
-    if not isinstance(reason, str) or not reason:
-        raise ValueError("reason must be a non-empty string")
-    if not isinstance(approver, str) or not approver:
-        raise ValueError("approver must be a non-empty string")
+    # receipt_human_approval — non-empty strings only. Whitespace-only
+    # values are rejected (they carry no human-readable justification and
+    # defeat the break-glass audit purpose).
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError(
+            "reason must be a non-empty string "
+            "(whitespace-only values are rejected)"
+        )
+    if not isinstance(approver, str) or not approver.strip():
+        raise ValueError(
+            "approver must be a non-empty string "
+            "(whitespace-only values are rejected)"
+        )
 
     step_name = f"force-override-{from_stage}-{to_stage}"
     return write_receipt(

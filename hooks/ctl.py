@@ -107,15 +107,15 @@ def cmd_transition(args: argparse.Namespace) -> int:
     if args.force:
         reason_val = getattr(args, "reason", None)
         approver_val = getattr(args, "approver", None)
-        if not isinstance(reason_val, str) or not reason_val:
+        if not isinstance(reason_val, str) or not reason_val.strip():
             print(
-                "--force requires --reason STR (non-empty)",
+                "--force requires --reason STR (non-empty; whitespace-only values are rejected)",
                 file=sys.stderr,
             )
             return 2
-        if not isinstance(approver_val, str) or not approver_val:
+        if not isinstance(approver_val, str) or not approver_val.strip():
             print(
-                "--force requires --approver STR (non-empty)",
+                "--force requires --approver STR (non-empty; whitespace-only values are rejected)",
                 file=sys.stderr,
             )
             return 2

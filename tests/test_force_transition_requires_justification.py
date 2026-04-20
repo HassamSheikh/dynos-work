@@ -75,6 +75,18 @@ def _setup_pre_exec_task(tmp_path: Path, slug: str = "FRJ") -> Path:
         (123, "alice", "force_reason"),
         # 7. non-string approver
         ("because", ["alice"], "force_approver"),
+        # 8. whitespace-only reason (spaces) — caught post-audit by
+        #    ensemble security opus: `not X` accepts whitespace, defeating
+        #    the break-glass audit purpose. Reject via `.strip()`.
+        ("   ", "alice", "force_reason"),
+        # 9. whitespace-only reason (tab)
+        ("\t\t", "alice", "force_reason"),
+        # 10. whitespace-only reason (newline)
+        ("\n", "alice", "force_reason"),
+        # 11. whitespace-only approver (spaces)
+        ("valid reason", "   ", "force_approver"),
+        # 12. whitespace-only approver (tab)
+        ("valid reason", "\t", "force_approver"),
     ],
 )
 def test_force_without_reason_raises(tmp_path, reason, approver, expected_arg):
