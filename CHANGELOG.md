@@ -11,6 +11,33 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.2.0] - 2026-04-21
+### "Write Boundaries": Control-Plane Ownership, Wrapper Persistence, Task Diagnostics
+
+The theme of 7.2.0 is putting a hard write boundary between LLM-authored work artifacts and framework-owned control-plane state. The runtime now refuses direct agent writes to control-plane files, moves hybrid artifacts behind deterministic ctl wrappers, and exposes per-task write-boundary diagnostics so violations are visible instead of implicit.
+
+### Added
+- **Central write policy**: new `hooks/write_policy.py` defines role-based write allowlists, control-plane classification, wrapper-required decisions, and structured `write_policy_allowed` / `write_policy_wrapper_required` / `write_policy_denied` events.
+- **Wrapper persistence for hybrid artifacts**: `ctl.py` now owns deterministic persistence for `execution-graph.json`, `repair-log.json`, and `classification.json`, including normalization, validation, and atomic writes.
+- **Per-task write-boundary diagnostics**: dashboard API and task detail UI now surface write-policy counts, top denied paths, top wrapper-required paths, and recent policy events.
+- **Write-boundary enforcement tests**: added policy-matrix, wrapper, prompt-prose, and enforcement coverage for control-plane writes and router sidecar paths.
+- **Spec and workflow docs**: added `docs/write-boundary-spec.md` plus supporting workflow and terminal-pipeline notes.
+
+### Changed
+- **Classification persistence moved behind ctl**: planner/start flows now write classification payloads through `write-classification` instead of mutating `manifest.json` directly.
+- **Planner and repair prompts aligned to wrappers**: planning and audit/repair prose now instruct models to emit payloads to temp JSON and persist them only through ctl wrapper commands.
+- **Executor ownership checks hardened**: patch/apply validation now rejects executor writes to protected task artifacts and reserves evidence/audit/control-plane paths by role.
+- **Router sidecar writes are policy-checked**: injected prompt sidecars now go through write-policy validation instead of bypassing the new boundary.
+
+### Fixed
+- **Prompt drift no longer silently bypasses control-plane ownership** for `manifest.json`, `receipts/**`, `handoff-*.json`, `external-solution-gate.json`, wrapper-owned graph/repair-log/classification artifacts, and related task state.
+- **Dashboard observability gap** around write-boundary denials and wrapper-required attempts.
+- **Version metadata drift**: package and plugin release surfaces are now aligned on `7.2.0`.
+
+### Plugin / Distribution
+- Bump `package.json`, `.claude-plugin/plugin.json`, and `.claude-plugin/marketplace.json` to `7.2.0`.
+- Bump `hooks/dashboard-ui/package.json` and `hooks/dashboard-ui/package-lock.json` to `0.2.0`.
+
 ## [7.1.0] - 2026-04-19
 ### "Close the Anti-Pattern": Receipt-Driven State Machine, Trust-Me-Bro Elimination, Modular Runtime
 
@@ -359,6 +386,8 @@ This is a major architectural overhaul, transforming the system from a task-base
 
 Versions prior to 2.8.0 predate this changelog.
 
+[7.2.0]: https://github.com/dynos-fit/dynos-work/compare/v7.1.0...v7.2.0
+[7.1.0]: https://github.com/dynos-fit/dynos-work/compare/v7.0.0...v7.1.0
 [5.0.0]: https://github.com/dynos-fit/dynos-work/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/dynos-fit/dynos-work/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/dynos-fit/dynos-work/compare/v2.12.0...v3.0.0
