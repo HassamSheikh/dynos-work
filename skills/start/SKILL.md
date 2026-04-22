@@ -225,8 +225,15 @@ If hard or critical design options were returned, present each option to the use
 
 If no high-risk design options were returned, write `design-decisions.md` with the autonomous design choices and rationale.
 
-Write the returned classification object to `manifest.json`.
+Write the returned classification object to `/tmp/classification-{id}.json`, then run `python3 hooks/ctl.py write-classification .dynos/task-{id} --from /tmp/classification-{id}.json`.
 
+Deterministic validation before proceeding:
+1. The wrapper enforces `classification.type`.
+2. The wrapper enforces `classification.risk_level`.
+3. The wrapper enforces `classification.domains`.
+4. If `write-classification` fails, stop and correct the payload before moving on.
+
+Transition the stage by running:
 Finalize classification through the deterministic control-plane entrypoint:
 
 ```text
@@ -252,25 +259,41 @@ If any condition is not met, proceed normally (no fast-track). Do not ask the us
 
 ## Step 2c — External Solution Gate (always runs)
 
-Before inventing a solution from scratch, run the deterministic external-solution gate. The control plane writes `.dynos/task-{id}/external-solution-gate.json`; do NOT hand-write this artifact in prompt logic.
+Before inventing a solution from scratch, run the deterministic gate:
 
-```bash
-python3 "${PLUGIN_HOOKS}/ctl.py" run-external-solution-gate .dynos/task-{id}
+```text
+python3 hooks/ctl.py run-external-solution-gate .dynos/task-{id}
 ```
 
-This command deterministically inspects the task input and classification, then writes the gate artifact with:
-- `search_recommended`: whether external research is likely worth the time
-- `search_used`: always `false` at gate time
-- `query_reason`: short deterministic explanation
-- `candidates`: `[]`
-- `recommended_choice`: `null`
-- `decision_basis`: matched trigger signals for auditability
+This command writes `.dynos/task-{id}/external-solution-gate.json` and prints the same decision payload to stdout. The gate owns the decision artifact. Do NOT hand-write or rewrite this JSON in prompt logic.
 
-If `search_recommended` is `true`, you may perform bounded external research to inform planning, but treat that research as planner input only. Do NOT rewrite `external-solution-gate.json` by hand after searching.
+The artifact shape is:
 
-If `search_recommended` is `false`, proceed directly to Step 3.
+```json
+{
+  "search_recommended": true,
+  "search_used": false,
+  "query_reason": "One sentence explaining the recommendation",
+  "candidates": [],
+  "recommended_choice": null,
+  "decision_basis": {
+    "task_type": "feature|bugfix|refactor|migration|ml|full-stack",
+    "risk_level": "low|medium|high|critical",
+    "domains": ["backend"],
+    "trigger_matches": ["stripe"],
+    "local_bug_matches": [],
+    "file_scoped": false
+  }
+}
+```
 
-Append exactly one line to the execution log:
+Rules:
+- If `search_recommended` is `false`, proceed with local repo evidence only.
+- If `search_recommended` is `true`, external research may inform planning, but the planner still owns the final design choice.
+- Treat `query_reason` and `decision_basis` as hints, not authorization to install or adopt anything automatically.
+- Do not mutate the gate artifact by hand to claim search happened or to inject candidates.
+
+Logging: append exactly one line to the execution log:
 
 `{timestamp} [GATE] external-solution — recommended: {true|false}`
 
@@ -326,7 +349,7 @@ python3 hooks/ctl.py run-spec-ready .dynos/task-{id}
 
 - If approved: run the `approve-stage` ctl command below. It hashes the current `spec.md`, writes the `human-approval-SPEC_REVIEW` receipt with that hash, the scheduler then observes the receipt write and advances the task to PLANNING asynchronously. Do NOT write a manual `[HUMAN]` log line — `approve-stage` is the only path that satisfies the receipt-gate in `transition_task` (which compares the receipt's `artifact_sha256` against the live `spec.md` at transition time and refuses with `human-approval-SPEC_REVIEW` / `hash mismatch` substrings on drift).
 - If changes are requested: append the feedback, respawn the Planner in Spec Normalization mode, re-run deterministic spec validation, write a new `receipt_spec_validated`, and present the updated spec again. Do NOT call `approve-stage` until the user re-approves the regenerated spec.
-- If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Spec rejected by user`, and stop.
+- If rejected outright: run `python3 hooks/ctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] Spec rejected by user`, and stop. Do not edit `manifest.json` directly.
 
 When approved:
 
@@ -362,15 +385,15 @@ Do NOT re-derive fast-track, risk-based escalation, or acceptance-criteria thres
 Hierarchical flow:
 1. Spawn Master Planner using the default planning model for this repo.
 2. Spawn Worker Planners in parallel for non-overlapping subsystems.
-3. Merge outputs into final `plan.md` and `execution-graph.json`.
+3. Merge outputs into final `plan.md` and an execution-graph payload, then persist the final graph ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`.
 
 Fast-track combined flow (when `fast_track: true`):
 1. **Stage precondition:** the manifest is still at `SPEC_NORMALIZATION` (Step 3 deferred the walk). Do NOT advance yet.
-2. Spawn Planner ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and `execution-graph.json` together. This replaces both Step 3 (Spec Normalization) and Step 5's normal planner spawn.
+2. Spawn Planner (Opus) ONCE with phase `Spec + Plan` to produce `spec.md`, `plan.md`, and an execution-graph payload in `/tmp/execution-graph-{id}.json`, then persist the final graph ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. This replaces both Step 3 (Spec Normalization) and Step 5's normal planner spawn.
 3. After the spawn returns AND `validate_task_artifacts` passes (see below), walk the stage forward through `SPEC_NORMALIZATION → SPEC_REVIEW → PLANNING` (each transition is legal per `ALLOWED_STAGE_TRANSITIONS` in `hooks/lib_core.py`). Only advance once the artifacts that justify each stage exist on disk. Log each transition. Then continue with the post-validation flow below (which advances to `PLAN_REVIEW`).
 
 Standard flow:
-1. Spawn Planner with instruction to generate `plan.md` and `execution-graph.json`.
+1. Spawn Planner (Opus) with instruction to generate `plan.md` and an execution-graph payload, then persist the final graph ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`.
 
 After generation, run deterministic artifact validation before any human review. If available in this repo, run:
 
@@ -435,7 +458,7 @@ Present the artifact(s) to the user and ask for approval.
 
   Each call hashes the live artifact, writes the matching receipt, and advances one stage. Both must succeed; if either returns exit 1, address the reported cause before retrying.
 - If changes are requested: append the feedback, respawn planning (combined Spec + Plan phase for fast-track, otherwise standard planning), re-run deterministic artifact validation, and present the updated artifact(s) again. Do NOT call `approve-stage` until the user re-approves the regenerated artifact(s) — the gate compares the receipt hash to the live file at transition time, so an approval against an out-of-date hash will be refused with `hash mismatch`.
-- If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Plan rejected by user`, and stop.
+- If rejected outright: run `python3 hooks/ctl.py transition .dynos/task-{id} FAILED`, append `[FAILED] Plan rejected by user`, and stop. Do not edit `manifest.json` directly.
 
 ---
 
