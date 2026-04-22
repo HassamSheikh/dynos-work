@@ -596,15 +596,16 @@ def test_run_audit_reaudit_plan_uses_repair_log_and_matching_auditors(tmp_path) 
         "batches": [
             {
                 "batch_id": "batch-1",
-                "tasks": [
-                    {
-                        "finding_id": "SEC-1",
-                        "assigned_executor": "backend-executor",
-                        "files_to_modify": ["src/a.py"],
-                        "retry_count": 1,
-                    }
-                ],
-            }
+                    "tasks": [
+                        {
+                            "finding_id": "SEC-1",
+                            "assigned_executor": "backend-executor",
+                            "instruction": "Rotate the secret handling path",
+                            "files_to_modify": ["src/a.py"],
+                            "retry_count": 1,
+                        }
+                    ],
+                }
         ],
     }) + "\n")
     audit_dir = task_dir / "audit-reports"
@@ -1046,6 +1047,14 @@ def test_run_repair_execution_ready_validates_and_transitions(tmp_path) -> None:
     manifest = json.loads(manifest_path.read_text())
     manifest["stage"] = "REPAIR_PLANNING"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [
+            {"id": "sec-1", "severity": "high", "blocking": True},
+        ],
+    }) + "\n")
     (task_dir / "repair-log.json").write_text(json.dumps({
         "repair_cycle": 1,
         "batches": [
@@ -1054,7 +1063,10 @@ def test_run_repair_execution_ready_validates_and_transitions(tmp_path) -> None:
                 "tasks": [
                     {
                         "finding_id": "sec-1",
+                        "auditor": "security-auditor",
+                        "severity": "high",
                         "assigned_executor": "backend-executor",
+                        "instruction": "Remove the hardcoded secret and use env configuration",
                         "files_to_modify": ["src/a.py"],
                         "retry_count": 0,
                     }
@@ -1079,6 +1091,15 @@ def test_run_repair_log_build_writes_repair_log_deterministically(tmp_path) -> N
     manifest = json.loads(manifest_path.read_text())
     manifest["stage"] = "REPAIR_PLANNING"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [
+            {"id": "SEC-1", "severity": "high", "blocking": True},
+            {"id": "CQ-1", "severity": "medium", "blocking": True},
+        ],
+    }) + "\n")
     (task_dir / "repair-cycle-plan.json").write_text(json.dumps({
         "status": "repair_cycle_ready",
         "repair_cycle": 1,
@@ -1122,44 +1143,63 @@ def test_run_repair_batch_plan_groups_parallel_batches_deterministically(tmp_pat
     manifest = json.loads(manifest_path.read_text())
     manifest["stage"] = "REPAIR_EXECUTION"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [
+            {"id": "sec-1", "severity": "high", "blocking": True},
+            {"id": "cq-1", "severity": "medium", "blocking": True},
+            {"id": "sec-2", "severity": "high", "blocking": True},
+        ],
+    }) + "\n")
     (task_dir / "repair-log.json").write_text(json.dumps({
         "repair_cycle": 2,
         "batches": [
             {
                 "batch_id": "batch-1",
                 "parallel": True,
-                "tasks": [
-                    {
-                        "finding_id": "sec-1",
-                        "assigned_executor": "backend-executor",
-                        "files_to_modify": ["src/a.py"],
-                        "retry_count": 0,
-                    }
-                ],
-            },
+                    "tasks": [
+                        {
+                            "finding_id": "sec-1",
+                            "auditor": "security-auditor",
+                            "severity": "high",
+                            "assigned_executor": "backend-executor",
+                            "instruction": "Fix backend issue one",
+                            "files_to_modify": ["src/a.py"],
+                            "retry_count": 0,
+                        }
+                    ],
+                },
             {
                 "batch_id": "batch-2",
                 "parallel": True,
-                "tasks": [
-                    {
-                        "finding_id": "cq-1",
-                        "assigned_executor": "testing-executor",
-                        "files_to_modify": ["tests/test_a.py"],
-                        "retry_count": 2,
-                        "model_override": "opus",
+                    "tasks": [
+                        {
+                            "finding_id": "cq-1",
+                            "auditor": "security-auditor",
+                            "severity": "medium",
+                            "assigned_executor": "testing-executor",
+                            "instruction": "Tighten the test assertions",
+                            "files_to_modify": ["tests/test_a.py"],
+                            "retry_count": 2,
+                            "model_override": "opus",
                     }
                 ],
             },
             {
                 "batch_id": "batch-3",
                 "parallel": True,
-                "tasks": [
-                    {
-                        "finding_id": "sec-2",
-                        "assigned_executor": "backend-executor",
-                        "files_to_modify": ["src/a.py"],
-                        "retry_count": 0,
-                    }
+                    "tasks": [
+                        {
+                            "finding_id": "sec-2",
+                            "auditor": "security-auditor",
+                            "severity": "high",
+                            "assigned_executor": "backend-executor",
+                            "instruction": "Fix backend issue two",
+                            "files_to_modify": ["src/a.py"],
+                            "retry_count": 0,
+                        }
                 ],
             },
         ],
@@ -1394,3 +1434,62 @@ def test_run_audit_finish_writes_completion_and_transitions_done(tmp_path) -> No
     assert Path(payload["completion_path"]).exists()
     manifest = json.loads(manifest_path.read_text())
     assert manifest["stage"] == "DONE"
+
+
+def test_write_execute_handoff_uses_live_manifest_stage(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "TEST_EXECUTION"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    result = _run_ctl("write-execute-handoff", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "execute_handoff_ready"
+    assert payload["from_skill"] == "execute"
+    assert payload["to_skill"] == "audit"
+    assert payload["manifest_stage"] == "TEST_EXECUTION"
+    assert payload["contract_version"] == "1.0.0"
+
+    handoff = json.loads((task_dir / "handoff-execute-audit.json").read_text())
+    assert handoff["manifest_stage"] == "TEST_EXECUTION"
+    assert handoff["from_skill"] == "execute"
+    assert handoff["to_skill"] == "audit"
+
+
+def test_write_classification_persists_normalized_payload_and_syncs_manifest(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    payload_path = tmp_path / "classification.json"
+    payload_path.write_text(json.dumps({
+        "type": "bugfix",
+        "domains": ["backend", "backend", "", "security"],
+        "risk_level": "low",
+        "notes": "  tighten auth path  ",
+    }))
+
+    result = _run_ctl("write-classification", str(task_dir), "--from", str(payload_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    classification = json.loads((task_dir / "classification.json").read_text())
+    manifest = json.loads((task_dir / "manifest.json").read_text())
+    assert classification == manifest["classification"]
+    assert classification["domains"] == ["backend", "security"]
+    assert classification["notes"] == "tighten auth path"
+    assert classification["fast_track"] is False
+    assert manifest["fast_track"] is False
+
+
+def test_write_classification_rejects_invalid_domain(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    payload_path = tmp_path / "classification.json"
+    payload_path.write_text(json.dumps({
+        "type": "feature",
+        "domains": ["backend", "unknown-domain"],
+        "risk_level": "medium",
+        "notes": "",
+    }))
+
+    result = _run_ctl("write-classification", str(task_dir), "--from", str(payload_path))
+    assert result.returncode == 1
+    assert "classification domain invalid" in result.stderr

@@ -236,17 +236,13 @@ Append to log:
 
 ### Handoff — Write handoff record
 
-After Step 5, write `.dynos/task-{id}/handoff-execute-audit.json`:
+After Step 5, run:
 
-```json
-{
-  "from_skill": "execute",
-  "to_skill": "audit",
-  "handoff_at": "{ISO timestamp}",
-  "contract_version": "1.0.0",
-  "manifest_stage": "{current stage}"
-}
+```text
+python3 hooks/ctl.py write-execute-handoff .dynos/task-{id}
 ```
+
+This writes `.dynos/task-{id}/handoff-execute-audit.json` deterministically from the live manifest stage. Do NOT hand-write the handoff JSON in prompt logic.
 
 ## Hard Rules
 - **No speculative implementation:** Executors must stay strictly within their segment's `files_expected` and `criteria_ids`.
