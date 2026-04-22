@@ -27,7 +27,7 @@ Verify `spec.md` exists. If not, print "No spec found. Run /dynos-work:start to 
 Transition the stage to `PLANNING` (transition_task auto-writes the `[STAGE] → PLANNING` log line):
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLANNING
+python3 "{{HOOKS_PATH}}/ctl.py" transition .dynos/task-{id} PLANNING
 ```
 
 Append the spawn line to the execution log:
@@ -37,21 +37,17 @@ Append the spawn line to the execution log:
 
 Spawn the `planning` agent with instruction: "Generate the implementation plan and execution graph. Read `spec.md` and `design-decisions.md` (if it exists). Human design choices are binding. Write `plan.md` directly to `.dynos/task-{id}/plan.md`. For the execution graph, write the JSON payload to `/tmp/execution-graph-{id}.json`, then persist the final `.dynos/task-{id}/execution-graph.json` ONLY via `python3 hooks/ctl.py write-execution-graph .dynos/task-{id} --from /tmp/execution-graph-{id}.json`. Include: technical approach, module/component breakdown, data flow, error handling, test strategy, and explicit file ownership per segment. Do not hand-write `.dynos/task-{id}/execution-graph.json`."
 
-Wait for completion. Run deterministic artifact validation before human review:
+Wait for completion. Finalize planning through the deterministic control-plane entrypoint:
 
 ```text
-python3 hooks/dynosctl.py validate-task .dynos/task-{id} --strict
+python3 "{{HOOKS_PATH}}/ctl.py" run-planning .dynos/task-{id}
 ```
+
+`run-planning` owns full deterministic validation, writes the `plan-validated` receipt, and advances `PLANNING -> PLAN_REVIEW` when the artifacts are sound.
 
 Append to log:
 ```
 {timestamp} [DONE] planning — plan.md written
-```
-
-Transition the stage to `PLAN_REVIEW` (transition_task auto-writes the `[STAGE] → PLAN_REVIEW` log line):
-
-```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_REVIEW
 ```
 
 ### Step 3 — Human review (PLAN_REVIEW)
@@ -70,7 +66,7 @@ Approve this plan? (yes / no + what to change)
 - If **approved**: run the `approve-stage` ctl command below. It hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, then transitions PLAN_REVIEW → PLAN_AUDIT in one atomic step. The hash is computed from the CURRENT `plan.md` content **at transition time** (the gate re-hashes the file and compares it to `receipt.artifact_sha256`), so an approval that races against a manual edit will be refused with the literal substrings `human-approval-PLAN_REVIEW` and `hash mismatch`. Do NOT add a manual `[HUMAN]` log line — the receipt is the audit trail. Then proceed to Step 4.
 
   ```text
-  python3 hooks/dynosctl.py approve-stage .dynos/task-{id} PLAN_REVIEW
+  python3 "{{HOOKS_PATH}}/ctl.py" approve-stage .dynos/task-{id} PLAN_REVIEW
   ```
 
   Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`.
@@ -81,24 +77,26 @@ Approve this plan? (yes / no + what to change)
 
 The `approve-stage` call in Step 3 has already advanced the manifest to `PLAN_AUDIT` — do NOT call `transition .dynos/task-{id} PLAN_AUDIT` here (the state machine would refuse it as `PLAN_AUDIT → PLAN_AUDIT`).
 
-Append to log:
+Run the deterministic controller first:
+
+```text
+python3 "{{HOOKS_PATH}}/ctl.py" run-plan-audit .dynos/task-{id}
 ```
-{timestamp} [SPAWN] spec-completion-auditor — verify plan covers all acceptance criteria
+
+If it returns `llm_audit_required`, run the auditor and finalize with:
+
+```text
+python3 "{{HOOKS_PATH}}/ctl.py" run-plan-audit .dynos/task-{id} --report-path .dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json --tokens-used {TOTAL_TOKENS} --model {MODEL_USED}
 ```
 
-Spawn the `spec-completion-auditor` agent with instruction: "Audit the plan against the spec BEFORE execution. Read `spec.md` and `plan.md`. Verify every acceptance criterion in `spec.md` is explicitly addressed in `plan.md`. Flag criteria with no corresponding component, module, or task. Write report to `.dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json`."
-
-Wait for completion. Read the report.
-
-- If all criteria covered: append `{timestamp} [DONE] spec-completion-auditor — all criteria covered` to log. Proceed to Step 5.
-- If gaps found: append `{timestamp} [DECISION] plan gaps found — respawning planner to fill: {list}` to log. Spawn planning agent with instruction: "The plan is missing coverage for: [{uncovered criteria}]. Update `plan.md` to address them." Re-run the audit. Repeat until all covered.
+If either call returns `replan_required`, repair the plan and rerun the controller. If it returns `passed`, proceed.
 
 ### Step 5 — Done
 
 Transition the stage to `PRE_EXECUTION_SNAPSHOT`:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
+python3 "{{HOOKS_PATH}}/ctl.py" transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
 Append to log:
