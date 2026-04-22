@@ -300,6 +300,47 @@ def test_run_start_classification_applies_fast_track_and_transitions(tmp_path) -
     assert manifest["classification"]["tdd_required"] is False
 
 
+def test_run_external_solution_gate_recommends_search_for_integration_tasks(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["raw_input"] = "Set up Stripe webhook retry handling for our API integration"
+    manifest["classification"]["type"] = "migration"
+    manifest["classification"]["domains"] = ["backend", "infra"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    result = _run_ctl("run-external-solution-gate", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "external_solution_gate_ready"
+    assert payload["search_recommended"] is True
+    gate = json.loads((task_dir / "external-solution-gate.json").read_text())
+    assert gate["search_recommended"] is True
+    assert gate["search_used"] is False
+    assert gate["candidates"] == []
+    assert gate["recommended_choice"] is None
+    assert "stripe" in gate["decision_basis"]["trigger_matches"]
+
+
+def test_run_external_solution_gate_skips_search_for_file_scoped_bugfix(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["raw_input"] = "Fix regression in src/auth/service.py failing test for null token handling"
+    manifest["classification"]["type"] = "bugfix"
+    manifest["classification"]["domains"] = ["backend"]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    result = _run_ctl("run-external-solution-gate", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["search_recommended"] is False
+    gate = json.loads((task_dir / "external-solution-gate.json").read_text())
+    assert gate["search_recommended"] is False
+    assert gate["query_reason"] == "local repo evidence is sufficient"
+    assert gate["decision_basis"]["file_scoped"] is True
+
+
 def test_run_spec_ready_writes_receipt_and_transitions(tmp_path) -> None:
     from lib_receipts import receipt_planner_spawn
 
@@ -474,6 +515,7 @@ def test_run_audit_repair_cycle_plan_phase_1_transitions_and_prioritizes_critica
     assert payload["critical_spec_finding_ids"] == ["SPEC-1"]
     assert payload["blocking_finding_ids"] == ["SPEC-1", "SEC-1"]
     assert payload["blocking_findings"][0]["retry_count"] == 0
+    assert (task_dir / "repair-cycle-plan.json").exists()
 
 
 def test_run_audit_repair_cycle_plan_phase_2_carries_retry_counts(tmp_path) -> None:
@@ -1031,6 +1073,49 @@ def test_run_repair_execution_ready_validates_and_transitions(tmp_path) -> None:
     assert manifest["stage"] == "REPAIR_EXECUTION"
 
 
+def test_run_repair_log_build_writes_repair_log_deterministically(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "REPAIR_PLANNING"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (task_dir / "repair-cycle-plan.json").write_text(json.dumps({
+        "status": "repair_cycle_ready",
+        "repair_cycle": 1,
+        "phase": "phase_1",
+        "blocking_findings": [
+            {
+                "id": "SEC-1",
+                "file": "src/a.py",
+                "blocking": True,
+                "retry_count": 0,
+            },
+            {
+                "id": "CQ-1",
+                "evidence": {"file": "tests/test_a.py", "line": 9},
+                "blocking": True,
+                "retry_count": 2,
+                "model_override": "opus",
+            },
+        ],
+    }) + "\n")
+
+    dynos_home = tmp_path / ".dynos-home"
+    dynos_home.mkdir(exist_ok=True)
+    result = _run_ctl("run-repair-log-build", str(task_dir), env={"DYNOS_HOME": str(dynos_home)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "repair_log_built"
+    repair_log = json.loads((task_dir / "repair-log.json").read_text())
+    assert repair_log["source"] == "deterministic_ctl"
+    assert repair_log["repair_cycle"] == 1
+    all_tasks = [task for batch in repair_log["batches"] for task in batch["tasks"]]
+    by_finding = {task["finding_id"]: task for task in all_tasks}
+    assert by_finding["SEC-1"]["files_to_modify"] == ["src/a.py"]
+    assert by_finding["CQ-1"]["files_to_modify"] == ["tests/test_a.py"]
+    assert by_finding["CQ-1"]["retry_count"] == 2
+
+
 def test_run_repair_batch_plan_groups_parallel_batches_deterministically(tmp_path) -> None:
     task_dir = _setup_task_dir(tmp_path)
     manifest_path = task_dir / "manifest.json"
@@ -1090,6 +1175,53 @@ def test_run_repair_batch_plan_groups_parallel_batches_deterministically(tmp_pat
     assert payload["execution_groups"][1]["parallel"] is True
     assert payload["execution_groups"][1]["batch_ids"] == ["batch-3"]
     assert payload["execution_groups"][0]["batches"][1]["model_overrides"] == {"cq-1": "opus"}
+
+
+def test_run_repair_q_update_builds_outcomes_from_repair_log_and_reports(tmp_path) -> None:
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "CHECKPOINT_AUDIT"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (task_dir / "repair-log.json").write_text(json.dumps({
+        "repair_cycle": 1,
+        "batches": [
+            {
+                "batch_id": "batch-1",
+                "tasks": [
+                    {
+                        "finding_id": "SEC-1",
+                        "assigned_executor": "backend-executor",
+                        "files_to_modify": ["src/a.py"],
+                        "retry_count": 0,
+                        "severity": "high",
+                        "state": "SEC:high:feature:0",
+                        "route_mode": "generic",
+                        "model_override": "opus",
+                    }
+                ],
+            }
+        ],
+    }) + "\n")
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "security-auditor.json").write_text(json.dumps({
+        "auditor_name": "security-auditor",
+        "findings": [
+            {"id": "SEC-1", "blocking": True, "severity": "high"},
+            {"id": "CQ-2", "blocking": True, "severity": "medium"},
+        ],
+    }) + "\n")
+    dynos_home = tmp_path / ".dynos-home"
+    dynos_home.mkdir(exist_ok=True)
+
+    result = _run_ctl("run-repair-q-update", str(task_dir), env={"DYNOS_HOME": str(dynos_home)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "repair_q_updated"
+    assert payload["outcome_count"] == 1
+    assert payload["new_blocking_ids"] == ["CQ-2"]
+    assert payload["update_result"]["updated"] in {True, False}
 
 
 def test_run_repair_retry_reports_escalation_on_retry_cap(tmp_path) -> None:
@@ -1189,3 +1321,76 @@ def test_run_audit_reflect_writes_retro_and_receipt(tmp_path) -> None:
     assert retro["auditor_zero_finding_streaks"]["security-auditor"] == 3
     assert retro["executor_zero_repair_streak"] == 5
     assert retro["alongside_overlap"]["security-auditor"]["learned_is_superset"] is True
+
+
+def test_run_audit_finish_writes_completion_and_transitions_done(tmp_path) -> None:
+    from lib_receipts import (
+        hash_file,
+        receipt_audit_routing,
+        receipt_postmortem_skipped,
+        receipt_retrospective,
+        receipt_rules_check_passed,
+    )
+
+    task_dir = _setup_task_dir(tmp_path)
+    manifest_path = task_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stage"] = "CHECKPOINT_AUDIT"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    (task_dir / "audit-summary.json").write_text(json.dumps({
+        "audit_result": "pass",
+        "total_findings": 0,
+        "total_blocking": 0,
+    }) + "\n")
+    (task_dir / "task-retrospective.json").write_text(json.dumps({
+        "task_id": "task-20260403-001",
+        "task_outcome": "DONE",
+        "task_type": "feature",
+        "task_domains": "backend",
+        "task_risk_level": "medium",
+        "findings_by_auditor": {},
+        "findings_by_category": {},
+        "executor_repair_frequency": {},
+        "spec_review_iterations": 1,
+        "repair_cycle_count": 0,
+        "subagent_spawn_count": 0,
+        "wasted_spawns": 0,
+        "auditor_zero_finding_streaks": {},
+        "executor_zero_repair_streak": 0,
+        "token_usage_by_agent": {},
+        "total_token_usage": 0,
+        "quality_score": 1.0,
+        "cost_score": 1.0,
+        "efficiency_score": 1.0,
+        "model_used_by_agent": {},
+        "agent_source": {},
+        "alongside_overlap": {},
+    }) + "\n")
+    audit_dir = task_dir / "audit-reports"
+    audit_dir.mkdir(exist_ok=True)
+    (audit_dir / "report.json").write_text(json.dumps({"findings": []}) + "\n")
+    receipts = task_dir / "receipts"
+    receipts.mkdir(exist_ok=True)
+    receipt_audit_routing(task_dir, [
+        {"name": "spec-completion-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
+        {"name": "security-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
+        {"name": "code-quality-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
+        {"name": "dead-code-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
+        {"name": "performance-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
+    ])
+    receipt_retrospective(task_dir)
+    receipt_postmortem_skipped(
+        task_dir,
+        reason="no-findings",
+        retrospective_sha256=hash_file(task_dir / "task-retrospective.json"),
+        subsumed_by=[],
+    )
+    receipt_rules_check_passed(task_dir, "all")
+
+    result = _run_ctl("run-audit-finish", str(task_dir))
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "done"
+    assert Path(payload["completion_path"]).exists()
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["stage"] == "DONE"

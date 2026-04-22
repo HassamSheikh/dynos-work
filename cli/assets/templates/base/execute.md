@@ -14,7 +14,7 @@ Manages the parallel execution of the implementation plan via the execution grap
 Validate that all required inputs from the start skill are present:
 
 ```text
-python3 hooks/dynosctl.py validate-contract --skill execute --task-dir .dynos/task-{id}
+python3 "{{HOOKS_PATH}}/ctl.py" validate-contract --skill execute --task-dir .dynos/task-{id}
 ```
 
 If validation fails with missing required inputs, print the errors and stop. Do not proceed with execution.
@@ -39,24 +39,10 @@ Append to log:
 Run deterministic execute setup first:
 
 ```text
-python3 hooks/dynosctl.py run-execute-setup .dynos/task-{id}
+python3 "{{HOOKS_PATH}}/ctl.py" run-execute-setup .dynos/task-{id}
 ```
 
 This command runs execution preflight validation, advances `PRE_EXECUTION_SNAPSHOT -> EXECUTION`, builds the executor plan, and writes the `executor-routing` receipt. Use its JSON output directly.
-
-**Inline execution for fast-track tasks:** If `manifest.json` has `"fast_track": true` AND the execution graph has exactly 1 segment, execute the segment **directly** (inline) instead of spawning a subagent. This avoids the ~30K token overhead of agent context setup. However, you MUST still run the router and apply learned agent rules before executing:
-
-1. Run the executor plan router: `python3 "{{HOOKS_PATH}}/dynorouter.py" executor-plan --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json`
-2. Write the executor-routing receipt (required for stage transitions).
-3. If the plan returns `route_mode: "replace"` or `"alongside"` with a non-null `agent_path`, read the learned agent file and follow its rules during your inline execution.
-4. Run `inject-prompt` with your base prompt to get the complete prompt with learned rules and prevention rules. Apply those rules to your own work.
-5. Log the routing decision: `{timestamp} [ROUTE] {executor} model={model} route={route_mode} source={route_source}`
-
-Then read the segment, extract the criteria from `spec.md`, make the code changes yourself, write evidence, and proceed to Step 4. Log: `{timestamp} [INLINE] seg-1 — fast-track inline execution (no subagent spawn)`.
-
-Skipping the router in inline mode silently ignores learned agents and breaks the self-learning feedback loop.
-
-**Normal execution (fast_track is false or >1 segment):**
 
 `run-execute-setup` already performed deterministic preflight validation and stage advancement. If it failed, repair the plan first; do not patch around a broken plan during execution.
 
@@ -87,7 +73,7 @@ Do NOT read dynos_patterns.md tables manually. The router handles model policy, 
 **Learned Agent Injection (MANDATORY — NOT OPTIONAL):** For every segment, you MUST build the executor prompt using the deterministic prompt builder. This is not a suggestion. This is an enforcement gate. For each segment in the executor plan:
 
 ```bash
-echo "{your base prompt for this segment}" | PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 hooks/dynorouter.py inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id}
+echo "{your base prompt for this segment}" | PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/router.py" inject-prompt --root . --task-type {task_type} --graph .dynos/task-{id}/execution-graph.json --segment-id {seg-id}
 ```
 
 This command:
@@ -108,7 +94,7 @@ INJECTED_PROMPT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-prompts/{seg-id
 
 You MUST pass this captured digest to `receipt_executor_done(...)` below as `injected_prompt_sha256`. The receipt writer asserts the same sidecar exists and matches; a mismatch raises `ValueError` with the literal substrings `injected_prompt_sha256 sidecar missing` or `injected_prompt_sha256 mismatch`.
 
-If `inject-prompt` is not available (command not found), fall back to manually reading the `agent_path` file from the executor plan and appending its contents to the prompt. But this should never happen in this repo.
+If `inject-prompt` fails or is unavailable, stop and fix the deterministic routing path. Do NOT manually read `agent_path` or hand-build the learned-agent prompt.
 
 **Model selection:** Pass the `model` field from the executor plan as the model parameter when spawning the agent. If `model` is null, use default (omit the model parameter).
 
@@ -151,7 +137,7 @@ After each batch (or cached resolution) completes, record events and verify:
 
 - **Token capture (executor spawn):** After each executor returns:
   ```bash
-  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoslib_tokens.py" record \
+  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
     --task-dir .dynos/task-{id} \
     --agent "{executor_name}-{segment-id}" \
     --model "{model_name}" \
@@ -165,9 +151,9 @@ After each batch (or cached resolution) completes, record events and verify:
   ```
 - **Token capture (deterministic checks):** After file ownership and evidence verification:
   ```bash
-  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoslib_tokens.py" record \
+  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
     --task-dir .dynos/task-{id} \
-    --agent "dynosctl-check-ownership" \
+    --agent "ctl-check-ownership" \
     --model "none" \
     --input-tokens 0 \
     --output-tokens 0 \
@@ -179,9 +165,9 @@ After each batch (or cached resolution) completes, record events and verify:
   ```
 - Also record the **router decision** before each batch:
   ```bash
-  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoslib_tokens.py" record \
+  PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
     --task-dir .dynos/task-{id} \
-    --agent "dynorouter-executor-plan" \
+    --agent "router-executor-plan" \
     --model "none" \
     --input-tokens 0 \
     --output-tokens 0 \
@@ -196,7 +182,7 @@ After each batch (or cached resolution) completes, record events and verify:
 
 **For inline fast-track execution** (no subagent spawn), record with `--type inline`:
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoslib_tokens.py" record \
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
   --agent "inline-executor" \
   --model "none" \

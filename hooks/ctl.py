@@ -6,6 +6,7 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -87,6 +88,130 @@ def _root_for_task_dir(task_dir: Path) -> Path:
         return task_dir.parent.parent
     except Exception:
         return task_dir
+
+
+_EXTERNAL_TRIGGER_TERMS: tuple[str, ...] = (
+    "sdk",
+    "oauth",
+    "sso",
+    "webhook",
+    "stripe",
+    "docker",
+    "terraform",
+    "github actions",
+    "gitlab ci",
+    "retry",
+    "queue",
+    "cache",
+    "pagination",
+    "rate limit",
+    "rate limiting",
+    "metrics",
+    "tracing",
+    "protocol",
+    "migration",
+    "migrate",
+    "setup",
+    "configure",
+    "integration",
+    "event bus",
+    "eventbus",
+    "cloud",
+    "aws",
+    "gcp",
+    "azure",
+)
+
+_LOCAL_BUG_TERMS: tuple[str, ...] = (
+    "bug",
+    "fix",
+    "failing test",
+    "regression",
+    "traceback",
+    "exception",
+    "stack trace",
+    "null",
+    "none",
+)
+
+
+def _task_raw_input(task_dir: Path, manifest: dict) -> str:
+    raw = manifest.get("raw_input")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    raw_input_path = task_dir / "raw-input.md"
+    if raw_input_path.exists():
+        return raw_input_path.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _match_terms(text: str, terms: tuple[str, ...]) -> list[str]:
+    lowered = text.lower()
+    return [term for term in terms if term in lowered]
+
+
+def _looks_like_local_file_scoped_task(text: str) -> bool:
+    return bool(
+        re.search(r"\b[\w./-]+\.(py|ts|tsx|js|jsx|go|rb|java|rs|yml|yaml|json|md|sql)\b", text.lower())
+    )
+
+
+def _compute_external_solution_gate(task_dir: Path) -> dict:
+    manifest = _load_manifest(task_dir)
+    classification = manifest.get("classification")
+    if not isinstance(classification, dict):
+        classification = {}
+    task_type = str(classification.get("type", "feature") or "feature")
+    risk_level = str(classification.get("risk_level", "medium") or "medium")
+    domains = classification.get("domains")
+    if not isinstance(domains, list):
+        domains = []
+    domains = [str(d) for d in domains if str(d).strip()]
+
+    raw_input = _task_raw_input(task_dir, manifest)
+    trigger_matches = _match_terms(raw_input, _EXTERNAL_TRIGGER_TERMS)
+    local_bug_matches = _match_terms(raw_input, _LOCAL_BUG_TERMS)
+    file_scoped = _looks_like_local_file_scoped_task(raw_input)
+    migration_like = task_type in {"migration", "full-stack"} or "migration" in domains or "infra" in domains
+
+    search_recommended = False
+    reasons: list[str] = []
+    if migration_like:
+        search_recommended = True
+        reasons.append(f"task_type={task_type}")
+    if trigger_matches:
+        search_recommended = True
+        reasons.append("matched external-solution terms")
+    if file_scoped and local_bug_matches and not trigger_matches and not migration_like:
+        search_recommended = False
+        reasons = ["file-scoped local bugfix task"]
+    elif not search_recommended:
+        reasons = ["local repo evidence likely sufficient"]
+
+    query_reason = (
+        "external search recommended: " + ", ".join(reasons)
+        if search_recommended
+        else "local repo evidence is sufficient"
+    )
+    if len(query_reason) > 200:
+        query_reason = query_reason[:197] + "..."
+
+    gate = {
+        "search_recommended": search_recommended,
+        "search_used": False,
+        "query_reason": query_reason,
+        "candidates": [],
+        "recommended_choice": None,
+        "decision_basis": {
+            "task_type": task_type,
+            "risk_level": risk_level,
+            "domains": domains,
+            "trigger_matches": trigger_matches[:8],
+            "local_bug_matches": local_bug_matches[:8],
+            "file_scoped": file_scoped,
+        },
+    }
+    return gate
 
 
 def cmd_validate_task(args: argparse.Namespace) -> int:
@@ -800,6 +925,24 @@ def cmd_run_start_classification(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_run_external_solution_gate(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        gate = _compute_external_solution_gate(task_dir)
+        gate_path = task_dir / "external-solution-gate.json"
+        write_json(gate_path, gate)
+        print(json.dumps({
+            "status": "external_solution_gate_ready",
+            "task_dir": str(task_dir),
+            "gate_path": str(gate_path),
+            **gate,
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
 def cmd_run_spec_ready(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -1059,7 +1202,7 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
                 blocking_findings.append(entry)
 
         if not blocking_findings:
-            print(json.dumps({
+            payload = {
                 "status": "clear",
                 "task_dir": str(task_dir),
                 "stage": stage,
@@ -1069,7 +1212,9 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
                 "blocking_findings": [],
                 "blocking_finding_ids": [],
                 "next_action": "reflect",
-            }, indent=2))
+            }
+            write_json(task_dir / "repair-cycle-plan.json", payload)
+            print(json.dumps(payload, indent=2))
             return 0
 
         prior_cycle = 0
@@ -1136,7 +1281,7 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
             _, updated_manifest = transition_task(task_dir, "REPAIR_PLANNING")
             transitioned = True
 
-        print(json.dumps({
+        payload = {
             "status": "repair_cycle_ready",
             "task_dir": str(task_dir),
             "stage": updated_manifest.get("stage"),
@@ -1150,6 +1295,217 @@ def cmd_run_audit_repair_cycle_plan(args: argparse.Namespace) -> int:
             "critical_spec_finding_ids": sorted(critical_spec_finding_ids),
             "model_overrides": model_overrides,
             "next_action": "spawn_repair_coordinator",
+        }
+        write_json(task_dir / "repair-cycle-plan.json", payload)
+        print(json.dumps(payload, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def _repair_files_for_finding(
+    task_dir: Path,
+    finding: dict,
+    assigned_executor: str | None,
+) -> list[str]:
+    paths: list[str] = []
+    direct = finding.get("file")
+    if isinstance(direct, str) and direct:
+        paths.append(direct)
+    evidence = finding.get("evidence")
+    if isinstance(evidence, dict):
+        evidence_file = evidence.get("file")
+        if isinstance(evidence_file, str) and evidence_file:
+            paths.append(evidence_file)
+    if paths:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            if path not in seen:
+                seen.add(path)
+                deduped.append(path)
+        return deduped
+
+    graph_segments = _load_graph_segments(task_dir)
+    if assigned_executor:
+        executor_paths: list[str] = []
+        for segment in graph_segments:
+            if segment.get("executor") != assigned_executor:
+                continue
+            for path in segment.get("files_expected", []) or []:
+                if isinstance(path, str) and path:
+                    executor_paths.append(path)
+        if executor_paths:
+            deduped: list[str] = []
+            seen: set[str] = set()
+            for path in executor_paths:
+                if path not in seen:
+                    seen.add(path)
+                    deduped.append(path)
+            return deduped
+
+    fallback_paths: list[str] = []
+    for segment in graph_segments:
+        for path in segment.get("files_expected", []) or []:
+            if isinstance(path, str) and path:
+                fallback_paths.append(path)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in fallback_paths:
+        if path not in seen:
+            seen.add(path)
+            deduped.append(path)
+    return deduped
+
+
+def cmd_run_repair_log_build(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        manifest = _load_manifest(task_dir)
+        stage = str(manifest.get("stage", ""))
+        if stage != "REPAIR_PLANNING":
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": f"unexpected stage for repair-log build: {stage}",
+            }, indent=2))
+            return 1
+
+        cycle_plan_path = task_dir / "repair-cycle-plan.json"
+        if not cycle_plan_path.exists():
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": f"missing repair-cycle-plan: {cycle_plan_path}",
+            }, indent=2))
+            return 1
+
+        cycle_plan = load_json(cycle_plan_path)
+        findings = cycle_plan.get("blocking_findings", []) if isinstance(cycle_plan, dict) else []
+        if not isinstance(findings, list) or not findings:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": "repair-cycle-plan has no blocking findings",
+            }, indent=2))
+            return 1
+
+        task_type = str((manifest.get("classification") or {}).get("type", "feature"))
+        root = _root_for_task_dir(task_dir)
+        from lib_qlearn import build_repair_plan  # noqa: PLC0415
+
+        q_plan = build_repair_plan(root, findings, task_type)
+        assignments = q_plan.get("assignments", []) if isinstance(q_plan, dict) else []
+        by_finding_id = {
+            str(entry.get("finding_id")): entry
+            for entry in assignments
+            if isinstance(entry, dict) and isinstance(entry.get("finding_id"), str)
+        }
+
+        normalized_tasks: list[dict] = []
+        unresolved_files: list[str] = []
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            finding_id = str(finding.get("id", "") or "")
+            if not finding_id:
+                continue
+            assignment = by_finding_id.get(finding_id, {})
+            assigned_executor = assignment.get("assigned_executor") or finding.get("assigned_executor")
+            if not isinstance(assigned_executor, str) or not assigned_executor:
+                category = finding_id.split("-")[0].lower() if "-" in finding_id else ""
+                if category == "db":
+                    assigned_executor = "db-executor"
+                elif category == "dc":
+                    assigned_executor = "refactor-executor"
+                elif category == "ui":
+                    assigned_executor = "ui-executor"
+                elif category == "sec":
+                    assigned_executor = "backend-executor"
+                else:
+                    assigned_executor = "backend-executor"
+            files_to_modify = _repair_files_for_finding(task_dir, finding, assigned_executor)
+            if not files_to_modify:
+                unresolved_files.append(finding_id)
+                continue
+            task = {
+                "finding_id": finding_id,
+                "assigned_executor": assigned_executor,
+                "files_to_modify": files_to_modify,
+                "retry_count": int(finding.get("retry_count", 0) or 0),
+                "severity": str(finding.get("severity", "medium") or "medium"),
+                "state": assignment.get("state"),
+            }
+            for key in ("route_mode", "route_source", "agent_path", "agent_name", "model_override", "model_source"):
+                value = assignment.get(key)
+                if value is not None:
+                    task[key] = value
+            normalized_tasks.append(task)
+
+        if unresolved_files:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": "unable to derive files_to_modify for all findings",
+                "finding_ids": unresolved_files,
+            }, indent=2))
+            return 1
+
+        groups: list[dict] = []
+        for task in normalized_tasks:
+            task_files = set(task["files_to_modify"])
+            placed = False
+            for group in groups:
+                if task_files & group["files"]:
+                    continue
+                group["tasks"].append(task)
+                group["files"].update(task_files)
+                placed = True
+                break
+            if not placed:
+                groups.append({
+                    "tasks": [task],
+                    "files": set(task_files),
+                })
+
+        batches: list[dict] = []
+        for idx, group in enumerate(groups, start=1):
+            batches.append({
+                "batch_id": f"batch-{idx}",
+                "parallel": len(group["tasks"]) > 1,
+                "tasks": group["tasks"],
+            })
+
+        repair_log = {
+            "repair_cycle": int(cycle_plan.get("repair_cycle", 0) or 0),
+            "phase": cycle_plan.get("phase"),
+            "source": "deterministic_ctl",
+            "q_learning_source": q_plan.get("source", "default") if isinstance(q_plan, dict) else "default",
+            "batches": batches,
+        }
+        repair_log_path = task_dir / "repair-log.json"
+        write_json(repair_log_path, repair_log)
+
+        from lib_validate import validate_repair_log  # noqa: PLC0415
+        errors = validate_repair_log(task_dir)
+        if errors:
+            print(json.dumps({
+                "status": "repair_log_invalid",
+                "task_dir": str(task_dir),
+                "errors": errors,
+            }, indent=2))
+            return 1
+
+        print(json.dumps({
+            "status": "repair_log_built",
+            "task_dir": str(task_dir),
+            "repair_log_path": str(repair_log_path),
+            "repair_cycle": repair_log["repair_cycle"],
+            "phase": repair_log["phase"],
+            "batch_count": len(batches),
+            "task_count": len(normalized_tasks),
+            "q_learning_source": repair_log["q_learning_source"],
         }, indent=2))
         return 0
     except Exception as exc:
@@ -1557,6 +1913,91 @@ def cmd_run_repair_execution_ready(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_run_repair_q_update(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        manifest = _load_manifest(task_dir)
+        task_type = str((manifest.get("classification") or {}).get("type", "feature"))
+        repair_log_path = task_dir / "repair-log.json"
+        if not repair_log_path.exists():
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": f"missing repair-log: {repair_log_path}",
+            }, indent=2))
+            return 1
+
+        repair_log = load_json(repair_log_path)
+        batches = repair_log.get("batches", []) if isinstance(repair_log, dict) else []
+        repaired_tasks: list[dict] = []
+        repaired_finding_ids: set[str] = set()
+        for batch in batches if isinstance(batches, list) else []:
+            if not isinstance(batch, dict):
+                continue
+            for task in batch.get("tasks", []) or []:
+                if not isinstance(task, dict):
+                    continue
+                fid = task.get("finding_id")
+                if isinstance(fid, str) and fid:
+                    repaired_finding_ids.add(fid)
+                    repaired_tasks.append(task)
+
+        post_repair_blocking: dict[str, dict] = {}
+        reports_dir = task_dir / "audit-reports"
+        if reports_dir.exists():
+            for report_path in sorted(reports_dir.glob("*.json")):
+                report = load_json(report_path)
+                findings = report.get("findings", []) if isinstance(report, dict) else []
+                if not isinstance(findings, list):
+                    continue
+                for finding in findings:
+                    if not isinstance(finding, dict) or not bool(finding.get("blocking")):
+                        continue
+                    fid = finding.get("id")
+                    if isinstance(fid, str) and fid:
+                        post_repair_blocking[fid] = finding
+
+        new_blocking_ids = sorted(set(post_repair_blocking) - repaired_finding_ids)
+        from lib_qlearn import encode_repair_state, update_from_outcomes  # noqa: PLC0415
+        root = _root_for_task_dir(task_dir)
+        outcomes: list[dict] = []
+        for task in repaired_tasks:
+            finding_id = str(task.get("finding_id", "") or "")
+            if not finding_id:
+                continue
+            retry_count = int(task.get("retry_count", 0) or 0)
+            severity = str(task.get("severity", "medium") or "medium")
+            category = finding_id.split("-")[0] if "-" in finding_id else finding_id
+            resolved = finding_id not in post_repair_blocking
+            next_state = None
+            if not resolved:
+                next_state = encode_repair_state(category, severity, task_type, retry_count + 1)
+            outcomes.append({
+                "finding_id": finding_id,
+                "state": task.get("state") or encode_repair_state(category, severity, task_type, retry_count),
+                "executor": task.get("assigned_executor"),
+                "route_mode": task.get("route_mode", "generic"),
+                "model": task.get("model_override") or "default",
+                "resolved": resolved,
+                "new_findings": len(new_blocking_ids),
+                "tokens_used": 0,
+                "next_state": next_state,
+            })
+
+        result = update_from_outcomes(root, outcomes, task_type)
+        print(json.dumps({
+            "status": "repair_q_updated",
+            "task_dir": str(task_dir),
+            "outcome_count": len(outcomes),
+            "new_blocking_ids": new_blocking_ids,
+            "update_result": result,
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
 def cmd_run_repair_batch_plan(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -1728,6 +2169,46 @@ def cmd_run_audit_reflect(args: argparse.Namespace) -> int:
             "quality_score": result.get("quality_score"),
             "cost_score": result.get("cost_score"),
             "efficiency_score": result.get("efficiency_score"),
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
+def cmd_run_audit_finish(args: argparse.Namespace) -> int:
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        manifest = _load_manifest(task_dir)
+        stage = manifest.get("stage")
+        if stage not in {"CHECKPOINT_AUDIT", "FINAL_AUDIT"}:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": f"unexpected stage for audit finish: {stage}",
+            }, indent=2))
+            return 1
+
+        summary_path = task_dir / "audit-summary.json"
+        retro_path = task_dir / "task-retrospective.json"
+        if not summary_path.exists() or not retro_path.exists():
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": "audit-summary.json and task-retrospective.json must exist before DONE",
+            }, indent=2))
+            return 1
+
+        completion = load_json(summary_path)
+        completion_path = task_dir / "completion.json"
+        write_json(completion_path, completion)
+        _, updated = transition_task(task_dir, "DONE")
+        print(json.dumps({
+            "status": "done",
+            "task_dir": str(task_dir),
+            "stage": updated.get("stage"),
+            "completion_path": str(completion_path),
+            "completed_at": updated.get("completed_at"),
         }, indent=2))
         return 0
     except Exception as exc:
@@ -2328,6 +2809,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_start_classification_parser.add_argument("task_dir")
     run_start_classification_parser.set_defaults(func=cmd_run_start_classification)
 
+    run_external_solution_gate_parser = subparsers.add_parser(
+        "run-external-solution-gate",
+        help="Write external-solution-gate.json from deterministic task heuristics",
+    )
+    run_external_solution_gate_parser.add_argument("task_dir")
+    run_external_solution_gate_parser.set_defaults(func=cmd_run_external_solution_gate)
+
     run_spec_ready_parser = subparsers.add_parser(
         "run-spec-ready",
         help="Validate spec.md, write spec-validated receipt, and advance to SPEC_REVIEW when ready",
@@ -2436,12 +2924,26 @@ def build_parser() -> argparse.ArgumentParser:
     run_repair_execution_ready_parser.add_argument("task_dir")
     run_repair_execution_ready_parser.set_defaults(func=cmd_run_repair_execution_ready)
 
+    run_repair_log_build_parser = subparsers.add_parser(
+        "run-repair-log-build",
+        help="Build repair-log.json deterministically from repair-cycle-plan plus Q-learning assignments",
+    )
+    run_repair_log_build_parser.add_argument("task_dir")
+    run_repair_log_build_parser.set_defaults(func=cmd_run_repair_log_build)
+
     run_repair_batch_plan_parser = subparsers.add_parser(
         "run-repair-batch-plan",
         help="Build deterministic repair batch execution groups from repair-log.json",
     )
     run_repair_batch_plan_parser.add_argument("task_dir")
     run_repair_batch_plan_parser.set_defaults(func=cmd_run_repair_batch_plan)
+
+    run_repair_q_update_parser = subparsers.add_parser(
+        "run-repair-q-update",
+        help="Build repair outcomes deterministically from repair-log plus current audit reports and update Q-tables",
+    )
+    run_repair_q_update_parser.add_argument("task_dir")
+    run_repair_q_update_parser.set_defaults(func=cmd_run_repair_q_update)
 
     run_repair_retry_parser = subparsers.add_parser(
         "run-repair-retry",
@@ -2456,6 +2958,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_audit_reflect_parser.add_argument("task_dir")
     run_audit_reflect_parser.set_defaults(func=cmd_run_audit_reflect)
+
+    run_audit_finish_parser = subparsers.add_parser(
+        "run-audit-finish",
+        help="Write completion.json and advance CHECKPOINT_AUDIT/FINAL_AUDIT -> DONE deterministically",
+    )
+    run_audit_finish_parser.add_argument("task_dir")
+    run_audit_finish_parser.set_defaults(func=cmd_run_audit_finish)
 
     rp_parser = subparsers.add_parser("repair-plan", help="Q-learning repair plan (reads findings from stdin)")
     rp_parser.add_argument("--root", default=".")

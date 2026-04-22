@@ -19,13 +19,13 @@ Before EVERY planner receipt write, you MUST first write a per-phase injected-pr
 
 ```bash
 # Discovery planner — write sidecar, capture digest:
-DISCOVERY_DIGEST=$(printf '%s' "$DISCOVERY_PROMPT" | python3 "{{HOOKS_PATH}}/dynorouter.py" planner-inject-prompt --task-id {id} --phase discovery)
+DISCOVERY_DIGEST=$(printf '%s' "$DISCOVERY_PROMPT" | python3 "{{HOOKS_PATH}}/router.py" planner-inject-prompt --task-id {id} --phase discovery)
 
 # Spec planner — write sidecar, capture digest:
-SPEC_DIGEST=$(printf '%s' "$SPEC_PROMPT" | python3 "{{HOOKS_PATH}}/dynorouter.py" planner-inject-prompt --task-id {id} --phase spec)
+SPEC_DIGEST=$(printf '%s' "$SPEC_PROMPT" | python3 "{{HOOKS_PATH}}/router.py" planner-inject-prompt --task-id {id} --phase spec)
 
 # Plan planner — write sidecar, capture digest:
-PLAN_DIGEST=$(printf '%s' "$PLAN_PROMPT" | python3 "{{HOOKS_PATH}}/dynorouter.py" planner-inject-prompt --task-id {id} --phase plan)
+PLAN_DIGEST=$(printf '%s' "$PLAN_PROMPT" | python3 "{{HOOKS_PATH}}/router.py" planner-inject-prompt --task-id {id} --phase plan)
 ```
 
 Then, after each planner subagent returns, write the matching receipt with the captured digest:
@@ -101,7 +101,7 @@ Each receipt auto-records tokens to `token-usage.json`. If you skip this, the re
 7. Deterministically verify that `manifest.json` parses as valid JSON and that `task_id`, `created_at`, `raw_input`, and `stage` are present before continuing. If available in this repo, use:
 
 ```text
-python3 hooks/dynosctl.py validate-task .dynos/task-{id}
+python3 "{{HOOKS_PATH}}/ctl.py" validate-task .dynos/task-{id}
 ```
 8. Print: `dynos-work: Foundry Task Initialized: task-YYYYMMDD-NNN`
 
@@ -113,7 +113,7 @@ After every subagent spawn AND every deterministic validation, record the event:
 
 **For LLM subagent spawns** (planner, founder, testing-executor, spec-completion-auditor):
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoslib_tokens.py" record \
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
   --agent "{agent_name}" \
   --model "{model_name}" \
@@ -127,7 +127,7 @@ PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoslib_tok
 
 **For deterministic Python validations** (validate_task_artifacts, dynosctl validate-task, spec heading check, etc.):
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoslib_tokens.py" record \
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
   --agent "{validation_tool_name}" \
   --model "none" \
@@ -177,19 +177,12 @@ This writes to `.dynos/task-{id}/token-usage.json` with a chronological event lo
 
 ## Step 2 — Discovery + Design + Classification
 
-**Fast-track discovery skip:** Before spawning the planner, check if the task input is already well-scoped. A task is well-scoped when ALL of:
-- It names a specific file or narrow set of files
-- It states explicit constraints (e.g., "do not change X", "UI only", "single-file")
-- It describes a concrete, bounded change (not open-ended like "improve performance")
-
-When well-scoped: skip the planner spawn entirely. Instead, write `discovery-notes.md` with "No discovery needed — task is well-scoped." Write `design-decisions.md` with "No hard/critical design options — autonomous decisions only." Classify directly (infer type, domains, risk_level from the input). Then proceed to Step 2b (fast-track gate) and Step 3.
-
-When NOT well-scoped: spawn the planner as normal below.
+There is no direct-classify shortcut here. Always use the planner for Discovery + Design + Classification. Do NOT skip the planner spawn and do NOT infer classification directly from the task input in prompt logic.
 
 **Learned Planning Skill Injection (MANDATORY):** Before spawning the planner, check if a learned planning skill exists for this task type:
 
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 -c "from pathlib import Path; from dynorouter import resolve_route; r = resolve_route(Path('.'), 'plan-skill', '{task_type}'); print(r['agent_path'] or '')" 
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 -c "from pathlib import Path; from router import resolve_route; r = resolve_route(Path('.'), 'plan-skill', '{task_type}'); print(r['agent_path'] or '')" 
 ```
 
 If a non-empty path is returned AND the file exists, read it, strip frontmatter, and append its contents to the planner's instruction below under a `## Learned Planning Rules` heading. This injects project-specific planning patterns (e.g., tighter acceptance criteria, better segment sizing) derived from past task retrospectives. Log: `{timestamp} [ROUTE] plan-skill route={mode} agent={agent_name}`.
@@ -225,7 +218,7 @@ Write the returned classification object to `manifest.json`.
 Finalize classification through the deterministic control-plane entrypoint:
 
 ```text
-python3 hooks/dynosctl.py run-start-classification .dynos/task-{id}
+python3 "{{HOOKS_PATH}}/ctl.py" run-start-classification .dynos/task-{id}
 ```
 
 `run-start-classification` validates the classification payload, applies fast-track + `tdd_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready.
@@ -242,6 +235,32 @@ When fast-tracked (`fast_track: true`), apply these simplifications throughout t
 - **Audit (handled by audit skill):** When `fast_track: true` in the manifest, spawn only `spec-completion-auditor` and `security-auditor`. Skip all other auditors regardless of streak or domain.
 
 If any condition is not met, proceed normally (no fast-track). Do not ask the user — this is a deterministic gate.
+
+---
+
+## Step 2c — External Solution Gate (always runs)
+
+Before inventing a solution from scratch, run the deterministic external-solution gate. The control plane writes `.dynos/task-{id}/external-solution-gate.json`; do NOT hand-write this artifact in prompt logic.
+
+```bash
+python3 "{{HOOKS_PATH}}/ctl.py" run-external-solution-gate .dynos/task-{id}
+```
+
+This command deterministically inspects the task input and classification, then writes the gate artifact with:
+- `search_recommended`: whether external research is likely worth the time
+- `search_used`: always `false` at gate time
+- `query_reason`: short deterministic explanation
+- `candidates`: `[]`
+- `recommended_choice`: `null`
+- `decision_basis`: matched trigger signals for auditability
+
+If `search_recommended` is `true`, you may perform bounded external research to inform planning, but treat that research as planner input only. Do NOT rewrite `external-solution-gate.json` by hand after searching.
+
+If `search_recommended` is `false`, proceed directly to Step 3.
+
+Append exactly one line to the execution log:
+
+`{timestamp} [GATE] external-solution — recommended: {true|false}`
 
 ---
 
@@ -267,7 +286,7 @@ If any rule fails, send the Planner back to fix `spec.md` before presenting it.
 Finalize spec readiness through the deterministic control-plane entrypoint:
 
 ```text
-python3 hooks/dynosctl.py run-spec-ready .dynos/task-{id}
+python3 "{{HOOKS_PATH}}/ctl.py" run-spec-ready .dynos/task-{id}
 ```
 
 `run-spec-ready` validates `spec.md`, writes the `spec-validated` receipt, and advances `SPEC_NORMALIZATION -> SPEC_REVIEW` when the artifact is sound.
@@ -287,7 +306,7 @@ Present `spec.md` to the user and ask for approval.
 When approved:
 
 ```text
-python3 hooks/dynosctl.py approve-stage .dynos/task-{id} SPEC_REVIEW
+python3 "{{HOOKS_PATH}}/ctl.py" approve-stage .dynos/task-{id} SPEC_REVIEW
 ```
 
 Exit code 0 means the receipt was written and the stage advanced to PLANNING. Exit code 1 means the gate refused — the stderr text identifies the cause. Do not bypass with `transition --force`.
@@ -353,7 +372,7 @@ Append to the execution log (transition_task auto-appends the `[STAGE] → PLAN_
 Transition the stage by running:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLAN_REVIEW
+python3 "{{HOOKS_PATH}}/ctl.py" transition .dynos/task-{id} PLAN_REVIEW
 ```
 
 ---
@@ -364,7 +383,7 @@ This gate always runs. There is no skip path.
 
 Present `plan.md` to the user and ask for approval.
 
-- If approved: run `python3 hooks/dynosctl.py approve-stage .dynos/task-{id} PLAN_REVIEW`. This hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, and atomically advances PLAN_REVIEW → PLAN_AUDIT. Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`. Do NOT add a manual `[HUMAN]` log line — the receipt is the audit trail.
+- If approved: run `python3 "{{HOOKS_PATH}}/ctl.py" approve-stage .dynos/task-{id} PLAN_REVIEW`. This hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, and atomically advances PLAN_REVIEW → PLAN_AUDIT. Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`. Do NOT add a manual `[HUMAN]` log line — the receipt is the audit trail.
 - If changes are requested: append the feedback, respawn planning, re-run deterministic artifact validation, and present the updated plan again. Do NOT call `approve-stage` against a stale plan.
 - If rejected outright: set `manifest.json` stage to `FAILED`, append `[FAILED] Plan rejected by user`, and stop.
 
@@ -421,7 +440,7 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 6. When the user approves the test suite, transition out of TDD_REVIEW via the `approve-stage` ctl command. This hashes `evidence/tdd-tests.md`, writes the `human-approval-TDD_REVIEW` receipt with that hash, and advances TDD_REVIEW → PRE_EXECUTION_SNAPSHOT in one atomic step. Do NOT append a manual `[HUMAN]` log line:
 
    ```text
-   python3 hooks/dynosctl.py approve-stage .dynos/task-{id} TDD_REVIEW
+   python3 "{{HOOKS_PATH}}/ctl.py" approve-stage .dynos/task-{id} TDD_REVIEW
    ```
 
    Exit code 0 means success; exit code 1 means the gate refused (stderr text identifies the cause). Do not bypass with `transition --force`.
@@ -435,7 +454,7 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 Transition the stage by running:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
+python3 "{{HOOKS_PATH}}/ctl.py" transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
 Append to the execution log:

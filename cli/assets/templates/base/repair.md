@@ -27,15 +27,10 @@ Manually repair a specific finding from an audit report. Use this when you need 
 
 ## Executor selection
 
-Based on the finding's `assigned_executor` field from the audit report. If not specified, infer from file extension:
-- UI files → `ui-executor`
-- Backend/API files → `backend-executor`
-- Schema/migration → `db-executor`
-- Config/env → `integration-executor`
-- Tests → `testing-executor`
+Use the finding's `assigned_executor` from the audit report. If it is missing, stop and surface the gap instead of inferring ownership from file extension or guessing.
 
 ## Hard rules
 
 - Always re-audit after repair — do not assume the fix worked
 - Always include spec-completion and security in the re-audit
-- Update `repair-log.json` with the result
+- Do not hand-write `repair-log.json`; that file belongs to the deterministic audit repair loop

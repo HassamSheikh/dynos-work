@@ -27,7 +27,7 @@ Verify `spec.md` exists. If not, print "No spec found. Run /dynos-work:start to 
 Transition the stage to `PLANNING` (transition_task auto-writes the `[STAGE] → PLANNING` log line):
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PLANNING
+python3 "{{HOOKS_PATH}}/ctl.py" transition .dynos/task-{id} PLANNING
 ```
 
 Append the spawn line to the execution log:
@@ -40,7 +40,7 @@ Spawn the `planning` agent with instruction: "Generate the implementation plan a
 Wait for completion. Finalize planning through the deterministic control-plane entrypoint:
 
 ```text
-python3 hooks/dynosctl.py run-planning .dynos/task-{id}
+python3 "{{HOOKS_PATH}}/ctl.py" run-planning .dynos/task-{id}
 ```
 
 `run-planning` owns full deterministic validation, writes the `plan-validated` receipt, and advances `PLANNING -> PLAN_REVIEW` when the artifacts are sound.
@@ -66,7 +66,7 @@ Approve this plan? (yes / no + what to change)
 - If **approved**: run the `approve-stage` ctl command below. It hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, then transitions PLAN_REVIEW → PLAN_AUDIT in one atomic step. The hash is computed from the CURRENT `plan.md` content **at transition time** (the gate re-hashes the file and compares it to `receipt.artifact_sha256`), so an approval that races against a manual edit will be refused with the literal substrings `human-approval-PLAN_REVIEW` and `hash mismatch`. Do NOT add a manual `[HUMAN]` log line — the receipt is the audit trail. Then proceed to Step 4.
 
   ```text
-  python3 hooks/dynosctl.py approve-stage .dynos/task-{id} PLAN_REVIEW
+  python3 "{{HOOKS_PATH}}/ctl.py" approve-stage .dynos/task-{id} PLAN_REVIEW
   ```
 
   Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`.
@@ -80,13 +80,13 @@ The `approve-stage` call in Step 3 has already advanced the manifest to `PLAN_AU
 Run the deterministic controller first:
 
 ```text
-python3 hooks/dynosctl.py run-plan-audit .dynos/task-{id}
+python3 "{{HOOKS_PATH}}/ctl.py" run-plan-audit .dynos/task-{id}
 ```
 
 If it returns `llm_audit_required`, run the auditor and finalize with:
 
 ```text
-python3 hooks/dynosctl.py run-plan-audit .dynos/task-{id} --report-path .dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json --tokens-used {TOTAL_TOKENS} --model {MODEL_USED}
+python3 "{{HOOKS_PATH}}/ctl.py" run-plan-audit .dynos/task-{id} --report-path .dynos/task-{id}/audit-reports/plan-audit-{timestamp}.json --tokens-used {TOTAL_TOKENS} --model {MODEL_USED}
 ```
 
 If either call returns `replan_required`, repair the plan and rerun the controller. If it returns `passed`, proceed.
@@ -96,7 +96,7 @@ If either call returns `replan_required`, repair the plan and rerun the controll
 Transition the stage to `PRE_EXECUTION_SNAPSHOT`:
 
 ```text
-python3 hooks/dynosctl.py transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
+python3 "{{HOOKS_PATH}}/ctl.py" transition .dynos/task-{id} PRE_EXECUTION_SNAPSHOT
 ```
 
 Append to log:

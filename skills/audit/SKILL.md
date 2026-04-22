@@ -109,7 +109,7 @@ Each writes its report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{
 
 **Token & event capture (applies to all events in Steps 3-5):** After each subagent spawn AND each deterministic check, record the event:
 
-**For LLM subagent spawns** (auditors, repair-coordinator, repair executors):
+**For LLM subagent spawns** (auditors, repair executors):
 ```bash
 PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 "${PLUGIN_HOOKS}/lib_tokens.py" record \
   --task-dir .dynos/task-{id} \
@@ -144,7 +144,7 @@ Run this after EVERY event. The hook writes to `.dynos/task-{id}/token-usage.jso
 **Specific events to record in this skill:**
 - Step 3: router audit-plan (type=deterministic, detail="Router decided: spawn X, skip Y")
 - Step 3: Each auditor spawn (type=spawn, phase=audit)
-- Step 4: repair-coordinator spawn (type=spawn, phase=repair)
+- Step 4: repair-log build (type=deterministic, phase=repair)
 - Step 4: Each repair executor spawn (type=spawn, phase=repair, include --segment)
 - Step 4: ctl check-ownership after repair (type=deterministic, phase=repair)
 - Step 4: Re-audit spawns (type=spawn, phase=audit, detail="Re-audit after repair cycle N")
@@ -198,13 +198,19 @@ Append to log:
 echo '{"findings": [{finding objects}]}' | python3 "${PLUGIN_HOOKS}/ctl.py" repair-plan --root . --task-type {task_type}
 ```
 
-If the response has `"source": "q-learning"`, pass the assignments to the repair coordinator as constraints: "Use these executor and model assignments for the listed findings." The coordinator still decides batch ordering, instructions, and file lists — but executor and model choices come from the Q-table.
+If the response has `"source": "q-learning"`, ctl will use those assignments when building `repair-log.json`.
 
-If `"source": "default"` (Q-learning disabled), the repair coordinator uses its own heuristic rules as before.
+If `"source": "default"` (Q-learning disabled), ctl uses deterministic fallback executor selection.
 
 Log: `{timestamp} [REPAIR-PLAN] source={source} assignments={N}`
 
-Spawn `repair-coordinator` agent with instruction: "Read the provided audit reports plus the deterministic repair-cycle payload. Produce a repair plan for exactly those findings. Preserve each finding's provided `retry_count`, `repair_cycle`, and any `model_override`. Assign each finding to an executor. For each repair task, list the files that will be modified. Write to `.dynos/task-{id}/repair-log.json`."
+Build the repair log through ctl:
+
+```text
+python3 "${PLUGIN_HOOKS}/ctl.py" run-repair-log-build .dynos/task-{id}
+```
+
+This command reads `repair-cycle-plan.json`, calls Q-learning itself, derives `files_to_modify`, writes `.dynos/task-{id}/repair-log.json`, and validates the result. Do NOT ask an LLM to draft `repair-log.json`.
 
 Wait for completion, then finalize repair execution readiness through the control plane:
 
@@ -240,16 +246,6 @@ After all batches complete, append to log:
 {timestamp} [DONE] repair-execution-{phase} — all fixes applied
 ```
 
-**Q-learning update (after repair execution):** After executors complete but before re-audit, build outcomes from the repair results and update Q-tables:
-
-```bash
-echo '{"outcomes": [{outcome objects}]}' | python3 "${PLUGIN_HOOKS}/ctl.py" repair-update --root . --task-type {task_type}
-```
-
-Each outcome includes: finding_id, state (from repair-plan), executor, model, resolved (from re-audit), new_findings count, tokens_used. Set `next_state` to the encoded state for the next retry cycle if unresolved, or `null` if resolved/terminal.
-
-This is a no-op if Q-learning is disabled. Log: `{timestamp} [Q-UPDATE] {N} outcomes, avg reward={avg}`
-
 **Phase 1 re-audit (domain-aware, incremental scope):** Build the re-audit plan through ctl:
 
 ```bash
@@ -265,6 +261,14 @@ Use its JSON output as authoritative:
 Do NOT hand-compute repair-modified files or choose the re-audit auditor set in prompt logic.
 
 After re-audit, run `run-audit-findings-gate` again.
+
+Update Q-learning outcomes through ctl:
+
+```text
+python3 "${PLUGIN_HOOKS}/ctl.py" run-repair-q-update .dynos/task-{id}
+```
+
+This command derives outcomes from `repair-log.json` plus the current blocking audit findings and updates the Q-tables deterministically. Do NOT build `outcomes` JSON by hand.
 
 - If `status == "clear"`: proceed to Step 5.
 - If `status == "repair_required"`: let the control plane decide whether another repair cycle is legal:
@@ -357,10 +361,14 @@ If `has_findings` is false, skip this step and append:
 
 **Post-completion processing:** Improve, policy engine, dashboard, and registry refresh are handled automatically by the `task-completed` hook via the event bus. Do not run them inline. The hook fires after this skill completes and the task reaches DONE.
 
-Write `completion.json`. Transition the task to `DONE` by calling `transition_task(task_dir, "DONE")` from `lib.py` (this sets both `stage` and `completion_at`). Append to log:
+Finalize completion through ctl:
+
+```text
+python3 "${PLUGIN_HOOKS}/ctl.py" run-audit-finish .dynos/task-{id}
 ```
-{timestamp} [ADVANCE] CHECKPOINT_AUDIT → DONE
-```
+
+This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic.
+
 Print (listing only auditors that were actually spawned, not skipped):
 ```
 Audit complete — ALL PASSED
