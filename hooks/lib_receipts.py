@@ -580,6 +580,39 @@ def validate_chain(task_dir: Path) -> list[str]:
             if s in stage_requires and "tdd-tests" not in stage_requires[s]:
                 stage_requires[s] = stage_requires[s] + ["tdd-tests"]
 
+    # Conditionally require `search-conducted` for all stages at or past
+    # SPEC_REVIEW when the gate wrote search_recommended=true.  run-spec-ready
+    # blocks advancement from SPEC_NORMALIZATION without the receipt; this
+    # ensures validate_chain retroactively surfaces the gap on tasks that
+    # slipped past before the gate enforcement was added.
+    gate_path = task_dir / "external-solution-gate.json"
+    search_required = False
+    if gate_path.exists():
+        try:
+            gate_data = json.loads(gate_path.read_text())
+            search_required = isinstance(gate_data, dict) and gate_data.get("search_recommended") is True
+        except Exception:
+            pass
+    if search_required:
+        search_stages = {
+            "SPEC_REVIEW",
+            "PLANNING",
+            "PLAN_REVIEW",
+            "PLAN_AUDIT",
+            "PRE_EXECUTION_SNAPSHOT",
+            "EXECUTION",
+            "TEST_EXECUTION",
+            "CHECKPOINT_AUDIT",
+            "REPAIR_PLANNING",
+            "REPAIR_EXECUTION",
+            "FINAL_AUDIT",
+            "DONE",
+        }
+        for s in search_stages:
+            existing = stage_requires.get(s, [])
+            if "search-conducted" not in existing:
+                stage_requires[s] = existing + ["search-conducted"]
+
     required = stage_requires.get(stage, [])
     gaps = []
 
