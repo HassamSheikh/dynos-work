@@ -282,16 +282,19 @@ If tests fail:
 
 ### Step 5 — Verify completion
 
-After successfully completing execution and tests (and any repairs triggered by tests or audit), verify all referenced `criteria_ids` from `execution-graph.json` are represented in the finalized code. 
+After successfully completing execution and tests (and any repairs triggered by tests or audit), run the deterministic evidence verifier:
 
-Deterministically verify before completion:
-- Every segment has an evidence file or a valid cached status.
-- Every approved test file still exists unless the plan explicitly superseded it.
-- No segment modified files outside its declared ownership without corresponding repair evidence.
+```bash
+python3 "${PLUGIN_HOOKS}/ctl.py" run-execution-verify-evidence .dynos/task-{id}
+```
+
+This command checks every non-cached segment's evidence file exists and is non-empty, and that every `files_expected` entry exists on disk. It exits non-zero with a JSON error payload if any check fails. **Do NOT assert completion in prompt logic — consume this command's output as the authoritative pass/fail signal.**
+
+If the command reports `"status": "blocked"`, address each listed failure before proceeding.
 
 Append to log:
 ```
-{timestamp} [DONE] execute — all segments complete and tested
+{timestamp} [DONE] execute — all segments verified by ctl (segments_verified={N})
 ```
 
 ### Handoff — Write handoff record

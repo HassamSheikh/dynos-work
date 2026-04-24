@@ -247,3 +247,11 @@ def test_postmortem_analysis_missing_rules_path_gives_zero_hash(tmp_path: Path):
     payload = json.loads(receipt_path.read_text())
 
     assert payload["rules_sha256_after"] == "0" * 64
+
+
+def test_postmortem_analysis_positional_args_raise_type_error(tmp_path: Path):
+    """Legacy positional path removed — calling with positional hash args must raise TypeError."""
+    td = tmp_path / ".dynos" / "task-test"
+    td.mkdir(parents=True)
+    with pytest.raises(TypeError):
+        receipt_postmortem_analysis(td, "a" * 64, 0, "b" * 64)  # type: ignore[call-arg]

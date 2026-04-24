@@ -195,19 +195,7 @@ Append to log:
 {timestamp} [REPAIR] {phase} cycle={repair_cycle} findings={list of finding IDs}
 ```
 
-**Q-learning repair plan (deterministic):** Before spawning the repair coordinator, get executor and model assignments from the Q-learning planner:
-
-```bash
-echo '{"findings": [{finding objects}]}' | python3 "${PLUGIN_HOOKS}/ctl.py" repair-plan --root . --task-type {task_type}
-```
-
-If the response has `"source": "q-learning"`, ctl will use those assignments when building `repair-log.json`.
-
-If `"source": "default"` (Q-learning disabled), ctl uses deterministic fallback executor selection.
-
-Log: `{timestamp} [REPAIR-PLAN] source={source} assignments={N}`
-
-Build the repair log through ctl:
+Build the repair log through ctl — Q-learning assignments are computed inside this command from `repair-cycle-plan.json`; do NOT construct or pipe a separate findings payload:
 
 ```text
 python3 "${PLUGIN_HOOKS}/ctl.py" run-repair-log-build .dynos/task-{id}

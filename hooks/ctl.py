@@ -1013,6 +1013,44 @@ def cmd_run_external_solution_gate(args: argparse.Namespace) -> int:
         return 1
 
 
+
+def cmd_check_retro_integrity(args: argparse.Namespace) -> int:
+    """Report persistent retrospectives with no matching flush event in events.jsonl.
+
+    Exits non-zero if any persistent-unverified entries exist. Use as a pre-calibration
+    gate. Closes the weaker attack variant (no flush event). The stronger variant
+    (forged flush event) requires tamper-evident events.jsonl and is out of scope.
+    """
+    root = Path(args.root).resolve()
+    from lib_core import collect_retrospectives
+    try:
+        all_entries = collect_retrospectives(root, include_unverified=True)
+        unverified = [e for e in all_entries if e.get("_source") == "persistent-unverified"]
+        if unverified:
+            print(json.dumps({
+                "status": "unverified_entries_found",
+                "root": str(root),
+                "count": len(unverified),
+                "task_ids": [e.get("task_id") for e in unverified],
+                "paths": [e.get("_path") for e in unverified],
+                "recommendation": (
+                    "For each path: hash the file with sha256sum and append a "
+                    "'retrospective_flushed' event to .dynos/events.jsonl, "
+                    "or delete the entry if it is spurious."
+                ),
+            }, indent=2))
+            return 1
+        print(json.dumps({
+            "status": "ok",
+            "root": str(root),
+            "total_retros": len(all_entries),
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
 def cmd_write_execute_handoff(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -2938,6 +2976,91 @@ def cmd_run_execution_finish(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_run_execution_verify_evidence(args: argparse.Namespace) -> int:
+    """Deterministically verify evidence files and files_expected before Step 5 completion.
+
+    Checks:
+    1. Each non-cached segment has a non-empty evidence file at evidence/{seg-id}.md.
+    2. Each segment's files_expected entries exist on disk.
+
+    Exits non-zero and prints a JSON error payload if any check fails.
+    This replaces the model's narrative completion judgment in execute Step 5.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    root = _root_for_task_dir(task_dir)
+    try:
+        graph_path = task_dir / "execution-graph.json"
+        if not graph_path.exists():
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": "execution-graph.json not found",
+            }, indent=2))
+            return 1
+
+        graph = load_json(graph_path)
+        segments = graph.get("segments", []) if isinstance(graph, dict) else []
+        if not isinstance(segments, list):
+            segments = []
+
+        batch_payload = _compute_execution_batch_payload(task_dir)
+        cached_ids = set(batch_payload.get("cached_segments", []))
+
+        errors: list[str] = []
+        verified: list[str] = []
+
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            seg_id = str(seg.get("id", "") or "")
+            if not seg_id:
+                continue
+            if seg_id in cached_ids:
+                verified.append(f"{seg_id}: cached (evidence reused)")
+                continue
+
+            # Check evidence file.
+            evidence_path = task_dir / "evidence" / f"{seg_id}.md"
+            if not evidence_path.exists():
+                errors.append(f"{seg_id}: evidence file missing at {evidence_path}")
+                continue
+            content = evidence_path.read_text(errors="ignore").strip()
+            if not content:
+                errors.append(f"{seg_id}: evidence file is empty at {evidence_path}")
+                continue
+
+            # Check files_expected exist on disk.
+            for expected_file in (seg.get("files_expected") or []):
+                if not isinstance(expected_file, str) or not expected_file.strip():
+                    continue
+                fpath = root / expected_file.strip()
+                if not fpath.exists():
+                    errors.append(f"{seg_id}: files_expected entry missing on disk: {expected_file}")
+
+            verified.append(f"{seg_id}: ok")
+
+        if errors:
+            print(json.dumps({
+                "status": "blocked",
+                "task_dir": str(task_dir),
+                "error": f"{len(errors)} verification failure(s)",
+                "failures": errors,
+                "verified": verified,
+            }, indent=2))
+            return 1
+
+        print(json.dumps({
+            "status": "verified",
+            "task_dir": str(task_dir),
+            "segments_verified": len(verified),
+            "verified": verified,
+        }, indent=2))
+        return 0
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+
 def cmd_run_repair_execution_ready(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -3787,6 +3910,13 @@ def build_parser() -> argparse.ArgumentParser:
     ownership_parser.add_argument("files", nargs="+")
     ownership_parser.set_defaults(func=cmd_check_ownership)
 
+    retro_integrity_parser = subparsers.add_parser(
+        "check-retro-integrity",
+        help="Report persistent retros with no matching flush event; exits non-zero if any found",
+    )
+    retro_integrity_parser.add_argument("--root", required=True, help="Project root directory")
+    retro_integrity_parser.set_defaults(func=cmd_check_retro_integrity)
+
     execute_handoff_parser = subparsers.add_parser(
         "write-execute-handoff",
         help="Write handoff-execute-audit.json deterministically",
@@ -4052,6 +4182,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_execution_finish_parser.add_argument("task_dir")
     run_execution_finish_parser.set_defaults(func=cmd_run_execution_finish)
+
+    run_execution_verify_evidence_parser = subparsers.add_parser(
+        "run-execution-verify-evidence",
+        help="Verify evidence files and files_expected exist for all non-cached segments (replaces model narrative in Step 5)",
+    )
+    run_execution_verify_evidence_parser.add_argument("task_dir")
+    run_execution_verify_evidence_parser.set_defaults(func=cmd_run_execution_verify_evidence)
 
     run_repair_execution_ready_parser = subparsers.add_parser(
         "run-repair-execution-ready",

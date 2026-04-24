@@ -1691,48 +1691,30 @@ def receipt_postmortem_generated(
 
 def receipt_postmortem_analysis(
     task_dir: Path,
-    analysis_sha256: str | None = None,
-    rules_added: int | None = None,
-    rules_sha256_after: str | None = None,
     *,
-    analysis_path: Path | None = None,
+    analysis_path: Path,
     rules_path: Path | None = None,
+    rules_added: int,
 ) -> Path:
     """Write receipt proving postmortem analysis ran and rules updated.
 
-    Two calling conventions are supported:
-
-    Legacy positional (kept for backward compatibility):
-        receipt_postmortem_analysis(task_dir, analysis_sha256, rules_added, rules_sha256_after)
-
-    New keyword-only path-based (self-computes hashes from on-disk files):
-        receipt_postmortem_analysis(task_dir, analysis_path=p, rules_path=r, rules_added=n)
-        - Raises ValueError when analysis_path does not exist.
-        - rules_sha256_after is computed from rules_path when it exists, else "0"*64.
+    Hashes are derived from on-disk files — no caller-supplied hashes accepted.
+    Raises ValueError when analysis_path does not exist or rules_added is invalid.
+    rules_sha256_after is computed from rules_path when it exists, else "0"*64.
 
     On-disk payload key set: analysis_sha256, rules_added, rules_sha256_after,
     contract_version.
     """
-    if analysis_path is not None:
-        # New self-compute path: hashes are derived from on-disk files.
-        if not analysis_path.exists():
-            raise ValueError(f"analysis_path does not exist: {analysis_path}")
-        if not isinstance(rules_added, int) or isinstance(rules_added, bool) or rules_added < 0:
-            raise ValueError("rules_added must be a non-negative int")
-        analysis_sha256 = hash_file(analysis_path)
-        rules_sha256_after = (
-            hash_file(rules_path)
-            if (rules_path is not None and rules_path.exists())
-            else "0" * 64
-        )
-    else:
-        # Legacy positional path: validate caller-supplied values.
-        if not isinstance(analysis_sha256, str) or not analysis_sha256:
-            raise ValueError("analysis_sha256 must be a non-empty string")
-        if not isinstance(rules_added, int) or isinstance(rules_added, bool) or rules_added < 0:
-            raise ValueError("rules_added must be a non-negative int")
-        if not isinstance(rules_sha256_after, str) or not rules_sha256_after:
-            raise ValueError("rules_sha256_after must be a non-empty string")
+    if not analysis_path.exists():
+        raise ValueError(f"analysis_path does not exist: {analysis_path}")
+    if not isinstance(rules_added, int) or isinstance(rules_added, bool) or rules_added < 0:
+        raise ValueError("rules_added must be a non-negative int")
+    analysis_sha256 = hash_file(analysis_path)
+    rules_sha256_after = (
+        hash_file(rules_path)
+        if (rules_path is not None and rules_path.exists())
+        else "0" * 64
+    )
     return write_receipt(
         task_dir,
         "postmortem-analysis",
