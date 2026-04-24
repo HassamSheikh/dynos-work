@@ -6,7 +6,7 @@
 
 # dynos-work
 
-A Claude Code plugin that checks its own work and calibrates to your project over time. Human-directed, tool-grounded, self-improving.
+A Claude Code plugin that builds features, catches its own bugs, and gets better at your codebase over time.
 
 ## Install
 
@@ -15,121 +15,49 @@ claude plugin marketplace add dynos-fit/dynos-work
 claude plugin install dynos-work
 ```
 
-## Install commit-time rules check
-
-After cloning, install the deterministic rules engine pre-commit hook:
-
-```bash
-python3 hooks/rules_engine.py install-hook
-```
-
-This writes a `.git/hooks/pre-commit` script that runs the dynos rules engine on staged files at commit time. The hook enforces project-specific prevention rules (defined in `~/.dynos/projects/{slug}/prevention-rules.json`) and refuses commits with errors. New clones MUST run this command — git does not version `.git/hooks/`. Bypass via `git commit --no-verify` is supported but discouraged.
-
 ## Use
 
 ```
 /dynos-work:start build a user settings page
 ```
 
-That's it. The plugin handles the rest: discovers what's needed, writes a spec, plans the work, builds it, audits it, and repairs anything it finds.
+That's it. You'll answer a few questions about what you want, approve a spec, approve a plan — then it builds.
 
-You approve twice (spec and plan), then it runs.
+## What happens
+
+When you start a task, the plugin:
+
+1. **Asks what you need** — a few targeted questions to nail down scope
+2. **Writes a spec** — exact behavior, edge cases, what's out of scope. You approve it.
+3. **Writes a plan** — which files change, in what order, how it'll be tested. You approve it.
+4. **Builds in parallel** — multiple agents work on independent pieces simultaneously
+5. **Audits its own work** — independent agents check for bugs, security issues, and spec gaps
+6. **Repairs what it finds** — automatically, up to 3 attempts before it asks you
+
+After the task, it learns from what went wrong and builds prevention rules for next time. Your 10th task is better than your 1st.
 
 ## Commands
 
 ```
 /dynos-work:start [task]       start a new task
-/dynos-work:execute            execute the approved plan
-/dynos-work:audit              audit, repair, and finish
+/dynos-work:execute            run the approved plan
+/dynos-work:audit              audit, repair, and close
 /dynos-work:status             check where your task is
 /dynos-work:resume             continue after interruption
 /dynos-work:investigate [bug]  deep bug investigation
 ```
 
-## What it does
-
-**Builds better.** Every task flows through 6 phases: intake, design, specification, planning, verification, and handoff. Nothing ships without independent verification from deterministic tools and adversarial auditors.
-
-**Verifies with tools, not opinions.** API Contracts tables are cross-referenced against actual route definitions. Data Model tables are checked against real migrations. Doc paths are verified on disk. License compliance is scanned. The plan can't lie about what exists.
-
-**Learns from every task.** After each task, an opus agent performs root cause analysis on audit findings and repair failures. It writes specific prevention rules that are injected into future executor prompts as hard constraints. The policy engine tracks EMA effectiveness scores across all agents and models, updating routing decisions for the next task. Your 10th task is measurably better than your 1st. Disable with `dynos config set learning_enabled false`.
-
-**Calibrates to your project.** After enough tasks, the agent generator creates specialist agents from observed failure patterns. A benchmark scheduler tests them against generic baselines. Agents that outperform get promoted to production routing. Agents that regress get demoted. The whole lifecycle is automatic and event-driven.
-
-**Enforces least privilege.** Each of the 18 agents declares its minimum tool set in frontmatter. Auditors cannot write files. Planners cannot execute commands. The security auditor can never be replaced by a calibrated agent.
-
-**Shows you everything.** Telemetry across all your projects: quality trends, findings, costs, DORA metrics.
-
-## Architecture
-
-20 skills, 18 agents. Three layers:
-
-| Layer | Directory | What it does | Can be disabled? |
-|---|---|---|---|
-| **Core** | `hooks/` | Spec, plan, execute, audit. The foundry. | No |
-| **Memory** | `memory/` | EMA policy engine, postmortem analysis, agent generation, Q-learning repair. | Yes (`dynos config set learning_enabled false`) |
-| **Telemetry** | `telemetry/` | Dashboards, reports, lineage. Read-only. | Yes (delete the layer, nothing breaks) |
-
-## CLI
-
-```bash
-dynos init                               # set up a project
-dynos dashboard                          # start the dashboard server
-dynos config set learning_enabled false  # foundry-only mode (no memory/calibration)
-dynos config get                         # show all policy
-dynos stats dora                         # DORA metrics from retrospectives
-dynos stats usage                        # module usage telemetry
-dynos calibration status                 # show learned agents, modes, scores
-dynos calibration history                # benchmark evaluation history
-dynos bus handlers                       # list registered event handlers
-dynos bus status                         # show pending events
-dynos bus emit task-completed            # manually trigger post-completion pipeline
-dynos bus drain                          # process all pending events
-```
-
-[Full CLI reference](INTERNALS.md#cli)
-
-## How it works
-
-```
-You give it a task
-    |
-    v
-Phase 1: Intake         --> discovers what's needed, you answer questions
-Phase 2: Design         --> classifies, designs, fast-track gate
-Phase 3: Specification  --> writes spec, you approve
-Phase 4: Planning       --> writes plan + execution graph, you approve
-Phase 5: Verification   --> gap analysis, plan audit, TDD-first tests
-Phase 6: Handoff        --> ready for /dynos-work:execute
-    |
-    v
-Execute                 --> parallel agents build it
-Audit                   --> independent auditors verify it
-Repair                  --> automatic (hard cap: 3 retries then escalate)
-Retrospective           --> DORA metrics, reward scores, agent attribution
-    |
-    v
-Post-completion (automatic, event-driven):
-    Postmortem          --> deterministic anomaly detection + LLM root cause analysis (opus)
-    Improve             --> auto-applies: budget tuning, fast-track, prevention rules
-    Agent Generator     --> creates shadow specialist agents from task patterns
-    Benchmark           --> tests shadow agents, promotes winners to production routing
-    Policy Engine       --> EMA effectiveness scores, model/skip/route policies
-```
-
 ## Requirements
 
-Just Claude Code. That's the only requirement.
+Just Claude Code.
 
 ## Links
 
-- [Pipelines](PIPELINES.md)
+- [Changelog](CHANGELOG.md)
 - [Internals & CLI reference](INTERNALS.md)
 - [Architecture](ARCHITECTURE.md)
-- [Changelog](CHANGELOG.md)
+- [Pipelines](PIPELINES.md)
 
-## Philosophy
+---
 
 > Completion is a control decision, not a model opinion.
-
-The system does not trust the model when it says the work is done. Every task requires independent evidence of completion. Wherever you can replace "LLM reviewing LLM output" with "deterministic tool checking LLM output," you should.
