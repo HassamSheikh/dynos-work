@@ -194,35 +194,44 @@ def _extract_plan_paths(plan_text: str) -> set[str]:
 
 
 def _iter_plan_implied_files(
-    root: Path, plan_paths: set[str], extensions: set[str]
+    root: Path, plan_paths: set[str], extensions: set[str], limit: int = 2000
 ) -> list[Path]:
     """Resolve the plan-implied paths against the repo, expanding directories.
 
     For each plan-mentioned path:
     - if it's a file with a matching extension, include it.
-    - if it's a directory, walk its contents (depth-1 by default — most plans
-      reference modules, not deep trees).
+    - if it's a directory, walk its contents up to 2 levels deep (prevents
+      unbounded traversal when a plan mentions a large directory).
     """
     files: list[Path] = []
     seen: set[Path] = set()
+    root_resolved = root.resolve()
     for rel in plan_paths:
         target = (root / rel).resolve()
         try:
-            target.relative_to(root.resolve())
+            target.relative_to(root_resolved)
         except ValueError:
             continue  # outside repo
         if target.is_file() and target.suffix in extensions:
             if target not in seen:
                 seen.add(target)
                 files.append(target)
+                if len(files) >= limit:
+                    return files
         elif target.is_dir():
             for dirpath, dirnames, filenames in os.walk(target):
-                dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+                depth = len(Path(dirpath).relative_to(target).parts)
+                if depth >= 2:
+                    dirnames[:] = []  # don't recurse deeper than 2 levels
+                else:
+                    dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
                 for name in filenames:
                     p = Path(dirpath) / name
                     if p.suffix in extensions and p not in seen:
                         seen.add(p)
                         files.append(p)
+                        if len(files) >= limit:
+                            return files
     return files
 
 

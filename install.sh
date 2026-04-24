@@ -145,7 +145,7 @@ step_daemon() {
 
     # Check if already running
     local status
-    status=$(PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynomaintain.py" status --root "$project_dir" 2>/dev/null) || status='{}'
+    status=$(PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/daemon.py" status --root "$project_dir" 2>/dev/null) || status='{}'
     if echo "$status" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('running') else 1)" 2>/dev/null; then
         ok "Local daemon already running"
         return
@@ -159,7 +159,7 @@ step_daemon() {
         info "Starting local daemon (no autofix, missing claude or gh)"
     fi
 
-    PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynomaintain.py" start --root "$project_dir" $autofix_flag >/dev/null 2>&1 || true
+    PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/daemon.py" start --root "$project_dir" $autofix_flag >/dev/null 2>&1 || true
     ok "Local daemon started"
 }
 
@@ -185,17 +185,9 @@ step_plugin() {
 }
 
 step_global_daemon() {
-    # Check if already running
-    local status
-    status=$(PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynoglobal.py" status 2>/dev/null) || status='{}'
-    if echo "$status" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('running') else 1)" 2>/dev/null; then
-        ok "Global daemon already running"
-        return
-    fi
-
-    info "Starting global daemon"
-    PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynoglobal.py" start >/dev/null 2>&1 || true
-    ok "Global daemon started (sweeps all registered projects)"
+    # Global sweeper daemon is managed via the /dynos-work:global skill inside Claude Code.
+    # Nothing to start here at install time.
+    ok "Global daemon: use /dynos-work:global start inside Claude Code"
 }
 
 step_dev_tests() {

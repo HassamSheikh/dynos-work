@@ -932,10 +932,12 @@ def compute_reward(task_dir: Path) -> dict:
             if isinstance(item, dict) and item.get("task_id") != task_id
         ]
         if retros:
-            prior_retro = sorted(
-                retros,
-                key=lambda item: str(item.get("task_id", "")),
-            )[-1]
+            def _retro_sort_key(item: dict) -> tuple:
+                tid = str(item.get("task_id", ""))
+                m = re.match(r"task-(\d{8})-(\d+)$", tid)
+                return (m.group(1), int(m.group(2))) if m else ("", 0)
+
+            prior_retro = sorted(retros, key=_retro_sort_key)[-1]
     except Exception:
         prior_retro = None
 
