@@ -53,6 +53,7 @@ Most users only need these commands:
 /dynos-work:start [task]
 /dynos-work:execute
 /dynos-work:audit
+/dynos-work:investigate [bug]
 /dynos-work:maintain
 /dynos-work:status
 /dynos-work:resume
@@ -63,7 +64,8 @@ What they mean:
 - `/dynos-work:start` turns your request into discovery, spec, plan, and approval steps
 - `/dynos-work:execute` carries out the approved plan
 - `/dynos-work:audit` runs verification and repair loops until the task is clean or blocked
-- `/dynos-work:maintain` manually triggers the maintainer for a maintenance cycle
+- `/dynos-work:investigate` deep bug investigation — traces root cause with file/line evidence
+- `/dynos-work:maintain` manually triggers a maintenance cycle
 - `/dynos-work:status` shows where the current task stands
 - `/dynos-work:resume` continues interrupted work
 
@@ -102,8 +104,8 @@ There are more advanced skills in the repo, but the system is supposed to use it
 │   ┌─────────────────────────────────────────────────────────┐   │
 │   │              DASHBOARD (dynos dashboard)                │   │
 │   │                                                         │   │
-│   │   All projects in one page. Quality trends, routes,     │   │
-│   │   benchmarks, findings, daemon health, quality trends.  │   │
+│   │   All projects in one page. Quality trends, findings,   │   │
+│   │   learned routes, benchmarks, and daemon health.        │   │
 │   │   Click any project card for full detail.               │   │
 │   └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
@@ -422,12 +424,15 @@ These are advanced commands used by the system internally. Most users never need
 dynos ctl                         # task lifecycle, validation, approvals
 dynos postmortem                  # postmortem generation + improvements
 dynos patterns                    # regenerate learned patterns
+dynos memory                      # memory aggregation (alias for patterns)
 dynos trajectory                  # trajectory store management
 dynos route                       # routing decisions (model, auditor, agent)
-dynos evolve                      # learned agent promotion lifecycle
+dynos calibration                 # learned agent lifecycle (generate, benchmark, promote/demote)
 dynos bench                       # benchmark runner
 dynos report                      # project health reports
 dynos plan                        # planning policy resolution
+dynos worktree                    # git worktree management for isolated execution
+dynos config                      # cloud/enterprise configuration (requires login)
 ```
 
 ## Installation
@@ -435,7 +440,8 @@ dynos plan                        # planning policy resolution
 ### Most users: Plugin only
 
 ```
-/plugin marketplace add dynos-fit/dynos-work
+claude plugin marketplace add dynos-fit/dynos-work
+claude plugin install dynos-work
 ```
 
 That's it. You get the full task pipeline:
