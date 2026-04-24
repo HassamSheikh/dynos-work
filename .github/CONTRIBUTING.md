@@ -4,8 +4,8 @@
 
 ```
 skills/start/       ← entry point, owns discovery + spec review gates
-skills/lifecycle/   ← state machine controller, owns execution through DONE
-skills/planning/    ← planner subagent (spec, classification, plan)
+skills/execute/     ← execution orchestrator, drives segments through DONE
+skills/plan/        ← planner subagent (spec, classification, plan)
 skills/audit/       ← standalone audit power user command
 skills/status/      ← task status power user command
 skills/repair/      ← manual repair power user command
@@ -31,4 +31,4 @@ agents/             ← executor and auditor agent definitions
 
 ## What not to change
 
-The skills (`start`, `execute`, `audit`) own all stage transitions — they are the only entities that write `stage` to `manifest.json` and the only entities that write `DONE` or `FAILED`. Do not add stage-writing logic to executors or auditors.
+Stage transitions are owned by `hooks/ctl.py`. Skills invoke deterministic `ctl.py` commands (e.g. `python3 hooks/ctl.py transition`, `python3 hooks/ctl.py approve-stage`) which perform the actual writes to `manifest.json`. Skills never call `transition_task()` directly. Do not add stage-writing logic to executors or auditors — they must never invoke `ctl.py transition` commands.

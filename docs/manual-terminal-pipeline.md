@@ -2,7 +2,7 @@
 
 This is the practical entrypoint if you want to drive the **live dynos-work branch** without Claude Code.
 
-Use [tools/manual_pipeline.py](/Users/hassam/Documents/dynos-work/tools/manual_pipeline.py).
+Use `tools/manual_pipeline.py`.
 
 ## What it does
 

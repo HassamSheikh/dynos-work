@@ -56,13 +56,13 @@ You approve twice (spec and plan), then it runs.
 
 **Calibrates to your project.** After enough tasks, the agent generator creates specialist agents from observed failure patterns. A benchmark scheduler tests them against generic baselines. Agents that outperform get promoted to production routing. Agents that regress get demoted. The whole lifecycle is automatic and event-driven.
 
-**Enforces least privilege.** Each of the 19 agents declares its minimum tool set in frontmatter. Auditors cannot write files. Planners cannot execute commands. The security auditor can never be replaced by a calibrated agent.
+**Enforces least privilege.** Each of the 18 agents declares its minimum tool set in frontmatter. Auditors cannot write files. Planners cannot execute commands. The security auditor can never be replaced by a calibrated agent.
 
 **Shows you everything.** Telemetry across all your projects: quality trends, findings, costs, DORA metrics.
 
 ## Architecture
 
-20 skills, 19 agents. Three layers:
+20 skills, 18 agents. Three layers:
 
 | Layer | Directory | What it does | Can be disabled? |
 |---|---|---|---|
@@ -126,7 +126,6 @@ Just Claude Code. That's the only requirement.
 - [Pipelines](PIPELINES.md)
 - [Internals & CLI reference](INTERNALS.md)
 - [Architecture](ARCHITECTURE.md)
-- [Function-by-function workflow trace](WORKFLOW_TRACE.md)
 - [Changelog](CHANGELOG.md)
 
 ## Philosophy

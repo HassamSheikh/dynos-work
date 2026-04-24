@@ -1,6 +1,6 @@
 # dynos-work Sequence Diagram And Loophole Map
 
-This document is the compact companion to [system-workflow-trace.md](/Users/hassam/Documents/dynos-work/docs/system-workflow-trace.md).
+This document shows the live system as a sequence diagram and maps the trust surface by stage.
 
 It has two jobs:
 
@@ -8,8 +8,7 @@ It has two jobs:
 2. show the live system's **"trust me bro" loopholes** by stage, with concrete file/function references
 
 Scope:
-- this traces the **live repo at `/Users/hassam/Documents/dynos-work`**
-- not the cost-reduction worktree
+- this traces the live repo
 - where the live branch is still prompt-driven, this document says so directly
 
 ## 1. Sequence Diagram
@@ -156,7 +155,7 @@ This section is intentionally blunt.
 ### Loophole: direct classification shortcut in prompt logic
 
 File:
-- [skills/start/SKILL.md](/Users/hassam/Documents/dynos-work/skills/start/SKILL.md:204)
+- `skills/start/SKILL.md`
 
 Live text:
 
@@ -179,7 +178,7 @@ Failure mode:
 ### Loophole: external-solution gate is hand-authored by the model
 
 File:
-- [skills/start/SKILL.md](/Users/hassam/Documents/dynos-work/skills/start/SKILL.md:283)
+- `skills/start/SKILL.md`
 
 Live behavior:
 - the prompt tells the model to decide whether search should happen
@@ -199,8 +198,8 @@ Failure mode:
 ### Loophole: transition to `SPEC_NORMALIZATION` is skill-driven
 
 Files:
-- [skills/start/SKILL.md](/Users/hassam/Documents/dynos-work/skills/start/SKILL.md:256)
-- [hooks/lib_core.py](/Users/hassam/Documents/dynos-work/hooks/lib_core.py:1375)
+- `skills/start/SKILL.md`
+- `hooks/lib_core.py`
 
 Why this is only partially safe:
 - `transition_task()` still refuses illegal moves
@@ -212,9 +211,9 @@ Why this is only partially safe:
 ### Strength: approval is hash-bound and scheduler-driven
 
 Files:
-- [hooks/ctl.py](/Users/hassam/Documents/dynos-work/hooks/ctl.py:140)
-- [hooks/scheduler.py](/Users/hassam/Documents/dynos-work/hooks/scheduler.py:58)
-- [hooks/lib_core.py](/Users/hassam/Documents/dynos-work/hooks/lib_core.py:1392)
+- `hooks/ctl.py`
+- `hooks/scheduler.py`
+- `hooks/lib_core.py`
 
 Why this is good:
 - approval receipt contains artifact hash
@@ -229,8 +228,8 @@ Remaining weakness:
 ### Loophole: plan generation and plan-review choreography remain prompt-heavy
 
 Files:
-- [skills/plan/SKILL.md](/Users/hassam/Documents/dynos-work/skills/plan/SKILL.md)
-- [hooks/lib_validate.py](/Users/hassam/Documents/dynos-work/hooks/lib_validate.py:240)
+- `skills/plan/SKILL.md`
+- `hooks/lib_validate.py`
 
 What is safe:
 - `validate_task_artifacts()` validates the plan and graph
@@ -250,7 +249,7 @@ This is not a fake defense issue. It is a real split-brain:
 ### Loophole: critical path, caching, and progressive audit logic are described in prompt prose
 
 File:
-- [skills/execute/SKILL.md](/Users/hassam/Documents/dynos-work/skills/execute/SKILL.md:116)
+- `skills/execute/SKILL.md`
 
 Live text includes:
 - calculate dependency depth
@@ -272,7 +271,7 @@ Failure mode:
 ### Loophole: manual fallback if `inject-prompt` is unavailable
 
 File:
-- [skills/execute/SKILL.md](/Users/hassam/Documents/dynos-work/skills/execute/SKILL.md:192)
+- `skills/execute/SKILL.md`
 
 Live text:
 
@@ -287,7 +286,7 @@ Why this is a loophole:
 ### Loophole: execution completion still depends on skill prose
 
 File:
-- [skills/execute/SKILL.md](/Users/hassam/Documents/dynos-work/skills/execute/SKILL.md:288)
+- `skills/execute/SKILL.md`
 
 Why this is a loophole:
 - the skill says “repeat until all segments have evidence files”
@@ -306,9 +305,9 @@ What does not protect you:
 ### Strength: audit routing and prompt injection are deterministic
 
 Files:
-- [hooks/router.py](/Users/hassam/Documents/dynos-work/hooks/router.py:805)
-- [hooks/router.py](/Users/hassam/Documents/dynos-work/hooks/router.py:1482)
-- [hooks/ctl.py](/Users/hassam/Documents/dynos-work/hooks/ctl.py:223)
+- `hooks/router.py`
+- `hooks/router.py`
+- `hooks/ctl.py`
 
 What is safe:
 - eligible auditors are built deterministically
@@ -318,9 +317,9 @@ What is safe:
 ### Loophole: repair-loop planning is still half prompt-owned
 
 Files:
-- [skills/audit/SKILL.md](/Users/hassam/Documents/dynos-work/skills/audit/SKILL.md:194)
-- [skills/audit/SKILL.md](/Users/hassam/Documents/dynos-work/skills/audit/SKILL.md:203)
-- [skills/audit/SKILL.md](/Users/hassam/Documents/dynos-work/skills/audit/SKILL.md:231)
+- `skills/audit/SKILL.md`
+- `skills/audit/SKILL.md`
+- `skills/audit/SKILL.md`
 
 Live flow:
 - model feeds findings into `ctl repair-plan`
@@ -341,7 +340,7 @@ Failure mode:
 ### Loophole: transition to `DONE` is still explicitly called from audit skill
 
 File:
-- [skills/audit/SKILL.md](/Users/hassam/Documents/dynos-work/skills/audit/SKILL.md:415)
+- `skills/audit/SKILL.md`
 
 Live text:
 
@@ -361,7 +360,7 @@ This is better than no gate, but worse than deterministic completion ownership.
 ### Loophole: repair skill still tells the model to update `repair-log.json`
 
 File:
-- [skills/repair/SKILL.md](/Users/hassam/Documents/dynos-work/skills/repair/SKILL.md:47)
+- `skills/repair/SKILL.md`
 
 Live text:
 
@@ -378,7 +377,7 @@ Why this is a loophole:
 ### Loophole: scheduler scope is intentionally narrow
 
 File:
-- [hooks/scheduler.py](/Users/hassam/Documents/dynos-work/hooks/scheduler.py:23)
+- `hooks/scheduler.py`
 
 Live text:
 
@@ -396,8 +395,8 @@ Why this matters:
 ### Strength: retrospective scoring is deterministic
 
 Files:
-- [hooks/ctl.py](/Users/hassam/Documents/dynos-work/hooks/ctl.py:267)
-- [hooks/lib_validate.py](/Users/hassam/Documents/dynos-work/hooks/lib_validate.py:526)
+- `hooks/ctl.py`
+- `hooks/lib_validate.py`
 
 What is safe:
 - retrospective is computed from files on disk
@@ -433,31 +432,32 @@ Even here, the live branch still depends on the audit skill to reach the right p
 
 ## 5. Highest-Risk Loopholes
 
+> **Status (verified 2026-04-24):** All 5 loopholes below are now closed. Commits `5dbd77c`, `492e6b9`, and `ff8b5a4` moved orchestration decisions into deterministic `ctl.py` commands. The skill files now explicitly forbid the prompt-owned paths described here. This section is preserved as a historical record of the trust-substrate design evolution.
+
 If you only care about the most dangerous ones in the live branch, it is these five:
 
-1. **Start can skip planner and classify directly**
-   - [skills/start/SKILL.md](/Users/hassam/Documents/dynos-work/skills/start/SKILL.md:204)
+1. **Start can skip planner and classify directly** — *CLOSED*
+   - `skills/start/SKILL.md` — now reads “There is no direct-classify shortcut here. Always use the planner.”
 
-2. **External-solution gate is hand-authored**
-   - [skills/start/SKILL.md](/Users/hassam/Documents/dynos-work/skills/start/SKILL.md:283)
+2. **External-solution gate is hand-authored** — *CLOSED*
+   - `skills/start/SKILL.md` — now calls `python3 hooks/ctl.py run-external-solution-gate`
 
-3. **Execute skill owns scheduling/caching logic**
-   - [skills/execute/SKILL.md](/Users/hassam/Documents/dynos-work/skills/execute/SKILL.md:116)
+3. **Execute skill owns scheduling/caching logic** — *CLOSED*
+   - `skills/execute/SKILL.md` — now calls `python3 hooks/ctl.py run-execute-setup` and `run-execution-batch-plan`
 
-4. **Audit skill still uses repair-coordinator to build `repair-log.json`**
-   - [skills/audit/SKILL.md](/Users/hassam/Documents/dynos-work/skills/audit/SKILL.md:203)
+4. **Audit skill still uses repair-coordinator to build `repair-log.json`** — *CLOSED*
+   - `skills/audit/SKILL.md` — now calls `python3 hooks/ctl.py run-repair-log-build`
 
-5. **Audit skill hand-builds repair outcomes for Q-learning**
-   - [skills/audit/SKILL.md](/Users/hassam/Documents/dynos-work/skills/audit/SKILL.md:231)
+5. **Audit skill hand-builds repair outcomes for Q-learning** — *CLOSED*
+   - `skills/audit/SKILL.md` — now calls `python3 hooks/ctl.py run-audit-finish`
 
 ## 6. Blunt Bottom Line
 
-The live branch already has a strong deterministic substrate.
+The live branch has a strong deterministic substrate, and the five highest-risk prompt-owned loopholes have been closed.
 
-But the system is still not “LLM only writes content, code owns orchestration.”
+The current reality:
+- code owns **proofs, hashes, gates, routing, and all major orchestration decisions**
+- the scheduler owns the `SPEC_REVIEW → PLANNING` edge; all other transitions are invoked via deterministic `ctl.py` subprocess calls from skill markdown
+- the remaining prompt-owned surface is limited to **discovery questions, design option presentation, and human-in-the-loop gates** — none of which are control-plane decisions
 
-The live reality is:
-- code owns **proofs, hashes, gates, and some routing**
-- prompts still own **a lot of sequencing, batching, skipping, and control artifact assembly**
-
-That is the real loophole map for the branch you are on right now.
+This document describes the state of the system as it was when the loopholes were first identified. The trust substrate is substantially stronger now.

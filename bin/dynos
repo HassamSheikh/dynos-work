@@ -3,7 +3,6 @@
 #
 # Usage:
 #   dynos init                    # set up current project
-#   dynos init --autofix          # set up with autofix
 #   dynos local start             # start project daemon
 #   dynos local stop              # stop project daemon
 #   dynos local status            # show daemon status
@@ -29,7 +28,6 @@ Getting started:
 Project commands:
   local         Project daemon: start, stop, status, logs, run-once
   local dashboard  Per-project dashboard (generate or serve)
-  autofix       Autofix scanner (status, scan, list, clear)
 
 Global commands:
   dashboard     Global dashboard: generate, serve, kill, restart
@@ -70,12 +68,6 @@ case "$cmd" in
       echo "Error: not a git repository" >&2
       exit 1
     fi
-    autofix=""
-    for arg in "$@"; do
-      case "$arg" in
-        --autofix) autofix="--autofix" ;;
-      esac
-    done
     echo "Registering project..."
     python3 "${HOOKS_DIR}/registry.py" register "$root" 2>/dev/null || true
     mkdir -p "$root/.dynos"
@@ -91,14 +83,10 @@ sys.exit(0 if pid else 1)
       exit 0
     fi
     echo "Starting local daemon..."
-    python3 "${HOOKS_DIR}/daemon.py" start --root "$root" $autofix 2>/dev/null || true
+    python3 "${HOOKS_DIR}/daemon.py" start --root "$root" 2>/dev/null || true
     echo ""
     echo "Project ready: $root"
-    if [ -n "$autofix" ]; then
-      echo "Daemon running with autofix"
-    else
-      echo "Daemon running (use --autofix to enable autofix)"
-    fi
+    echo "Daemon running"
     echo ""
     echo "Next: use /dynos-work:start in Claude Code to begin a task"
     ;;
@@ -113,89 +101,6 @@ sys.exit(0 if pid else 1)
     exec python3 "${HOOKS_DIR}/daemon.py" "$@"
     ;;
   daemon|maintain) exec python3 "${HOOKS_DIR}/daemon.py" "$@" ;;
-  autofix|proactive)
-    # dynos autofix scan [/path]  — scan one or all registered projects
-    # dynos autofix list [/path]  — list findings
-    # dynos autofix clear [/path] — clear findings
-    if [ $# -gt 0 ] && [ "$1" = "status" ]; then
-      shift
-      target="${1:-$(pwd)}"
-      resolved=$(cd "$target" 2>/dev/null && pwd) || { echo "Error: $target does not exist" >&2; exit 1; }
-      enabled="OFF"
-      [ -f "$resolved/.dynos/maintenance/autofix.enabled" ] && enabled="ON"
-      daemon="not running"
-      if python3 -c "
-import sys
-sys.path.insert(0, '${HOOKS_DIR}')
-from daemon import current_pid
-from pathlib import Path
-pid = current_pid(Path('$resolved'))
-sys.exit(0 if pid else 1)
-" 2>/dev/null; then
-        daemon="running"
-      fi
-      echo "Autofix: $enabled"
-      echo "Daemon:  $daemon"
-      echo "Project: $resolved"
-      if [ "$enabled" = "ON" ] && [ -f "$resolved/.dynos/proactive-findings.json" ]; then
-        count=$(python3 -c "
-import json
-data = json.load(open('$resolved/.dynos/proactive-findings.json'))
-findings = data.get('findings', [])
-print(len([f for f in findings if f.get('status') != 'suppressed']))
-" 2>/dev/null || echo "0")
-        echo "Active findings: $count"
-      fi
-      exit 0
-    elif [ $# -gt 0 ] && [ "$1" = "scan" ]; then
-      shift
-      target="${1:-}"
-      if [ -z "$target" ]; then
-        # Scan ALL registered projects
-        projects=$(python3 -c "
-import sys, json
-sys.path.insert(0, '${HOOKS_DIR}')
-from registry import load_registry
-reg = load_registry()
-for p in reg.get('projects', []):
-    if p.get('status') == 'active':
-        print(p['path'])
-" 2>/dev/null)
-        if [ -z "$projects" ]; then
-          echo "No registered projects found. Run 'dynos init' in a project first." >&2
-          exit 1
-        fi
-        echo "Scanning all registered projects..."
-        echo ""
-        while IFS= read -r proj; do
-          echo "━━━ $proj"
-          python3 "${HOOKS_DIR}/proactive.py" scan --root "$proj" 2>/dev/null || true
-          echo ""
-        done <<< "$projects"
-      else
-        # Scan specific path — check if registered
-        resolved=$(cd "$target" 2>/dev/null && pwd) || { echo "Error: $target does not exist" >&2; exit 1; }
-        is_registered=$(python3 -c "
-import sys, json
-sys.path.insert(0, '${HOOKS_DIR}')
-from registry import load_registry
-reg = load_registry()
-for p in reg.get('projects', []):
-    if p['path'] == '$resolved':
-        print('yes')
-        sys.exit(0)
-print('no')
-" 2>/dev/null)
-        if [ "$is_registered" != "yes" ]; then
-          echo "Error: $resolved is not a registered project. Run 'dynos init' there first." >&2
-          exit 1
-        fi
-        exec python3 "${HOOKS_DIR}/proactive.py" scan --root "$resolved"
-      fi
-    else
-      exec python3 "${HOOKS_DIR}/proactive.py" "$@"
-    fi
-    ;;
 
   # --- Global commands ---
   registry) exec python3 "${HOOKS_DIR}/registry.py" "$@" ;;

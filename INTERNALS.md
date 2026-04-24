@@ -100,19 +100,10 @@ There are more advanced skills in the repo, but the system is supposed to use it
 │        │                                                        │
 │        ▼                                                        │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │              AUTOFIX (optional, --autofix)              │   │
-│   │                                                         │   │
-│   │   scan codebase ─→ detect debt ─→ route by severity     │   │
-│   │                                                         │   │
-│   │   low/medium: worktree ─→ claude fix ─→ open PR         │   │
-│   │   high/critical: open GitHub issue for human review     │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│   ┌─────────────────────────────────────────────────────────┐   │
 │   │              DASHBOARD (dynos dashboard)                │   │
 │   │                                                         │   │
 │   │   All projects in one page. Quality trends, routes,     │   │
-│   │   benchmarks, findings, daemon health, autofix PRs.     │   │
+│   │   benchmarks, findings, daemon health, quality trends.  │   │
 │   │   Click any project card for full detail.               │   │
 │   └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
@@ -306,8 +297,6 @@ Those are implementation details for the plugin and its agents.
 
 Normal users should not need to learn or run them to benefit from the system.
 
-If you do want the implementation details, read [WORKFLOW_TRACE.md](WORKFLOW_TRACE.md) — a function-by-function walkthrough of every pipeline step with the actual code and narrative.
-
 If you want the contributor-oriented codebase map, read [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Repo State
@@ -345,9 +334,9 @@ From within Claude Code, use the skill command:
 Or from any terminal (using the wrapper scripts in `bin/`):
 
 ```bash
-dynos-registry register /path/to/your/project
-dynos-registry list
-dynos-registry status
+dynos registry register /path/to/your/project
+dynos registry list
+dynos registry status
 ```
 
 Add `bin/` to your PATH for convenience:
@@ -356,15 +345,15 @@ Add `bin/` to your PATH for convenience:
 export PATH="/path/to/dynos-work/bin:$PATH"
 ```
 
-Other registry commands: `unregister`, `pause`, `resume`, `set-active`. Run `dynos-registry --help` for details.
+Other registry commands: `unregister`, `pause`, `resume`, `set-active`. Run `dynos registry --help` for details.
 
 ### Starting and Stopping the Global Daemon
 
 ```bash
-dynos-global start      # background daemon
-dynos-global stop       # stop the daemon
-dynos-global status     # check daemon health
-dynos-global run-once   # single maintenance sweep
+dynos global start      # background daemon
+dynos global stop       # stop the daemon
+dynos global status     # check daemon health
+dynos global run-once   # single maintenance sweep
 ```
 
 The daemon loops over all registered projects, runs maintenance cycles, and then sleeps before repeating. Idle projects receive exponential backoff so active projects get priority.
@@ -383,14 +372,12 @@ All commands go through `dynos`.
 
 ```bash
 dynos init                        # register project + start daemon
-dynos init --autofix              # with autofix enabled
 ```
 
 ### Project
 
 ```bash
 dynos local start                 # start project daemon
-dynos local start --autofix       # start with autofix
 dynos local stop                  # stop daemon
 dynos local status                # show daemon status
 dynos local logs                  # cycle history
@@ -415,27 +402,6 @@ dynos dashboard                   # start global dashboard server
 dynos dashboard stop              # stop server
 dynos dashboard restart           # restart server
 ```
-
-### Autofix
-
-```bash
-dynos autofix scan                # scan all registered projects
-dynos autofix scan /path          # scan one project (must be registered)
-dynos autofix list                # show findings
-dynos autofix clear               # reset findings
-```
-
-What it scans:
-- Recurring audit findings from retrospectives
-- Dependency vulnerabilities (pip-audit / npm audit)
-- Dead code (unused imports, unreferenced functions)
-- Architectural drift against learned patterns
-
-What it does with findings:
-- Low/medium: creates git worktree, invokes Claude to fix, opens PR
-- High/critical: opens GitHub issue for human review
-- Deduplicates against previous findings
-- Max 2 attempts per finding, then permanently suppressed
 
 ### Projects
 
@@ -469,7 +435,7 @@ dynos plan                        # planning policy resolution
 ### Most users: Plugin only
 
 ```
-/plugin marketplace add HassamSheikh/dynos-work
+/plugin marketplace add dynos-fit/dynos-work
 ```
 
 That's it. You get the full task pipeline:
@@ -482,14 +448,14 @@ That's it. You get the full task pipeline:
 
 No CLI, no daemons, no setup. Just slash commands in Claude Code.
 
-### Power users: CLI + daemons + dashboard + autofix
+### Power users: CLI + daemons + dashboard
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/dynos-fit/dynos-work/main/install.sh | bash
 source ~/.bashrc
 ```
 
-This gives you the `dynos` CLI with everything: project daemons, global dashboard, autofix scanner, and all internal tools. See the [CLI](#cli) section above.
+This gives you the `dynos` CLI with everything: project daemons, global dashboard, and all internal tools. See the [CLI](#cli) section above.
 
 Or clone and install:
 
@@ -513,7 +479,6 @@ Uses your local repo directly. Changes take effect immediately. Runs tests on se
 
 - **Plugin only:** Claude Code
 - **CLI install:** git, python3
-- **Recommended:** `gh` (GitHub CLI, for autofix PRs/issues), `claude` (Claude CLI, for autofix code changes)
 - **Optional:** `pip-audit` (dependency vulnerability scanning), `npm` (JS dependency scanning)
 
 ## Philosophy

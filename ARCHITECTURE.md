@@ -31,8 +31,6 @@ Skills define the end-user lifecycle:
 - `plan`
 - `execute`
 - `audit`
-- `learn`
-- `evolve`
 - `status`
 - `resume`
 - `dashboard`
@@ -50,101 +48,70 @@ If a rule must be true regardless of model behavior, it belongs in runtime code.
 
 The runtime lives primarily in:
 
-- `hooks/lib.py`
-- `hooks/ctl.py`
-- `hooks/validate_task_artifacts.py`
+- `hooks/lib_core.py` — stage definitions, legal transitions, `transition_task()`, receipt gates
+- `hooks/lib_validate.py` — task artifact validation, retrospective scoring, gap analysis
+- `hooks/lib_receipts.py` — all receipt writers and readers
+- `hooks/ctl.py` — control CLI: validation, transitions, next-command resolution, ownership checks
+- `hooks/validate_task_artifacts.py` — plan and execution-graph artifact validation entrypoint
 
-`lib.py` is the shared library for:
-
-- stage definitions and legal transitions
-- task artifact validation
-- repair-log and retrospective validation
-- benchmark scoring and policy comparison
-- registry management
-- automation queue helpers
-- fixture indexing and traceability
-- freshness and route gating
-
-`ctl.py` is the control CLI for:
-
-- task validation
-- stage transitions
-- next-command resolution
-- active-task lookup
-- ownership checks
+`hooks/lib.py` is a thin re-export facade that forwards to the above modules for import-path compatibility. Read the implementation in `lib_core.py`, `lib_validate.py`, or `lib_receipts.py` directly rather than stopping at the facade.
 
 Design rule:
 
-- reusable logic belongs in `lib.py`
+- reusable logic belongs in `lib_core.py` or `lib_validate.py`
 - narrow operator entrypoints belong in small CLIs under `hooks/`
 
 Avoid putting non-trivial policy directly into multiple scripts. Centralize it in the shared library.
 
+### Scheduler Scope
+
+The scheduler currently owns only the `SPEC_REVIEW` → `PLANNING` edge. All other stage transitions are driven by skill markdown invoking deterministic `ctl.py` subprocess commands — for example `python3 hooks/ctl.py transition` and `python3 hooks/ctl.py approve-stage`. Skills never call `transition_task()` directly; they always go through `ctl.py`. This keeps the control-plane surface narrow and ensures every transition passes through the same validator.
+
+### Compatibility Wrappers
+
+Approximately 22 files under `hooks/` are thin forwarding stubs. Their implementations have moved into `memory/`, `telemetry/`, or `sandbox/`. Each stub carries a docstring like `Compatibility wrapper — implementation moved to memory/postmortem.py`. When reading code under `hooks/`, follow the import into the target package for the real implementation rather than stopping at the stub.
+
 ## Layer 3: Adaptive Evaluation
 
-The adaptive layer is split into several focused runtimes:
+The adaptive layer is split across three packages: `memory/`, `telemetry/`, and the remaining adaptive modules in `hooks/`. Many files in `hooks/` are now thin compatibility wrappers that forward to `memory/` or `telemetry/` — see the note at the end of Layer 2.
 
-### Memory
+### Memory Package
 
-- `hooks/state.py`
-- `hooks/trajectory.py`
+The `memory/` package owns learning and postmortem logic:
 
-These implement state signatures and trajectory retrieval from retrospectives.
+- `memory/lib_qlearn.py` — Q-learning repair policy
+- `memory/policy_engine.py` — EMA effectiveness scoring for learned policies
+- `memory/postmortem.py`, `memory/postmortem_analysis.py`, `memory/postmortem_improve.py` — postmortem extraction and improvement loops
+- `memory/agent_generator.py` — learned agent synthesis
 
-### Design Review
+These implement the durable memory substrate that informs future planning and repair.
 
-- `hooks/dream.py`
+### Telemetry Package
 
-This is the structured design evaluator. It is advisory, not authoritative.
+The `telemetry/` package owns observability surfaces:
 
-### Learned Components
+- `telemetry/dashboard.py` — per-project dashboard artifacts and serving
+- `telemetry/lineage.py` — lineage graph output
+- `telemetry/global_dashboard.py` — cross-project dashboard aggregation
+- `telemetry/global_stats.py` — anonymous aggregate statistics
 
-- `hooks/evolve.py`
-- `hooks/eval.py`
-- `hooks/generate.py`
+These provide machine-readable status, lineage graphs, and real-time dashboard artifacts.
 
-These manage learned component creation, registration, and evaluation.
+### Hooks Package (Remaining Adaptive Pieces)
 
-### Benchmarks And Rollouts
+The following modules in `hooks/` are compatibility wrappers forwarding to `sandbox/calibration/` or `sandbox/trajectory/`:
 
-- `hooks/bench.py`
-- `hooks/rollout.py`
-- `hooks/challenge.py`
-- `hooks/fixture.py`
+- `hooks/trajectory.py` → `sandbox/trajectory/` — trajectory retrieval from retrospectives
+- `hooks/eval.py` → `sandbox/calibration/` — evaluation entrypoint
+- `hooks/bench.py`, `hooks/rollout.py`, `hooks/challenge.py`, `hooks/fixture.py` → `sandbox/calibration/` — fixtures, benchmarks, rollouts, challenger runs
+- `hooks/route.py`, `hooks/auto.py` → `sandbox/calibration/` — route resolution and automation priority
 
-These implement:
+These are part of the adaptive layer. Read the implementation in `sandbox/` for the real logic.
 
-- authored fixtures
-- synthesized fixtures
-- sandbox benchmarks
-- repo-snapshot rollouts
-- task-artifact-based challenger runs
+The following `hooks/` modules have their own implementations (not wrappers):
 
-### Routing And Automation
-
-- `hooks/route.py`
-- `hooks/auto.py`
-- `hooks/maintain.py`
-
-These manage:
-
-- live route resolution
-- shadow challenger queueing
-- stale route refresh
-- automation priority
-- persistent maintenance polling when enabled
-
-### Observability
-
-- `hooks/report.py`
-- `hooks/lineage.py`
-- `hooks/dashboard.py`
-
-These provide:
-
-- machine-readable status
-- lineage graph output
-- real-time dashboard artifacts and serving
+- `hooks/report.py` — machine-readable status output
+- `hooks/lineage.py`, `hooks/dashboard.py` — compatibility entrypoints forwarding to `telemetry/`
 
 ## Data Model
 
@@ -270,20 +237,20 @@ Each entry tracks:
 
 The global daemon follows this loop:
 
-1. **Start**: `sweeper.py start` forks a background process, writes `~/.dynos/daemon.pid`
+1. **Start**: `daemon.py start` forks a background process, writes `~/.dynos/daemon.pid`
 2. **Run loop**: the daemon iterates over all registered projects in `registry.json`
 3. **Per-project maintenance**: for each active project, run a maintenance cycle (validation sweeps, stale route checks, automation queue processing)
 4. **Backoff for idle projects**: projects whose `last_active_at` is old receive exponential backoff, so the daemon spends less time on dormant repos
 5. **Cross-project aggregation**: after visiting all projects, aggregate anonymous stats and update portable prevention rules in `~/.dynos/`
 6. **Sleep**: wait for the configured interval before repeating
 
-The daemon can be stopped with `sweeper.py stop`, which sends SIGTERM to the PID in the pidfile. `sweeper.py run-once` executes a single sweep without looping.
+The daemon can be stopped with `daemon.py stop`, which sends SIGTERM to the PID in the pidfile. `daemon.py run-once` executes a single sweep without looping.
 
 ### Runtime Files
 
 | File | Purpose |
 |---|---|
-| `hooks/sweeper.py` | Global daemon: start, stop, status, run-loop, run-once |
+| `hooks/daemon.py` | Global daemon: start, stop, status, run-loop, run-once |
 | `hooks/registry.py` | Registry CLI: register, unregister, list, status, pause, resume, set-active |
 
 Both tools expose `--help` for all subcommands.
@@ -295,7 +262,7 @@ Both tools expose `--help` for all subcommands.
 Ask:
 
 1. Is this enforcing an invariant?
-2. Does this belong as shared logic in `lib.py` first?
+2. Does this belong as shared logic in `lib_core.py` or `lib_validate.py` first?
 3. Does it need tests covering both happy and blocking paths?
 4. Does it create or mutate `.dynos/` state that should be documented?
 
@@ -320,9 +287,8 @@ Ask:
 
 Current automated coverage lives mainly in:
 
-- `tests/test_dynosctl.py`
+- `tests/test_ctl.py`
 - `tests/test_learning_runtime.py`
-- `tests/test_dream_runtime.py`
 
 Contributors should add tests whenever changing:
 
@@ -346,14 +312,13 @@ For contributors, the best order is:
 1. `README.md`
 2. `PIPELINES.md`
 3. `INTERNALS.md`
-4. `WORKFLOW_TRACE.md`
-5. `skills/start/SKILL.md`
-6. `skills/execute/SKILL.md`
-7. `skills/audit/SKILL.md`
-8. `hooks/lib.py`
-9. `hooks/auto.py`
-10. `hooks/dashboard.py`
-11. `tests/test_learning_runtime.py`
+4. `skills/start/SKILL.md`
+5. `skills/execute/SKILL.md`
+6. `skills/audit/SKILL.md`
+7. `hooks/lib_core.py`
+8. `hooks/lib_validate.py`
+9. `hooks/ctl.py`
+10. `tests/test_learning_runtime.py`
 
 ## Contributor Principle
 
