@@ -128,7 +128,7 @@ step_register() {
     local project_dir="${1:-$(pwd)}"
     if [ -d "$project_dir/.git" ]; then
         info "Registering project: $project_dir"
-        PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/dynoregistry.py" register "$project_dir" >/dev/null 2>&1 || true
+        PYTHONPATH="$HOOKS_DIR:${PYTHONPATH:-}" python3 "$HOOKS_DIR/registry.py" register "$project_dir" >/dev/null 2>&1 || true
         ok "Project registered"
     else
         warn "Current directory is not a git repo. Skipping project registration."
@@ -185,9 +185,7 @@ step_plugin() {
 }
 
 step_global_daemon() {
-    # Global sweeper daemon is managed via the /dynos-work:global skill inside Claude Code.
-    # Nothing to start here at install time.
-    ok "Global daemon: use /dynos-work:global start inside Claude Code"
+    ok "Global dashboard: run 'dynos dashboard' to start"
 }
 
 step_dev_tests() {
