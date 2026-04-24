@@ -25,29 +25,29 @@ Parse the user's arguments to determine the subcommand. Run the corresponding Py
 
 ### start
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynomaintain.py" start --root . [--autofix]
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" start --root . [--autofix]
 ```
 
 ### stop
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynomaintain.py" stop --root .
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" stop --root .
 ```
 
 ### status
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynomaintain.py" status --root .
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" status --root .
 ```
 
 Print the JSON result in a human-readable format: running/stopped, autofix on/off, last cycle time, cycle count.
 
 ### logs
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynomaintain.py" logs --root .
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" logs --root .
 ```
 
 ### run-once
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynomaintain.py" run-once --root .
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" run-once --root .
 ```
 
 ### dashboard

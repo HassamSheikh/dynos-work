@@ -5,49 +5,55 @@ description: "Internal dynos-work skill. Manage the global cross-project sweeper
 
 # dynos-work: Global
 
-Manage the global daemon that sweeps all registered projects.
+Show status across all registered projects and manage per-project daemons.
 
 ## Usage
 
 ```
-/dynos-work:global start             # start sweeper
-/dynos-work:global stop              # stop sweeper
-/dynos-work:global status            # show health
-/dynos-work:global run-once          # single sweep
-/dynos-work:global logs              # sweep history
+/dynos-work:global             # list all registered projects and their daemon status
+/dynos-work:global start       # start daemon for every active registered project
+/dynos-work:global stop        # stop daemon for every active registered project
+/dynos-work:global status      # show daemon health for each project
 ```
 
 ## What you do
 
-Parse the user's arguments to determine the subcommand. Run the corresponding command:
+### status (default)
+
+List all registered projects and their daemon health:
+
+```bash
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/registry.py" list
+```
+
+For each project in the output, show whether its local daemon is running:
+
+```bash
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" status --root "<project_path>"
+```
 
 ### start
+
+Start the local daemon for every active registered project:
+
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoglobal.py" start
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/registry.py" list
+```
+
+Then for each active project path:
+
+```bash
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" start --root "<project_path>"
 ```
 
 ### stop
-```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoglobal.py" stop
-```
 
-### status
-```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoglobal.py" status
-```
+Stop the local daemon for every active registered project:
 
-Print the JSON result in a human-readable format: running/stopped, PID, last sweep time, project count.
-
-### run-once
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoglobal.py" run-once
-```
-
-### logs
-```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoglobal.py" logs
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/daemon.py" stop --root "<project_path>"
 ```
 
 ## Default
 
-If no subcommand is given, show the status.
+If no subcommand is given, show the status of all registered projects.

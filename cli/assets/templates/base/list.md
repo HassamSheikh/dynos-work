@@ -16,7 +16,7 @@ Show all projects registered with dynos-work.
 ## What you do
 
 ```bash
-PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/dynoregistry.py" list
+PYTHONPATH="{{HOOKS_PATH}}:${PYTHONPATH:-}" python3 "{{HOOKS_PATH}}/registry.py" list
 ```
 
 Print the results in a human-readable format showing: project path, status (active/paused/archived), last active timestamp.
