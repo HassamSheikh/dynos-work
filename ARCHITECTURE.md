@@ -25,17 +25,26 @@ The workflow surface lives under:
 - `skills/`
 - `agents/`
 
-Skills define the end-user lifecycle:
+User-facing skills (invoked directly via `/dynos-work:<name>`):
 
-- `start`
-- `plan`
-- `execute`
-- `audit`
-- `status`
-- `resume`
-- `dashboard`
+- `start` — discovery, spec, plan, approval
+- `execute` — run the approved plan
+- `audit` — verify, repair, close
+- `investigate` — deep bug investigation with root cause analysis
+- `maintain` — trigger a manual maintenance cycle
+- `status` — show current task state
+- `resume` — continue interrupted work
+- `dashboard` — generate/serve the project dashboard
 
-Agent markdown files define specialist roles such as planners and state encoders.
+Internal skills (spawned by the system, not invoked directly by users):
+
+- `plan` — planner subagent spawned by `start`
+- `execution` — execution coordinator subagent
+- `repair` — repair executor subagent
+- `calibration` — learned agent lifecycle management
+- `global`, `local`, `init`, `register`, `list`, `memory`, `trajectory`, `dry-run` — system maintenance and CLI support
+
+Agent markdown files define specialist roles: planners, executors, auditors, and the repair coordinator.
 
 Guideline:
 
@@ -73,7 +82,7 @@ Approximately 22 files under `hooks/` are thin forwarding stubs. Their implement
 
 ## Layer 3: Adaptive Evaluation
 
-The adaptive layer is split across three packages: `memory/`, `telemetry/`, and the remaining adaptive modules in `hooks/`. Many files in `hooks/` are now thin compatibility wrappers that forward to `memory/` or `telemetry/` — see the note at the end of Layer 2.
+The adaptive layer is split across three packages: `memory/`, `telemetry/`, and `sandbox/`. Many files in `hooks/` are thin compatibility wrappers that forward to one of these three packages — see the Compatibility Wrappers note in Layer 2.
 
 ### Memory Package
 
@@ -99,19 +108,21 @@ These provide machine-readable status, lineage graphs, and real-time dashboard a
 
 ### Hooks Package (Remaining Adaptive Pieces)
 
-The following modules in `hooks/` are compatibility wrappers forwarding to `sandbox/calibration/` or `sandbox/trajectory/`:
+The following `hooks/` modules are compatibility wrappers forwarding to `sandbox/`:
 
-- `hooks/trajectory.py` → `sandbox/trajectory/` — trajectory retrieval from retrospectives
-- `hooks/eval.py` → `sandbox/calibration/` — evaluation entrypoint
-- `hooks/bench.py`, `hooks/rollout.py`, `hooks/challenge.py`, `hooks/fixture.py` → `sandbox/calibration/` — fixtures, benchmarks, rollouts, challenger runs
-- `hooks/route.py`, `hooks/auto.py` → `sandbox/calibration/` — route resolution and automation priority
+- `hooks/trajectory.py` — trajectory retrieval (→ `sandbox/trajectory/`)
+- `hooks/eval.py` — evaluation entrypoint (→ `sandbox/calibration/`)
+- `hooks/bench.py`, `hooks/rollout.py`, `hooks/challenge.py`, `hooks/fixture.py` — fixtures, benchmarks, rollouts, challenger runs (→ `sandbox/calibration/`)
+- `hooks/route.py`, `hooks/auto.py` — route resolution and automation priority (→ `sandbox/calibration/`)
 
-These are part of the adaptive layer. Read the implementation in `sandbox/` for the real logic.
+The following `hooks/` modules are compatibility wrappers forwarding to `telemetry/`:
 
-The following `hooks/` modules have their own implementations (not wrappers):
+- `hooks/lineage.py` → `telemetry/lineage.py`
+- `hooks/dashboard.py` → `telemetry/dashboard.py`
 
-- `hooks/report.py` — machine-readable status output
-- `hooks/lineage.py`, `hooks/dashboard.py` — compatibility entrypoints forwarding to `telemetry/`
+The following `hooks/` module has its own implementation:
+
+- `hooks/report.py` — compact runtime observability report (not a wrapper)
 
 ## Data Model
 
