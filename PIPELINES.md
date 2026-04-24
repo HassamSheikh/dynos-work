@@ -120,13 +120,18 @@ Each stage validates its required inputs before proceeding. The runtime (`ctl.py
 
 ### Agents
 
-| Role | Agent | Model |
+| Role | Agent | Default model |
 |---|---|---|
-| Planning | planning | opus |
-| Execution | ui-executor, backend-executor, db-executor, docs-executor, ml-executor, integration-executor, refactor-executor, testing-executor | sonnet |
-| Audit | spec-completion-auditor, security-auditor, code-quality-auditor, dead-code-auditor, performance-auditor, ui-auditor, db-schema-auditor | opus/sonnet |
-| Repair | repair-coordinator | sonnet |
-| Investigation | investigator | opus |
+| Planning | `planning` | sonnet |
+| Execution | `ui-executor`, `backend-executor`, `db-executor`, `ml-executor`, `integration-executor`, `refactor-executor`, `testing-executor` | sonnet |
+| Execution | `docs-executor` | haiku |
+| Audit | `security-auditor` | opus |
+| Audit | `spec-completion-auditor`, `code-quality-auditor`, `dead-code-auditor`, `performance-auditor`, `ui-auditor` | sonnet |
+| Audit | `db-schema-auditor` | haiku |
+| Repair | `repair-coordinator` | sonnet |
+| Investigation | `investigator` | sonnet |
+
+Models shown are the defaults declared in each agent's frontmatter. The router may override them based on learned policy and benchmark history.
 
 ### Artifacts
 
