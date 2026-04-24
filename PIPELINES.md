@@ -36,17 +36,16 @@ They connect through artifacts: the task pipeline produces retrospectives, the l
                                   │
                       task-retrospective.json
                                   │
-              ┌───────────────────┼───────────────────┐
-              ▼                   ▼                    ▼
-   ┌──────────────────┐ ┌─────────────────┐ ┌─────────────────────┐
-   │  LEARN PIPELINE   │ │ AUTOFIX PIPELINE│ │OBSERVABILITY PIPELINE│
-   │  patterns, policy │ │ scan, fix, PR   │ │ status, dashboard    │
-   └────────┬─────────┘ └─────────────────┘ └──────────────────────┘
+              ┌───────────────────┴───────────────────┐
+              ▼                                        ▼
+   ┌──────────────────┐                 ┌──────────────────────┐
+   │  LEARN PIPELINE   │                 │ OBSERVABILITY PIPELINE│
+   │  patterns, policy │                 │ status, dashboard     │
+   └────────┬─────────┘                 └──────────────────────┘
             │
     dynos_patterns.md
             │
-            ├──→ Task Pipeline (routing, skip policy, model selection)
-            └──→ Autofix Pipeline (drift detection against gold standards)
+            └──→ Task Pipeline (routing, skip policy, model selection)
 ```
 
 ---
@@ -68,7 +67,6 @@ START
   step 0   metadata + task directory creation
   step 1   discovery intake (user answers questions)
   step 2   discovery + design + classification
-             optional: founder design review for hard options
   step 2b  fast-track eligibility gate
   step 3   spec normalization
   step 4   spec review ← HUMAN APPROVAL
@@ -118,17 +116,16 @@ audit
   out: audit-reports/*.json, repair-log.json, task-retrospective.json
 ```
 
-Each stage validates its required inputs before proceeding. The runtime (`ctl.py`, `lib.py`) enforces stage transitions and artifact shape.
+Each stage validates its required inputs before proceeding. The runtime (`ctl.py`, `lib_core.py`) enforces stage transitions and artifact shape.
 
 ### Agents
 
 | Role | Agent | Model |
 |---|---|---|
 | Planning | planning | opus |
-| Execution | ui-executor, backend-executor, db-executor, ml-executor, integration-executor, refactor-executor, testing-executor | sonnet |
-| Audit | spec-completion-auditor, security-auditor, code-quality-auditor, dead-code-auditor, ui-auditor, db-schema-auditor | opus/sonnet |
+| Execution | ui-executor, backend-executor, db-executor, docs-executor, ml-executor, integration-executor, refactor-executor, testing-executor | sonnet |
+| Audit | spec-completion-auditor, security-auditor, code-quality-auditor, dead-code-auditor, performance-auditor, ui-auditor, db-schema-auditor | opus/sonnet |
 | Repair | repair-coordinator | sonnet |
-| Design review | founder (via dream.py) | opus |
 | Investigation | investigator | opus |
 
 ### Artifacts
@@ -158,8 +155,7 @@ Extracts knowledge from completed tasks. Derives policies that make the next tas
 
 ### Trigger
 
-- Automatically via the `task-completed` event bus (subscribes to `task-completed` event)
-- Manually via `/dynos-work:learn`
+Automatically via the `task-completed` event bus after every task reaches DONE. There is no manual slash command for the learn pipeline — it runs in the background without user action.
 
 ### Stages
 
@@ -182,8 +178,8 @@ LEARN
   step 5e  manage Baseline Policy
   step 5f  cold-start gate (defer policies if <5 tasks)
   step 6   done (print completion message)
-  step 8   global pattern sync (if GLOBAL_DYNOS_MEMORY_PATH set)
-  step 9   human insight gate (high-impact changes)
+  step 7   global pattern sync (if GLOBAL_DYNOS_MEMORY_PATH set)
+  step 8   human insight gate (high-impact changes)
 
 EVOLVE (triggered by learn-completed event)
   generate learned agents from observed patterns
@@ -295,7 +291,7 @@ serves: http://127.0.0.1:8766/global-dashboard.html
 shows:  all registered projects unified
         quality trends, findings, costs
         learned component state
-        daemon health, quality trends
+        daemon health
 ```
 
 **Lineage Tracking**
@@ -358,7 +354,6 @@ hooks/registry.py            project registry management
 | Evolve | Benchmark | `evolve-completed` event via event bus | Event (async) |
 | Benchmark | Dashboard | `benchmark-completed` event via event bus | Event (async) |
 | Learn | Task | dynos_patterns.md read by router.py | Artifact (optional) |
-| Learn | Autofix | gold standards used for drift detection | Artifact (optional) |
 | Task | Observability | task artifacts readable by status/dashboard | Artifact (read-only) |
 
 All cross-pipeline communication is either event-driven (async, fail-tolerant) or artifact-based (optional, with graceful fallback to defaults).
