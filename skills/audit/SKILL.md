@@ -57,6 +57,14 @@ For each auditor in the plan:
 - If `action: "spawn"`: spawn with the specified `model` (null = default)
 - Log: `{timestamp} [ROUTE] {name} model={model} route={route_mode} source={route_source}`
 
+**Pre-load diff context (run once, reuse for every auditor in this session):** Using `diff_base` from the audit plan output:
+
+```bash
+DIFF_CONTEXT=$(python3 "${PLUGIN_HOOKS}/build_prompt_context.py" --diff {diff_base} --root .)
+```
+
+Append `$DIFF_CONTEXT` verbatim to the base prompt for every auditor spawned in this session. Each auditor receives the changed file contents upfront and must not call Read, Grep, or Glob for those files. The script hard-caps output at 150K chars to prevent context blowup. If `$DIFF_CONTEXT` is empty (no changed files found), proceed without it.
+
 **Learned Auditor Injection (MANDATORY — deterministic via router):** Build the auditor's spawn prompt with `router.py audit-inject-prompt`. Pipe the base prompt over stdin and capture stdout as the prompt you pass to the Agent tool — do NOT read the learned agent file yourself or build the prompt by hand. The router does the frontmatter stripping, applies the learned-auditor block under the literal heading `## Learned Auditor Instructions`, computes the SHA-256 of the exact bytes it prints, and atomically writes the per-model sidecar at `.dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256` (with a companion `.txt` of the same bytes; when no model is specified the literal `default` is substituted in the filename).
 
 ```bash

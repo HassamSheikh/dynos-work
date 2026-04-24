@@ -171,6 +171,13 @@ The base prompt for each executor (before inject-prompt) must include:
 2. The full text of each acceptance criterion referenced by the segment's `criteria_ids` field, extracted from `spec.md`
 3. Evidence files from dependency segments: for each segment ID in the executor's `depends_on` list, read `.dynos/task-{id}/evidence/{dependency-segment-id}.md` and include its contents
 4. Instruction to write evidence to `.dynos/task-{id}/evidence/{segment-id}.md`
+5. **Pre-loaded file contents (MANDATORY):** Run the context builder for each file in the segment's `files_expected` and append its output to the base prompt:
+
+```bash
+python3 "${PLUGIN_HOOKS}/build_prompt_context.py" --root . {files_expected_1} {files_expected_2} ...
+```
+
+Append the printed output verbatim to the base prompt. This gives the executor the current file contents upfront so it does not need to call Read at the start, keeping the context window small. If a file does not exist yet (new file), the script emits a placeholder — include it anyway so the executor knows the file is new.
 
 Do NOT pass the full `spec.md` or `plan.md` to executors.
 
