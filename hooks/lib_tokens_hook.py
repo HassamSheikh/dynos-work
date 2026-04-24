@@ -50,25 +50,48 @@ def _find_active_task(root: Path) -> Path | None:
     """Find the active task that should receive SubagentStop token attribution.
 
     Selection rules (in order):
-    1. Skip tasks whose manifest is in a terminal stage (DONE, FAILED, CANCELLED).
-    2. Among the remaining, pick the task whose manifest.json was most
-       recently modified. Manifest mtime is the right signal because
-       transition_task() rewrites the manifest atomically on every stage
-       advance — so an actively-progressing task always has a fresh mtime.
-    3. If even the freshest manifest is older than the attribution window
+    1. Fast path: read .dynos/active-task.json (written by transition_task on
+       every stage advance). O(1) — one file read + one stat.
+    2. Fallback: full O(N) scan of all task manifests, for backward compat
+       with repos that pre-date the pointer file or when the pointer is absent.
+    3. Skip tasks whose manifest is in a terminal stage (DONE, FAILED, CANCELLED).
+    4. Among remaining, pick the task whose manifest.json was most recently
+       modified (freshest mtime). An actively-progressing task always has a
+       fresh manifest because transition_task rewrites it atomically.
+    5. If even the freshest manifest is older than the attribution window
        (default 1h, override via DYNOS_TASK_ATTRIBUTION_WINDOW_SECONDS),
-       return None. The previous behavior of returning the most-recent
-       non-terminal task by lexicographic ID would silently mis-attribute
-       every subsequent unrelated subagent (including manual
-       /dynos-work:investigate runs) to a stalled task whose manifest had
-       not advanced in hours — inflating its token-usage.json with
-       phantom costs and bleeding post-completion log entries from
-       unrelated tasks into its execution-log.md.
+       return None to avoid mis-attributing unrelated subagents to a stalled
+       task.
     """
     dynos = root / ".dynos"
     if not dynos.exists():
         return None
 
+    # ---- Fast path: active-task pointer ----
+    pointer_path = dynos / "active-task.json"
+    if pointer_path.exists():
+        try:
+            pointer = json.loads(pointer_path.read_text())
+            task_id = pointer.get("task_id")
+            if task_id is None:
+                return None  # Pointer explicitly cleared (terminal stage).
+            task_dir_str = pointer.get("task_dir")
+            if task_dir_str:
+                td = Path(task_dir_str)
+                manifest_path = td / "manifest.json"
+                if manifest_path.exists():
+                    manifest = json.loads(manifest_path.read_text())
+                    stage = manifest.get("stage", "")
+                    if stage not in ("DONE", "FAILED", "CANCELLED"):
+                        mtime = manifest_path.stat().st_mtime
+                        age_seconds = time.time() - mtime
+                        if age_seconds <= _attribution_window_seconds():
+                            return td
+            return None
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass  # Fall through to full scan.
+
+    # ---- Fallback: full O(N) scan ----
     candidates: list[tuple[float, Path]] = []
     for td in dynos.iterdir():
         if not td.is_dir() or not re.match(r"task-\d{8}-\d{3}$", td.name):
@@ -89,7 +112,6 @@ def _find_active_task(root: Path) -> Path | None:
     if not candidates:
         return None
 
-    # Most recently touched manifest wins (not most recent task ID).
     candidates.sort(key=lambda x: x[0], reverse=True)
     newest_mtime, newest_dir = candidates[0]
     age_seconds = time.time() - newest_mtime

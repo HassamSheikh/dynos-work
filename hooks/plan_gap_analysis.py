@@ -150,13 +150,13 @@ def extract_section(plan_text: str, heading: str) -> str:
 def _iter_code_files(root: Path, extensions: set[str], limit: int = 2000) -> list[Path]:
     """Iterate source files, respecting skip dirs and file limit."""
     files: list[Path] = []
-    for f in root.rglob("*"):
-        if any(d in f.parts for d in _SKIP_DIRS):
-            continue
-        if f.suffix in extensions and f.is_file():
-            files.append(f)
-            if len(files) >= limit:
-                break
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for name in filenames:
+            if Path(name).suffix in extensions:
+                files.append(Path(dirpath) / name)
+                if len(files) >= limit:
+                    return files
     return files
 
 
@@ -216,12 +216,13 @@ def _iter_plan_implied_files(
                 seen.add(target)
                 files.append(target)
         elif target.is_dir():
-            for f in target.rglob("*"):
-                if any(d in f.parts for d in _SKIP_DIRS):
-                    continue
-                if f.suffix in extensions and f.is_file() and f not in seen:
-                    seen.add(f)
-                    files.append(f)
+            for dirpath, dirnames, filenames in os.walk(target):
+                dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+                for name in filenames:
+                    p = Path(dirpath) / name
+                    if p.suffix in extensions and p not in seen:
+                        seen.add(p)
+                        files.append(p)
     return files
 
 
@@ -251,7 +252,12 @@ def _normalize_path(path: str) -> str:
     return path.lower().rstrip("/")
 
 
-def analyze_api_contracts(plan_text: str, root: Path) -> dict[str, Any]:
+def analyze_api_contracts(
+    plan_text: str,
+    root: Path,
+    *,
+    _precomputed_files: list[Path] | None = None,
+) -> dict[str, Any]:
     """Check API Contracts section claims against actual route definitions."""
     section = extract_section(plan_text, "API Contracts")
     if not section.strip():
@@ -324,8 +330,11 @@ def analyze_api_contracts(plan_text: str, root: Path) -> dict[str, Any]:
         return True
 
     if not narrow_files or not _all_claims_matched(claimed, found_routes):
-        # Fall back to full repo scan
-        code_files = _iter_code_files(root, _CODE_EXTENSIONS)
+        code_files = (
+            [f for f in _precomputed_files if f.suffix in _CODE_EXTENSIONS]
+            if _precomputed_files is not None
+            else _iter_code_files(root, _CODE_EXTENSIONS)
+        )
         found_routes = _scan_files(code_files)
 
     # Cross-reference — match by path segments, not string prefix
@@ -366,7 +375,12 @@ def analyze_api_contracts(plan_text: str, root: Path) -> dict[str, Any]:
 # Data Model gap analysis
 # ---------------------------------------------------------------------------
 
-def analyze_data_model(plan_text: str, root: Path) -> dict[str, Any]:
+def analyze_data_model(
+    plan_text: str,
+    root: Path,
+    *,
+    _precomputed_files: list[Path] | None = None,
+) -> dict[str, Any]:
     """Check Data Model section claims against actual schema/model definitions."""
     section = extract_section(plan_text, "Data Model")
     if not section.strip():
@@ -414,8 +428,11 @@ def analyze_data_model(plan_text: str, root: Path) -> dict[str, Any]:
         found_models = _scan_files(narrow_files)
 
     if not narrow_files or not claimed_tables.issubset(found_models):
-        # Fall back to full repo scan
-        all_files = _iter_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
+        all_files = (
+            _precomputed_files
+            if _precomputed_files is not None
+            else _iter_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
+        )
         found_models = _scan_files(all_files)
 
     # Cross-reference
@@ -523,9 +540,11 @@ def run_gap_analysis(root: Path, task_dir: Path) -> dict[str, Any]:
         if cached is not None:
             return cached
 
+    # Single traversal shared by both analyses; covers the superset of extensions.
+    shared_files = _iter_code_files(root, _CODE_EXTENSIONS | _MIGRATION_EXTENSIONS)
     report = {
-        "api_contracts": analyze_api_contracts(plan_text, root),
-        "data_model": analyze_data_model(plan_text, root),
+        "api_contracts": analyze_api_contracts(plan_text, root, _precomputed_files=shared_files),
+        "data_model": analyze_data_model(plan_text, root, _precomputed_files=shared_files),
     }
 
     if cache_enabled:

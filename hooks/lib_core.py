@@ -1948,6 +1948,22 @@ def transition_task(
         manifest["blocked_reason"] = "transitioned to FAILED"
     write_ctl_json(task_dir, manifest_path, manifest)
 
+    # ---- Active-task pointer for O(1) SubagentStop attribution ----
+    # Written after every manifest write so lib_tokens_hook._find_active_task
+    # can skip the O(all-tasks) manifest scan. Nulled on terminal stages so
+    # stale attribution is impossible.
+    try:
+        _pointer_path = task_dir.parent / "active-task.json"
+        _terminal = next_stage in {"DONE", "FAILED", "CANCELLED"}
+        _pointer_data: dict = {"task_id": None} if _terminal else {
+            "task_id": manifest.get("task_id") or task_dir.name,
+            "task_dir": str(task_dir),
+            "stage": next_stage,
+        }
+        write_json(_pointer_path, _pointer_data)
+    except Exception:
+        pass  # Never block a completed transition.
+
     # ---- AC 15 side-effect: pre-repair blocking snapshot ----
     # On entry into REPAIR_PLANNING (the first repair cycle), capture the
     # set of blocking finding ids from the current audit-reports so
@@ -2202,37 +2218,42 @@ def _retros_stat_fingerprint(root: Path) -> tuple:
     inputs to collect_retrospectives. Any change (new file, edit, delete)
     changes the tuple, invalidating the cache.
 
-    The fingerprint is cheap — stat() calls only, no reads.
+    The fingerprint uses stat() calls only — no file reads.
+
+    Cost reduction vs. original: ~18 stats instead of ~59.
+    - .dynos dir itself (1 stat): detects new/removed task dirs.
+    - Each task-*/task-retrospective.json (N stats, one per file): catches
+      content changes (parent dir mtime does not update when a file inside
+      a subdir changes).
+    - Persistent retros dir itself (1 stat): detects new persistent retros;
+      persistent retros are write-once so individual-file stats are skipped.
+    - events.jsonl (1 stat): changes on every new event.
     """
-    def _dir_sig(d: Path) -> tuple:
+    def _dir_mtime(d: Path) -> tuple:
         if not d.exists():
             return ("MISSING",)
         try:
-            entries = sorted(d.iterdir())
+            st = d.stat()
+            return (st.st_mtime_ns, st.st_size)
         except OSError:
             return ("UNREADABLE",)
-        parts: list[tuple] = []
-        for p in entries:
-            try:
-                st = p.stat()
-                parts.append((p.name, st.st_mtime_ns, st.st_size))
-            except OSError:
-                continue
-        return tuple(parts)
 
-    worktree = _dir_sig(root / ".dynos")
-    # Also fingerprint every task-* subdir's retrospective file.
+    # .dynos dir: single stat detects task dir additions/removals.
+    dynos_sig = _dir_mtime(root / ".dynos")
+
+    # Individual retro files: single stat() per file (fixes prior double-stat).
     try:
         worktree_retros = tuple(
-            (p.name, p.stat().st_mtime_ns, p.stat().st_size)
+            (p.name, st.st_mtime_ns, st.st_size)
             for p in sorted((root / ".dynos").glob("task-*/task-retrospective.json"))
+            for st in (p.stat(),)
         )
     except OSError:
         worktree_retros = ()
 
+    # Persistent retros dir: single stat detects additions (files are write-once).
     try:
-        pd = _persistent_project_dir(root) / "retrospectives"
-        persistent = _dir_sig(pd)
+        persistent = _dir_mtime(_persistent_project_dir(root) / "retrospectives")
     except OSError:
         persistent = ("ERROR",)
 
@@ -2246,7 +2267,7 @@ def _retros_stat_fingerprint(root: Path) -> tuple:
     except OSError:
         events_sig = ("UNREADABLE",)
 
-    return (worktree, worktree_retros, persistent, events_sig)
+    return (dynos_sig, worktree_retros, persistent, events_sig)
 
 
 def append_deferred_findings(
