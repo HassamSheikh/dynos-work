@@ -19,6 +19,6 @@ Inputs and outputs are defined in this skill's `contract.json`. Each executor re
 - the segment (from `execution-graph.json`)
 - matched acceptance criteria text (from `spec.md`)
 - dependency evidence (previously generated `evidence/{dep}.md` files)
-- prevention rules filtered from `dynos_patterns.md`
+- prevention rules filtered from `project_rules.md`
 
 Each executor writes `evidence/{segment-id}.md` documenting modified files, integration points, failure cases handled, required config, and the acceptance criteria it satisfied.

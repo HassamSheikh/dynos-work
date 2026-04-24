@@ -12,18 +12,20 @@ Each pipeline is standalone. They communicate through **events** and **validated
 
 ## Decoupling Architecture
 
-**Event bus.** Pipelines communicate through a file-based event bus (`.dynos/events/`). When a task completes, the `task-completed` hook emits a `task-completed` event. The drain runner processes subscribers in order: learn subscribes to `task-completed`, evolve subscribes to `learn-completed`, and so on. Each handler swallows errors independently.
+**Event bus.** Pipelines communicate through a file-based event bus (`.dynos/events/`). When `transition_task()` advances a task to DONE, `_fire_task_completed()` in `lib_core.py` emits a single `task-completed` event and dispatches the drain runner in a detached background process. Each handler swallows errors independently so one failure does not block the rest.
 
 **Contract enforcement.** Each skill has a `contract.json` with versioned input/output schemas. The runtime validates contracts at pipeline boundaries (`ctl.py validate-contract`). Skills in the task pipeline (start, execute, audit) write handoff records confirming contract fulfillment.
 
 **Domain-split imports.** The Python runtime is split by domain: `lib_core` (shared), `lib_validate` (task), `lib_trajectory` (learn), `lib_registry` (learn), `lib_benchmark` (learn), `lib_queue` (observability), `lib_events` (events), `lib_contracts` (contracts). No cross-domain imports. The `lib.py` facade remains for backward compatibility.
 
-**Event flow:**
+**Event flow (flat fan-out from a single event type):**
 ```
-task-completed → [learn, trajectory]
-learn-completed → [evolve, patterns]
-evolve-completed → [postmortem, improve, benchmark]
-benchmark-completed → [dashboard, register]
+task-completed → improve
+              → agent_generator
+              → policy_engine
+              → dashboard
+              → register
+              → benchmark_scheduler   (auto-discovered from hooks/handlers/)
 ```
 
 They connect through artifacts: the task pipeline produces retrospectives, the learn pipeline consumes them, and observability reads all state.
@@ -43,7 +45,7 @@ They connect through artifacts: the task pipeline produces retrospectives, the l
    │  patterns, policy │                 │ status, dashboard     │
    └────────┬─────────┘                 └──────────────────────┘
             │
-    dynos_patterns.md
+    project_rules.md
             │
             └──→ Task Pipeline (routing, skip policy, model selection)
 ```
@@ -77,27 +79,33 @@ START
   step 9   ready for execute
 
 EXECUTE (/dynos-work:execute)
+  step 0   contract validation
   step 1   review plan + execution graph
   step 2   create git snapshot branch
   step 3   execute segments in dependency order
-             executor types: ui, backend, db, integration, ml, refactor, testing
+             executor types: ui, backend, db, docs, integration, ml, refactor, testing
   step 4   run test suite
   step 5   verify completion
 
 AUDIT (/dynos-work:audit)
+  step 0   contract validation
   step 1   find active task
   step 2   determine diff scope
   step 3   run conditional auditors
-             always: spec-completion, security, code-quality, dead-code
-             conditional: ui-auditor (if domains include ui)
-             conditional: db-schema-auditor (if domains include db)
-  step 4   two-phase repair loop
-             phase 1: early findings → repair-coordinator → executors
-             phase 2: late findings → repair-coordinator → executors
+             always: spec-completion-auditor, security-auditor
+             conditional on ui domain: ui-auditor, code-quality-auditor
+             conditional on db domain: db-schema-auditor, performance-auditor, dead-code-auditor, code-quality-auditor
+             conditional on backend domain: performance-auditor, dead-code-auditor, code-quality-auditor
+             conditional on ml/testing domain: code-quality-auditor
+  step 4   repair loop (if blocking findings exist)
+             repair-coordinator builds repair-log.json
+             executors apply fixes
+             re-audit scoped to modified files
   step 5   gate to DONE
              write task-retrospective.json
              transition to DONE
-             (learn, evolve, dashboard run via task-completed event bus)
+             (improve, agent_generator, policy_engine, dashboard, register, benchmark_scheduler
+              all fire via task-completed event bus)
 ```
 
 ### Contract Chain
@@ -108,7 +116,7 @@ start
   out: manifest.json, spec.md, plan.md, execution-graph.json, execution-log.md
        │
 execute
-  in:  manifest.json, spec.md, plan.md, execution-graph.json, dynos_patterns.md?
+  in:  manifest.json, spec.md, plan.md, execution-graph.json, project_rules.md?
   out: evidence/{segment-id}.md, snapshot, test-results.json, execution-log.md
        │
 audit
@@ -176,7 +184,7 @@ LEARN
              spawn efficiency metrics
   step 3   library documentation refresh (every 10 tasks)
   step 4   determine project memory path
-  step 5   write dynos_patterns.md core sections
+  step 5   write project_rules.md core sections
   step 5a  extract reward data from retrospectives
   step 5b  compute EMA effectiveness scores per (role, model, task_type, source)
   step 5c  derive Model Policy table
@@ -187,9 +195,9 @@ LEARN
   step 7   global pattern sync (if GLOBAL_DYNOS_MEMORY_PATH set)
   step 8   human insight gate (high-impact changes)
 
-EVOLVE (triggered by learn-completed event)
+EVOLVE (triggered by task-completed event, runs as agent_generator handler)
   generate learned agents from observed patterns
-  register in .dynos/learned-agents/registry.json
+  register in ~/.dynos/projects/{slug}/learned-agents/registry.json
   evaluate challengers via benchmarks
   promote: shadow → alongside → replace
   demote on regression
@@ -200,15 +208,15 @@ EVOLVE (triggered by learn-completed event)
 
 ```
 learn
-  in:  task-retrospective.json[] (glob), audit-reports[] (glob), existing dynos_patterns.md?
-  out: dynos_patterns.md, learned-agents/*.md
+  in:  task-retrospective.json[] (glob), audit-reports[] (glob), existing project_rules.md?
+  out: project_rules.md, learned-agents/*.md
        │
 evolve
-  in:  dynos_patterns.md, task-retrospective.json, registry.json, benchmark fixtures/results
+  in:  project_rules.md, task-retrospective.json, registry.json, benchmark fixtures/results
   out: learned-agents/{executors,auditors,skills}/*.md, registry.json
 ```
 
-### Output: dynos_patterns.md
+### Output: project_rules.md
 
 The single file that feeds back into every future task:
 
@@ -275,7 +283,7 @@ out: human-readable status report
 **Policy Dashboard** (`/dynos-work:dashboard`)
 
 ```
-in:  dynos_patterns.md, task-retrospective.json[] (glob)
+in:  project_rules.md, task-retrospective.json[] (glob)
 out: terminal report
        policy summary
        finding trends
@@ -316,36 +324,41 @@ status
   out: status_report (string)
 
 dashboard
-  in:  dynos_patterns.md, task-retrospective.json[]?
+  in:  project_rules.md, task-retrospective.json[]?
   out: terminal_report (string)
 ```
 
 ### Global State
 
 ```
-~/.dynos/registry.json    project registry (path, timestamps, status)
-~/.dynos/global.log       daemon activity log
-~/.dynos/daemon.pid       global daemon PID
+~/.dynos/registry.json                        project registry (path, timestamps, status)
+~/.dynos/projects/{slug}/policy.json          per-project policy and learned routing
+~/.dynos/projects/{slug}/project_rules.md     prevention rules, model/skip policy
+~/.dynos/projects/{slug}/trajectories.json    task trajectory memory
+~/.dynos/projects/{slug}/learned-agents/      learned agent registry and markdown files
+~/.dynos/projects/{slug}/benchmarks/          benchmark history and index
 ```
 
 ### Local State
 
 ```
-.dynos/dashboard-data.json              task metrics, quality trends
-.dynos/dashboard.html                   local dashboard
-.dynos/learned-agents/registry.json     component state, routing modes
-.dynos/benchmarks/history.json          benchmark run history
-.dynos/benchmarks/index.json            benchmark coverage
+.dynos/task-{id}/                      task artifacts (manifest, spec, plan, evidence, etc.)
+.dynos/dashboard-data.json             task metrics, quality trends
+.dynos/dashboard.html                  local dashboard
+.dynos/automation/queue.json           automation queue for challenger evaluation
+.dynos/automation/status.json          automation state
+.dynos/maintenance/daemon.pid          per-project daemon PID
+.dynos/maintenance/cycles.jsonl        per-project daemon activity log
 ```
 
 ### Runtime
 
 ```
 hooks/report.py              machine-readable status
-hooks/lineage.py             lineage graph output
-hooks/dashboard.py           local dashboard generation + serving
-hooks/global_dashboard.py    global dashboard UI
-hooks/daemon.py               global daemon lifecycle
+hooks/lineage.py             lineage graph output (wrapper → telemetry/lineage.py)
+hooks/dashboard.py           local dashboard generation (wrapper → telemetry/dashboard.py)
+hooks/global_dashboard.py    global dashboard UI (wrapper → telemetry/global_dashboard.py)
+hooks/daemon.py              per-project maintenance daemon: start, stop, status, run-once
 hooks/registry.py            project registry management
 ```
 
@@ -355,11 +368,8 @@ hooks/registry.py            project registry management
 
 | From | To | Mechanism | Coupling |
 |---|---|---|---|
-| Task | Learn | `task-completed` event via event bus | Event (async) |
-| Learn | Evolve | `learn-completed` event via event bus | Event (async) |
-| Evolve | Benchmark | `evolve-completed` event via event bus | Event (async) |
-| Benchmark | Dashboard | `benchmark-completed` event via event bus | Event (async) |
-| Learn | Task | dynos_patterns.md read by router.py | Artifact (optional) |
+| Task (DONE) | All handlers | `task-completed` event, flat fan-out to improve, agent_generator, policy_engine, dashboard, register, benchmark_scheduler | Event (async) |
+| Learn | Task | `project_rules.md` written to `~/.dynos/projects/{slug}/`, read by `router.py` | Artifact (optional) |
 | Task | Observability | task artifacts readable by status/dashboard | Artifact (read-only) |
 
 All cross-pipeline communication is either event-driven (async, fail-tolerant) or artifact-based (optional, with graceful fallback to defaults).

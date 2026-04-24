@@ -108,21 +108,30 @@ These provide machine-readable status, lineage graphs, and real-time dashboard a
 
 ### Hooks Package (Remaining Adaptive Pieces)
 
-The following `hooks/` modules are compatibility wrappers forwarding to `sandbox/`:
+**Forwarding to `memory/`** (6 wrappers):
+- `hooks/agent_generator.py` → `memory/agent_generator.py`
+- `hooks/lib_qlearn.py` → `memory/lib_qlearn.py`
+- `hooks/patterns.py` → `memory/policy_engine.py`
+- `hooks/postmortem.py` → `memory/postmortem.py`
+- `hooks/postmortem_analysis.py` → `memory/postmortem_analysis.py`
+- `hooks/postmortem_improve.py` → `memory/postmortem_improve.py`
 
-- `hooks/trajectory.py` — trajectory retrieval (→ `sandbox/trajectory/`)
-- `hooks/eval.py` — evaluation entrypoint (→ `sandbox/calibration/`)
-- `hooks/bench.py`, `hooks/rollout.py`, `hooks/challenge.py`, `hooks/fixture.py` — fixtures, benchmarks, rollouts, challenger runs (→ `sandbox/calibration/`)
-- `hooks/route.py`, `hooks/auto.py` — route resolution and automation priority (→ `sandbox/calibration/`)
+**Forwarding to `sandbox/calibration/`** (9 wrappers):
+- `hooks/bench.py`, `hooks/rollout.py`, `hooks/challenge.py`, `hooks/fixture.py`, `hooks/eval.py`
+- `hooks/route.py`, `hooks/auto.py`
+- `hooks/lib_benchmark.py`, `hooks/lib_registry.py`, `hooks/bench_backfill_model.py`
 
-The following `hooks/` modules are compatibility wrappers forwarding to `telemetry/`:
+**Forwarding to `sandbox/trajectory/`** (2 wrappers):
+- `hooks/trajectory.py`, `hooks/lib_trajectory.py`
 
+**Forwarding to `telemetry/`** (4 wrappers):
 - `hooks/lineage.py` → `telemetry/lineage.py`
 - `hooks/dashboard.py` → `telemetry/dashboard.py`
+- `hooks/global_dashboard.py` → `telemetry/global_dashboard.py`
+- `hooks/global_stats.py` → `telemetry/global_stats.py`
 
-The following `hooks/` module has its own implementation:
-
-- `hooks/report.py` — compact runtime observability report (not a wrapper)
+The following `hooks/` module has its own implementation (not a wrapper):
+- `hooks/report.py` — compact runtime observability report
 
 ## Data Model
 
@@ -142,15 +151,19 @@ Important files:
 
 ### Learned State
 
-Learned state lives under:
+Learned state is split between the persistent per-project directory (`~/.dynos/projects/{slug}/`) and local task state (`.dynos/`):
 
-- `.dynos/learned-agents/registry.json`
-- `.dynos/trajectories.json`
-- `.dynos/benchmarks/history.json`
-- `.dynos/benchmarks/index.json`
-- `.dynos/automation/queue.json`
-- `.dynos/automation/status.json`
-- `.dynos/policy.json`
+**Persistent** (`~/.dynos/projects/{slug}/`):
+- `project_rules.md` — prevention rules, model/skip policy, agent routing
+- `trajectories.json` — task trajectory memory
+- `learned-agents/registry.json` — component state and routing modes
+- `benchmarks/history.json` — benchmark run history
+- `benchmarks/index.json` — benchmark coverage
+- `policy.json` — policy overrides
+
+**Local** (`.dynos/`):
+- `automation/queue.json` — automation queue for challenger evaluation
+- `automation/status.json` — automation state
 
 ### Dashboard State
 
@@ -198,10 +211,11 @@ When contributing, preserve these invariants:
 
 **Global state** (`~/.dynos/`):
 - `registry.json`: the project registry
-- `global.log`: daemon activity log
-- `daemon.pid`: PID file for the background daemon
-- Aggregated anonymous statistics
-- Portable prevention rules collected across projects
+- `projects/{slug}/`: per-project persistent state (rules, trajectories, learned agents, benchmarks)
+
+**Per-project maintenance** (`.dynos/maintenance/` inside each project):
+- `daemon.pid`: PID file for the per-project maintenance daemon
+- `cycles.jsonl`: daemon activity log
 
 ### What Is Shared Across Projects
 
@@ -246,22 +260,21 @@ Each entry tracks:
 
 ### Daemon Lifecycle
 
-The global daemon follows this loop:
+`hooks/daemon.py` is a **per-project** maintenance daemon, not a global one. It runs maintenance cycles for a single project root.
 
-1. **Start**: `daemon.py start` forks a background process, writes `~/.dynos/daemon.pid`
-2. **Run loop**: the daemon iterates over all registered projects in `registry.json`
-3. **Per-project maintenance**: for each active project, run a maintenance cycle (validation sweeps, stale route checks, automation queue processing)
-4. **Backoff for idle projects**: projects whose `last_active_at` is old receive exponential backoff, so the daemon spends less time on dormant repos
-5. **Cross-project aggregation**: after visiting all projects, aggregate anonymous stats and update portable prevention rules in `~/.dynos/`
-6. **Sleep**: wait for the configured interval before repeating
+1. **Start**: `daemon.py start --root <path>` forks a background process, writes `.dynos/maintenance/daemon.pid`
+2. **Run loop**: runs maintenance cycles for the single project root — validation sweeps, stale route checks, automation queue processing
+3. **Sleep**: waits for the configured interval before repeating
 
-The daemon can be stopped with `daemon.py stop`, which sends SIGTERM to the PID in the pidfile. `daemon.py run-once` executes a single sweep without looping.
+Stop with `daemon.py stop --root <path>` (sends SIGTERM to the PID). `daemon.py run-once --root <path>` executes a single cycle without looping. Logs go to `.dynos/maintenance/cycles.jsonl`.
+
+The global project registry lives in `~/.dynos/registry.json` and is managed by `hooks/registry.py`.
 
 ### Runtime Files
 
 | File | Purpose |
 |---|---|
-| `hooks/daemon.py` | Global daemon: start, stop, status, run-loop, run-once |
+| `hooks/daemon.py` | Per-project maintenance daemon: start, stop, status, run-once |
 | `hooks/registry.py` | Registry CLI: register, unregister, list, status, pause, resume, set-active |
 
 Both tools expose `--help` for all subcommands.

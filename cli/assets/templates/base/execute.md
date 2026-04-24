@@ -68,7 +68,7 @@ Progressive auditing remains allowed, but only after a segment is deterministica
 
 **Deterministic routing (MANDATORY):** Use the `segments` payload returned by `run-execute-setup` as the authoritative executor plan. Do not rebuild routing in prompt logic. The `executor-routing` receipt has already been written.
 
-Do NOT read dynos_patterns.md tables manually. The router handles model policy, agent routing, and security floors deterministically.
+Do NOT read project_rules.md tables manually. The router handles model policy, agent routing, and security floors deterministically.
 
 **Learned Agent Injection (MANDATORY — NOT OPTIONAL):** For every segment, you MUST build the executor prompt using the deterministic prompt builder. This is not a suggestion. This is an enforcement gate. For each segment in the executor plan:
 
