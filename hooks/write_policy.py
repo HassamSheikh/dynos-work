@@ -206,6 +206,20 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
         if attempt.task_dir is not None:
             return WriteDecision(False, "path escapes task boundary", "deny")
         return WriteDecision(False, "non-task path requires system-owned writer", "deny")
+    # plan.md and spec.md are human-approved artifacts locked at PLAN_REVIEW.
+    # Executor roles must not mutate them — renaming or removing sections
+    # bypasses gap-analysis and plan-validation gates without triggering any
+    # downstream hash mismatch (the plan-validated receipt can be refreshed).
+    # The planning role retains write access so it can author these files
+    # before approval; after approval only ctl/operator paths should touch them.
+    if rel_posix in {"plan.md", "spec.md"}:
+        if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
+            return WriteDecision(
+                False,
+                f"{rel_posix} is a human-approved artifact; executor roles may not write it after PLAN_REVIEW",
+                "deny",
+            )
+
     if attempt.role == "execute-inline" or attempt.role.endswith("-executor"):
         return WriteDecision(True, "repo work artifact allowed for executor role", "direct")
     if attempt.role == "planning":

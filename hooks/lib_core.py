@@ -1535,6 +1535,30 @@ def transition_task(
                     "receipt: plan-validated (plan was never validated)"
                 )
 
+            # Re-verify plan.md against the human-approval-PLAN_REVIEW receipt.
+            # The plan-validated receipt is re-writable (validate_task_artifacts
+            # auto-emits it after passing validation), so an executor can mutate
+            # plan.md, re-run validation, and launder the mutation through a
+            # fresh plan-validated receipt. The human-approval receipt is stored
+            # in receipts/ which executor roles cannot write, so its hash is the
+            # immutable anchor. A mismatch here means plan.md changed after the
+            # human approved it — block regardless of plan-validated state.
+            from lib_receipts import hash_file, read_receipt  # noqa: PLC0415
+            approval_receipt = read_receipt(task_dir, "human-approval-PLAN_REVIEW")
+            if approval_receipt is not None:
+                approved_sha = approval_receipt.get("artifact_sha256", "")
+                plan_path = task_dir / "plan.md"
+                try:
+                    current_sha = hash_file(plan_path)
+                except OSError:
+                    current_sha = ""
+                if approved_sha and current_sha and approved_sha != current_sha:
+                    gate_errors.append(
+                        "plan.md was mutated after human approval at PLAN_REVIEW "
+                        f"(approved={approved_sha[:12]}… current={current_sha[:12]}…); "
+                        "restore plan.md to its approved state before advancing to EXECUTION"
+                    )
+
         # CHECKPOINT_AUDIT requires executor-routing receipt + per-segment
         # executor-{seg_id} receipts proving every planned segment actually
         # completed. The per-segment enforcement only fires for transitions

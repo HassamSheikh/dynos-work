@@ -79,13 +79,21 @@ def main() -> int:
             print(f"- {error}")
         return 1
 
-    # Auto-emit plan-validated receipt when execution graph exists
+    # Auto-emit plan-validated receipt when execution graph exists, but only
+    # during the planning/review phases (PLANNING or PLAN_REVIEW).  After
+    # human approval at PLAN_REVIEW, plan.md is a locked artifact; silently
+    # refreshing the plan-validated receipt post-approval lets an executor
+    # launder a plan.md mutation through a fresh receipt, bypassing the
+    # human-approval hash check in transition_task("EXECUTION").
+    _PRE_APPROVAL_STAGES = {"PLANNING", "PLAN_REVIEW"}
     try:
         from lib_receipts import receipt_plan_validated
         from lib_core import load_json as _load_json
+        manifest = _load_json(task_dir / "manifest.json")
+        stage = manifest.get("stage", "") if isinstance(manifest, dict) else ""
         graph_path = task_dir / "execution-graph.json"
         spec_path = task_dir / "spec.md"
-        if graph_path.exists() and spec_path.exists():
+        if stage in _PRE_APPROVAL_STAGES and graph_path.exists() and spec_path.exists():
             # Task-007 B-004: writer now self-computes segment_count and
             # criteria_coverage from execution-graph.json internally, and
             # validation_passed from validate_task_artifacts directly.
