@@ -72,11 +72,13 @@ python3 "{{HOOKS_PATH}}/ctl.py" audit-receipt .dynos/task-{id} {auditor_name} \
 
 The router handles fast-track reduction, skip policy, model policy, security floor enforcement, ensemble voting triggers, and learned agent routing in deterministic code. No prompt interpretation needed for these decisions. Do not re-derive skip thresholds, model assignments, or routing modes from markdown tables or retrospective files.
 
-**Ensemble Voting:** If the router plan has `"ensemble": true` for an auditor, follow this protocol instead of a single spawn:
+**Ensemble Voting:** If the router plan has `"ensemble": true` for an auditor, follow this sequential cascade instead of a single spawn:
 
-1. Spawn two auditors in parallel using the models listed in `ensemble_voting_models` (e.g., haiku and sonnet)
-2. If both return zero findings: the audit passes for this auditor. Log: `{timestamp} [VOTE] {name} — PASS (both models agree: zero findings)`
-3. If either returns findings: discard both voting results and escalate by spawning with `ensemble_escalation_model` (opus). The escalation result is final and binding. Log: `{timestamp} [VOTE] {name} — Escalating to {escalation_model}`
+1. Spawn **haiku** (first model in `ensemble_voting_models`).
+2. If haiku returns **zero findings** → spawn **sonnet** (second model in `ensemble_voting_models`).
+   - If sonnet returns **zero findings** → audit passes. Log: `{timestamp} [VOTE] {name} — PASS (haiku then sonnet: zero findings)`
+   - If sonnet returns **any findings** → escalate: spawn `ensemble_escalation_model` (opus). Opus verdict is final and binding. Log: `{timestamp} [VOTE] {name} — Escalating to {escalation_model}`
+3. If haiku returns **any findings** → skip sonnet entirely, escalate immediately: spawn `ensemble_escalation_model` (opus). Opus verdict is final and binding. Log: `{timestamp} [VOTE] {name} — haiku found issues, escalating directly to {escalation_model}`
 
 If `"ensemble": false`, spawn normally with the single model from the plan.
 

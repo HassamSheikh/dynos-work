@@ -1,11 +1,16 @@
 """Tests for ensemble voting enforcement in require_receipts_for_done (AC 7).
 
-When a routing entry has ensemble=True, the gate requires:
-  - per-model receipts audit-{name}-{model} for every voting model, OR
-  - a single audit-{name} receipt with model_used matching a voting model.
-Accept iff all voting models report blocking_count=0, OR an escalation
-receipt exists with model_used == escalation_model. model_used fields
-must sit in voting_models ∪ {escalation_model}.
+Cascade protocol (haiku → sonnet → opus):
+  - haiku=0 findings → run sonnet
+    - sonnet=0 → PASS (both receipts present, both zero)
+    - sonnet≠0 → escalate to opus (haiku+sonnet+opus receipts)
+  - haiku≠0 findings → skip sonnet, escalate directly to opus (haiku+opus receipts only)
+
+The gate accepts iff:
+  - all voting-model receipts present AND all blocking_count==0, OR
+  - an escalation receipt exists with model_used == escalation_model
+    (sonnet receipt may be absent when haiku already escalated directly).
+model_used on every receipt must sit in voting_models ∪ {escalation_model}.
 """
 from __future__ import annotations
 
@@ -86,9 +91,8 @@ def test_ensemble_zero_blocking_consensus_passes(tmp_path: Path, monkeypatch):
     assert not any("sec" in g for g in gaps), f"unexpected ensemble gap(s): {gaps}"
 
 
-def test_ensemble_disagreement_without_escalation_refuses(tmp_path: Path, monkeypatch):
-    """AC 7: voting-model receipts disagree (non-zero blocking) and no
-    escalation → gap."""
+def test_ensemble_haiku_finds_issues_no_escalation_refuses(tmp_path: Path, monkeypatch):
+    """Cascade: haiku finds issues, sonnet skipped, no opus escalation → gap."""
     _mock_empty_registry(monkeypatch)
     td = _setup_task(tmp_path)
     receipt_audit_routing(td, [{
@@ -101,14 +105,14 @@ def test_ensemble_disagreement_without_escalation_refuses(tmp_path: Path, monkey
         "agent_path": None,
         "injected_agent_sha256": None,
     }])
+    # haiku finds issues → sonnet correctly skipped → but opus not written yet
     _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku", blocking_count=3)
-    _write_audit_receipt(td, "audit-sec-sonnet", model_used="sonnet", blocking_count=0)
     gaps = require_receipts_for_done(td)
-    assert any("disagree" in g for g in gaps), f"expected disagree gap in {gaps}"
+    assert any("sec" in g for g in gaps), f"expected gap without escalation receipt: {gaps}"
 
 
-def test_ensemble_disagreement_with_escalation_passes(tmp_path: Path, monkeypatch):
-    """AC 7: disagreement + escalation receipt with correct model_used → pass."""
+def test_ensemble_haiku_finds_issues_direct_opus_passes(tmp_path: Path, monkeypatch):
+    """Cascade: haiku finds issues → skip sonnet → opus escalation → pass."""
     _mock_empty_registry(monkeypatch)
     td = _setup_task(tmp_path)
     receipt_audit_routing(td, [{
@@ -121,12 +125,35 @@ def test_ensemble_disagreement_with_escalation_passes(tmp_path: Path, monkeypatc
         "agent_path": None,
         "injected_agent_sha256": None,
     }])
+    # haiku finds issues → sonnet skipped → opus escalation written
     _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku", blocking_count=3)
-    _write_audit_receipt(td, "audit-sec-sonnet", model_used="sonnet", blocking_count=0)
     _write_audit_receipt(td, "audit-sec-opus", model_used="opus", blocking_count=0)
     gaps = require_receipts_for_done(td)
-    assert not any("disagree" in g or "sec ensemble missing" in g for g in gaps), \
-        f"unexpected gap(s) with escalation present: {gaps}"
+    assert not any("sec" in g for g in gaps), \
+        f"unexpected gap with direct opus escalation: {gaps}"
+
+
+def test_ensemble_haiku_clean_sonnet_finds_issues_opus_passes(tmp_path: Path, monkeypatch):
+    """Cascade: haiku=0 → sonnet finds issues → opus escalation → pass."""
+    _mock_empty_registry(monkeypatch)
+    td = _setup_task(tmp_path)
+    receipt_audit_routing(td, [{
+        "name": "sec",
+        "action": "spawn",
+        "ensemble": True,
+        "ensemble_voting_models": ["haiku", "sonnet"],
+        "ensemble_escalation_model": "opus",
+        "route_mode": "generic",
+        "agent_path": None,
+        "injected_agent_sha256": None,
+    }])
+    # haiku clean → sonnet finds issues → escalate to opus
+    _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku", blocking_count=0)
+    _write_audit_receipt(td, "audit-sec-sonnet", model_used="sonnet", blocking_count=2)
+    _write_audit_receipt(td, "audit-sec-opus", model_used="opus", blocking_count=0)
+    gaps = require_receipts_for_done(td)
+    assert not any("sec" in g for g in gaps), \
+        f"unexpected gap with sonnet→opus escalation: {gaps}"
 
 
 def test_ensemble_model_used_not_in_voting_set_refuses(tmp_path: Path, monkeypatch):
@@ -143,7 +170,7 @@ def test_ensemble_model_used_not_in_voting_set_refuses(tmp_path: Path, monkeypat
         "agent_path": None,
         "injected_agent_sha256": None,
     }])
-    # Write a receipt for the 'haiku' slot but mark model_used as an unknown model.
+    # haiku slot written but model_used is an unknown model
     _write_audit_receipt(td, "audit-sec-haiku", model_used="llama", blocking_count=0)
     _write_audit_receipt(td, "audit-sec-sonnet", model_used="sonnet", blocking_count=0)
     gaps = require_receipts_for_done(td)
@@ -154,7 +181,7 @@ def test_ensemble_model_used_not_in_voting_set_refuses(tmp_path: Path, monkeypat
 
 
 def test_ensemble_missing_voting_model_receipt_refuses(tmp_path: Path, monkeypatch):
-    """AC 7: voting model receipt absent + no escalation → gap naming the model."""
+    """Cascade: haiku=0 but sonnet missing and no escalation → gap naming sonnet."""
     _mock_empty_registry(monkeypatch)
     td = _setup_task(tmp_path)
     receipt_audit_routing(td, [{
@@ -167,8 +194,9 @@ def test_ensemble_missing_voting_model_receipt_refuses(tmp_path: Path, monkeypat
         "agent_path": None,
         "injected_agent_sha256": None,
     }])
+    # haiku clean → executor should have run sonnet but didn't, and no escalation
     _write_audit_receipt(td, "audit-sec-haiku", model_used="haiku", blocking_count=0)
-    # sonnet missing
+    # sonnet missing, no opus
     gaps = require_receipts_for_done(td)
     assert any("sonnet" in g and ("missing" in g or "escalation" in g) for g in gaps), \
         f"expected missing-model gap in {gaps}"

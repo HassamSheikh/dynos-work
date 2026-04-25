@@ -133,12 +133,12 @@ Each stage validates its required inputs before proceeding. The runtime (`ctl.py
 | Planning | `planning` | single — sonnet |
 | Execution | `ui-executor`, `backend-executor`, `db-executor`, `ml-executor`, `integration-executor`, `refactor-executor`, `testing-executor` | single — sonnet |
 | Execution | `docs-executor` | single — haiku |
-| Audit | `security-auditor`, `db-schema-auditor` | **ensemble** — haiku + sonnet in parallel; if either finds issues → escalate to opus |
+| Audit | `security-auditor`, `db-schema-auditor` | **ensemble** — haiku first; if zero findings → sonnet; if sonnet finds issues → opus; if haiku finds issues → skip sonnet, go directly to opus |
 | Audit | `spec-completion-auditor`, `code-quality-auditor`, `dead-code-auditor`, `performance-auditor`, `ui-auditor` | single — sonnet (may be sampled into ensemble) |
 | Repair | `repair-coordinator` | single — sonnet |
 | Investigation | `investigator` | single — sonnet |
 
-**Ensemble voting** (`security-auditor` and `db-schema-auditor` always; others sampled): spawn haiku and sonnet in parallel. If both return zero findings → PASS. If either returns findings → discard both, escalate to opus. Opus verdict is final. Configurable via `.dynos/config/policy.json` (`ensemble_auditors`, `ensemble_voting_models`, `ensemble_escalation_model`).
+**Ensemble voting** (`security-auditor` and `db-schema-auditor` always; others sampled): sequential cascade — spawn haiku; if zero findings → spawn sonnet; if sonnet zero → PASS; if sonnet finds issues → escalate to opus; if haiku finds issues → skip sonnet, escalate directly to opus. Opus verdict is final. Configurable via `.dynos/config/policy.json` (`ensemble_auditors`, `ensemble_voting_models`, `ensemble_escalation_model`).
 
 The router may further override models based on learned policy and benchmark history.
 
