@@ -44,14 +44,14 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 const RISK_COLORS: Record<string, string> = {
-  low: "#BDF000",
+  low: "#6ee7b7",
   medium: "#2DD4A8",
   high: "#B47AFF",
   critical: "#FF3B3B",
 };
 
 const EXECUTOR_COLORS: Record<string, string> = {
-  ui: "#BDF000",
+  ui: "#6ee7b7",
   backend: "#2DD4A8",
   ml: "#B47AFF",
   test: "#FF9F43",
@@ -63,7 +63,7 @@ const SEVERITY_COLORS: Record<string, string> = {
   critical: "#FF3B3B",
   high: "#B47AFF",
   medium: "#FF9F43",
-  low: "#BDF000",
+  low: "#6ee7b7",
 };
 
 const IN_PROGRESS_COLOR = "#FF9F43";
@@ -184,7 +184,7 @@ function SectionSkeleton() {
 
 function MarkdownBlock({ content }: { content: string }) {
   return (
-    <div className="prose prose-invert prose-sm max-w-none text-slate-300 [&_pre]:bg-black/30 [&_pre]:p-3 [&_pre]:rounded [&_code]:text-[#BDF000] [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-xs [&_table]:text-xs [&_a]:text-[#BDF000] [&_li]:text-xs [&_p]:text-xs">
+    <div className="prose prose-invert prose-sm max-w-none text-slate-300 [&_pre]:bg-black/30 [&_pre]:p-3 [&_pre]:rounded [&_code]:text-[#6ee7b7] [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-xs [&_table]:text-xs [&_a]:text-[#6ee7b7] [&_li]:text-xs [&_p]:text-xs">
       <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
         {content}
       </ReactMarkdown>
@@ -520,7 +520,7 @@ function NewCostsTab({ taskId, projectPath, stage }: { taskId: string; projectPa
             <MetricCard
               label="Est. Total Cost"
               value={totalCostUsd != null ? formatUsd(totalCostUsd) : dash}
-              icon={<DollarSign className="w-3 h-3 text-[#BDF000]" />}
+              icon={<DollarSign className="w-3 h-3 text-[#6ee7b7]" />}
             />
           </div>
         ) : !loading ? (
@@ -595,7 +595,7 @@ function NewCostsTab({ taskId, projectPath, stage }: { taskId: string; projectPa
                         <td className="text-right text-[#7C4DFF] py-1.5 pr-3">{formatTokens(info.input_tokens ?? 0)}</td>
                         <td className="text-right text-[#00E5FF] py-1.5 pr-3">{formatTokens(info.output_tokens ?? 0)}</td>
                         <td className="text-right text-slate-400 py-1.5 pr-3">{formatTokens(info.tokens ?? 0)}</td>
-                        <td className="text-right text-[#BDF000] py-1.5">{formatUsd(costUsd)}</td>
+                        <td className="text-right text-[#6ee7b7] py-1.5">{formatUsd(costUsd)}</td>
                       </tr>
                     );
                   })}
@@ -633,7 +633,7 @@ function NewPostmortemTab({ taskId, projectPath, stage }: { taskId: string; proj
               <MetricCard
                 label="Quality Score"
                 value={retro.quality_score != null ? `${Math.round(retro.quality_score * 100)}%` : dash}
-                icon={<CheckCircle2 className="w-3 h-3 text-[#BDF000]" />}
+                icon={<CheckCircle2 className="w-3 h-3 text-[#6ee7b7]" />}
               />
               <MetricCard
                 label="Cost Score"
@@ -1131,7 +1131,7 @@ function LegacyOverviewTab({ taskId }: { taskId: string }) {
         {!retroLoading && retro ? (
           <div className="space-y-4">
             <div className="grid grid-cols-3 gap-4">
-              <MetricCard label="Quality" value={`${Math.round(retro.quality_score * 100)}%`} icon={<CheckCircle2 className="w-3 h-3 text-[#BDF000]" />} />
+              <MetricCard label="Quality" value={`${Math.round(retro.quality_score * 100)}%`} icon={<CheckCircle2 className="w-3 h-3 text-[#6ee7b7]" />} />
               <MetricCard label="Cost" value={`${Math.round(retro.cost_score * 100)}%`} icon={<DollarSign className="w-3 h-3 text-[#2DD4A8]" />} />
               <MetricCard label="Efficiency" value={`${Math.round(retro.efficiency_score * 100)}%`} icon={<Zap className="w-3 h-3 text-[#FF9F43]" />} />
             </div>
@@ -1193,7 +1193,7 @@ function LegacySpecPlanTab({ taskId }: { taskId: string }) {
                     </div>
                   )}
                   <div className="text-[10px] text-[#7A776E]">
-                    Criteria: {seg.criteria_ids.map((c) => <span key={c} className="font-mono text-[#BDF000] mr-1">AC-{c}</span>)}
+                    Criteria: {seg.criteria_ids.map((c) => <span key={c} className="font-mono text-[#6ee7b7] mr-1">AC-{c}</span>)}
                   </div>
                   {seg.files_expected.length > 0 && (
                     <div className="text-[10px] text-[#7A776E]">
@@ -1225,7 +1225,7 @@ function WriteBoundaryEventRow({ evt }: { evt: WriteBoundaryEvent }) {
       </div>
       {evt.path && <div className="text-[11px] font-mono text-slate-300 break-all">{evt.path}</div>}
       {evt.reason && <div className="text-[11px] text-slate-400">{evt.reason}</div>}
-      {evt.wrapper_command && <div className="text-[11px] font-mono text-[#BDF000] break-all">{evt.wrapper_command}</div>}
+      {evt.wrapper_command && <div className="text-[11px] font-mono text-[#6ee7b7] break-all">{evt.wrapper_command}</div>}
     </div>
   );
 }
@@ -1535,7 +1535,7 @@ function LegacyAuditQualityTab({ taskId }: { taskId: string }) {
                               {finding.evidence.map((e, i) => <div key={i}>{e}</div>)}
                             </div>
                           )}
-                          {finding.recommendation && <p className="text-[10px] text-[#BDF000]">{finding.recommendation}</p>}
+                          {finding.recommendation && <p className="text-[10px] text-[#6ee7b7]">{finding.recommendation}</p>}
                         </div>
                       );
                     })}
@@ -1553,7 +1553,7 @@ function LegacyAuditQualityTab({ taskId }: { taskId: string }) {
           <div className="space-y-2">
             {receiptsData.receipts.map((receipt) => (
               <div key={receipt.filename} className="border border-white/6 rounded-lg p-3 bg-black/20">
-                <span className="text-xs font-mono text-[#BDF000] block mb-1">{receipt.filename}</span>
+                <span className="text-xs font-mono text-[#6ee7b7] block mb-1">{receipt.filename}</span>
                 <div className="text-[11px] text-slate-400 font-mono space-y-0.5">
                   {Object.entries(receipt.data).filter(([k]) => k !== "receipt_type").slice(0, 6).map(([k, v]) => (
                     <div key={k}>
@@ -1644,7 +1644,7 @@ function LegacyCostTokensTab({ taskId }: { taskId: string }) {
                       )
                     : 0,
                 )}
-                icon={<DollarSign className="w-3 h-3 text-[#BDF000]" />}
+                icon={<DollarSign className="w-3 h-3 text-[#6ee7b7]" />}
               />
             </div>
             {tokenUsage.by_agent && Object.keys(tokenUsage.by_agent).length > 0 && (
@@ -1709,7 +1709,7 @@ function LegacyCostTokensTab({ taskId }: { taskId: string }) {
                             <td className="text-right text-[#7C4DFF] py-1.5 pr-3">{formatTokens(info.input_tokens)}</td>
                             <td className="text-right text-[#00E5FF] py-1.5 pr-3">{formatTokens(info.output_tokens)}</td>
                             <td className="text-right text-slate-400 py-1.5 pr-3">{formatTokens(info.tokens)}</td>
-                            <td className="text-right text-[#BDF000] py-1.5">{formatUsd(estimateCost(info.tokens ?? 0, model))}</td>
+                            <td className="text-right text-[#6ee7b7] py-1.5">{formatUsd(estimateCost(info.tokens ?? 0, model))}</td>
                           </tr>
                         ))}
                     </tbody>
@@ -1796,7 +1796,7 @@ function LegacyRouterDecisionsTab({ taskId }: { taskId: string }) {
   const { data: retro, loading: retroLoading } = usePollingData<TaskRetrospective>(`/api/tasks/${taskId}/retrospective`, 30000);
 
   const MODE_COLORS: Record<string, string> = {
-    replace: "#BDF000", shadow: "#B47AFF", alongside: "#FF9F43",
+    replace: "#6ee7b7", shadow: "#B47AFF", alongside: "#FF9F43",
     spawn: "#2DD4A8", skip: "#7A776E", default: "#7A776E",
   };
   const MODEL_COLORS: Record<string, string> = {
@@ -1823,7 +1823,7 @@ function LegacyRouterDecisionsTab({ taskId }: { taskId: string }) {
                 </div>
                 <div className="text-[11px] font-mono space-y-0.5">
                   {dec.model_source && <div><span className="text-[#7A776E]">model source: </span><span className="text-slate-400">{dec.model_source}</span></div>}
-                  {dec.agent_name && <div><span className="text-[#7A776E]">agent: </span><span className="text-[#BDF000]">{dec.agent_name}</span></div>}
+                  {dec.agent_name && <div><span className="text-[#7A776E]">agent: </span><span className="text-[#6ee7b7]">{dec.agent_name}</span></div>}
                   {dec.composite_score !== undefined && dec.composite_score > 0 && (
                     <div><span className="text-[#7A776E]">score: </span><span className="text-slate-300">{dec.composite_score.toFixed(4)}</span></div>
                   )}
@@ -1918,7 +1918,7 @@ function LegacyTaskDetail({ taskId }: { taskId: string }) {
   return (
     <div className="space-y-6 pb-12">
       <nav className="flex items-center gap-2 text-xs font-mono">
-        <Link to="/tasks" className="text-[#BDF000] hover:text-[#d4ff4d] transition-colors flex items-center gap-1">
+        <Link to="/tasks" className="text-[#6ee7b7] hover:text-[#a7f3d0] transition-colors flex items-center gap-1">
           <ArrowLeft className="w-3 h-3" />
           Tasks
         </Link>
@@ -1938,7 +1938,7 @@ function LegacyTaskDetail({ taskId }: { taskId: string }) {
             <div className="flex items-center gap-3 flex-wrap">
               <h1 className="text-lg font-bold text-[#F0F0E8] font-mono">{taskId}</h1>
               <Badge label={manifest.stage} color={stageColor} />
-              {manifest.fast_track && <Badge label="FAST TRACK" color="#BDF000" />}
+              {manifest.fast_track && <Badge label="FAST TRACK" color="#6ee7b7" />}
             </div>
             <p className="text-sm text-slate-300">{manifest.title}</p>
             <div className="flex items-center gap-4 flex-wrap">

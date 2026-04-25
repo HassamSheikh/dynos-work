@@ -561,6 +561,14 @@ export type HandoffData = Record<string, unknown>;
 /** Raw content returned by GET /api/tasks/{id}/audit-plan */
 export type AuditPlanData = Record<string, unknown>;
 
+// ---- Task Detail: Execution Log ----
+
+export interface ExecutionLogResponse {
+  lines: string[];
+  stage: string;
+  task_id: string;
+}
+
 // ---- Projects Summary ----
 
 /**

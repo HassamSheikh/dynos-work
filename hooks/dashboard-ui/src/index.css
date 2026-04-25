@@ -1,13 +1,14 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* ---- dynos dashboard — dark minimal theme variables ---- */
 
 :root {
-  --bg: #0a0a0a;
-  --surface: #111111;
-  --border: #222222;
+  --bg: #090909;
+  --surface: #111;
+  --border: #1a1a1a;
   --text: #e5e5e5;
   --accent: #6ee7b7;
+  --muted: #888;
 }
 
 /* ---- dynos dashboard new pages — dark minimal theme utilities ---- */

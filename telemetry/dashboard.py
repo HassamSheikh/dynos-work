@@ -1076,9 +1076,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         # Text file endpoints (return as {content: "..."})
         if sub == "execution-log":
-            raw = read_text_file(task_dir / "execution-log.md")
-            lines = [l for l in raw.split("\n") if l.strip()]
-            self._json_response(200, {"lines": lines})
+            try:
+                tail_raw = query.get("tail", ["100"])[0]
+                try:
+                    tail = int(tail_raw)
+                    tail = max(10, min(500, tail))
+                except (ValueError, TypeError):
+                    tail = 100
+                manifest_data = read_json_or_default(task_dir / "manifest.json", {})
+                stage = str(manifest_data.get("stage", "UNKNOWN")) if isinstance(manifest_data, dict) else "UNKNOWN"
+                try:
+                    raw = read_text_file(task_dir / "execution-log.md")
+                    lines = [l for l in raw.split("\n") if l.strip()]
+                    lines = lines[-tail:]
+                except (FileNotFoundError, OSError):
+                    lines = []
+                self._json_response(200, {"lines": lines, "stage": stage, "task_id": task_id})
+            except Exception as err:
+                self._handle_fs_error(err)
             return
 
         if sub == "spec":
