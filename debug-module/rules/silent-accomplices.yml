@@ -1,0 +1,270 @@
+# Silent Accomplices — semgrep ruleset.
+#
+# These seven rule groups detect "silent accomplice" anti-patterns: code that
+# compiles, lints clean, and runs to completion while quietly producing the
+# wrong answer. Each pattern represents a class of bug that hides behind
+# defensive-looking syntax.
+#
+# Group index:
+#   1. swallowed-error          - empty catch / bare except suppresses signal
+#   2. default-value-masking    - ?? 0, ?? '', or `or 0` masks real null/error
+#   3. missing-await            - async function called without await
+#   4. missing-order-by         - SQL / ORM query without deterministic order
+#   5. cascade-delete-no-guard  - cascade configured without explicit comment
+#   6. sort-order-assumption    - .sort() with no comparator on non-strings
+#   7. default-mutable-arg      - Python def f(x=[]) shared mutable default
+#
+# All rule ids are namespaced under `silent-accomplices.*` for deterministic
+# downstream filtering.
+
+rules:
+
+  # ---------------------------------------------------------------------------
+  # GROUP 1 - SWALLOWED ERRORS
+  # An empty catch / except / rescue block hides the failure and lets the
+  # caller proceed as if nothing went wrong.
+  # ---------------------------------------------------------------------------
+
+  - id: silent-accomplices.swallowed-error-js
+    message: >-
+      Swallowed error: empty catch block hides failures from the caller.
+      Either log, rethrow, or comment why the error is intentionally ignored.
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern-either:
+      - pattern: |
+          try { ... } catch ($E) { }
+      - pattern: |
+          try { ... } catch { }
+
+  - id: silent-accomplices.swallowed-error-python
+    message: >-
+      Swallowed error: bare `except: pass` discards all exceptions including
+      KeyboardInterrupt and SystemExit. Catch a specific exception class.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      - pattern: |
+          try:
+              ...
+          except:
+              pass
+      - pattern: |
+          try:
+              ...
+          except Exception:
+              pass
+
+  - id: silent-accomplices.swallowed-error-java
+    message: >-
+      Swallowed error: empty catch block in Java hides exceptions.
+    severity: WARNING
+    languages: [java]
+    pattern: |
+      try { ... } catch ($E $V) { }
+
+  - id: silent-accomplices.swallowed-error-ruby
+    message: >-
+      Swallowed error: rescue with no body silently discards exceptions.
+    severity: WARNING
+    languages: [ruby]
+    pattern-regex: '(?m)rescue[^\n]*\n\s*end'
+
+  # ---------------------------------------------------------------------------
+  # GROUP 2 - DEFAULT-VALUE MASKING
+  # `?? 0`, `?? ''`, `?? false`, or Python `or 0` will silently substitute a
+  # falsy value for null / undefined / errors, masking real bugs upstream.
+  # ---------------------------------------------------------------------------
+
+  - id: silent-accomplices.default-masking-js
+    message: >-
+      Default-value masking: `?? <falsy>` may hide a missing or error value
+      from a caller. Make the fallback explicit and documented.
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern-either:
+      - pattern: $X ?? 0
+      - pattern: $X ?? ""
+      - pattern: $X ?? ''
+      - pattern: $X ?? false
+      - pattern: $X ?? []
+      - pattern: $X ?? {}
+
+  - id: silent-accomplices.default-masking-python
+    message: >-
+      Default-value masking: `x or 0` / `x or ""` collapses the distinction
+      between None, 0, and "". Use `x if x is not None else <default>`.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      - pattern: $X or 0
+      - pattern: $X or ""
+      - pattern: $X or ''
+      - pattern: $X or False
+      - pattern: $X or []
+      - pattern: $X or {}
+
+  # ---------------------------------------------------------------------------
+  # GROUP 3 - MISSING AWAIT ON ASYNC CALLS
+  # Calling an async function without await returns a Promise / coroutine
+  # that is never observed; rejections become unhandled and timing is wrong.
+  # ---------------------------------------------------------------------------
+
+  - id: silent-accomplices.missing-await-js
+    message: >-
+      Possible missing await: an async function call is used as a value
+      without `await`. The result is a Promise, not the resolved value.
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern-either:
+      - patterns:
+          - pattern: |
+              async function $F(...) {
+                ...
+                $X.$M(...);
+                ...
+              }
+          - pattern-not: |
+              async function $F(...) {
+                ...
+                await $X.$M(...);
+                ...
+              }
+      - pattern: |
+          if ($X.$M(...)) { ... }
+
+  - id: silent-accomplices.missing-await-python
+    message: >-
+      Possible missing await on asyncio coroutine. Calling a coroutine
+      without await returns a coroutine object that is never scheduled.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      - pattern: asyncio.sleep(...)
+      - pattern: asyncio.gather(...)
+      - pattern: asyncio.wait(...)
+
+  # ---------------------------------------------------------------------------
+  # GROUP 4 - MISSING ORDER BY
+  # A query without ORDER BY returns rows in an undefined order. Pagination,
+  # "first row" selection, and LIMIT N become non-deterministic.
+  # ---------------------------------------------------------------------------
+
+  - id: silent-accomplices.missing-order-by-sql
+    message: >-
+      Missing ORDER BY: SELECT with LIMIT but no ORDER BY returns
+      non-deterministic rows. Add an explicit ORDER BY clause.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: '(?is)SELECT\s+[^;]+?\sLIMIT\s+\d+(?![^;]*ORDER\s+BY)'
+
+  - id: silent-accomplices.missing-order-by-prisma
+    message: >-
+      Missing ORDER BY in Prisma: findMany with `take` but no `orderBy`
+      gives a non-deterministic page. Add an `orderBy` clause.
+    severity: WARNING
+    languages: [javascript, typescript]
+    patterns:
+      - pattern: "$DB.$T.findMany({ ..., take: $N, ... })"
+      - pattern-not: "$DB.$T.findMany({ ..., orderBy: ..., ..., take: $N, ... })"
+
+  - id: silent-accomplices.missing-order-by-sqlalchemy
+    message: >-
+      Missing ORDER BY in SQLAlchemy: .limit() without .order_by() is
+      non-deterministic.
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern: $Q.limit(...)
+      - pattern-not-inside: $Q.order_by(...).limit(...)
+
+  - id: silent-accomplices.missing-order-by-activerecord
+    message: >-
+      Missing ORDER BY in ActiveRecord: .limit without .order is
+      non-deterministic.
+    severity: WARNING
+    languages: [ruby]
+    patterns:
+      - pattern: $Q.limit(...)
+      - pattern-not-inside: $Q.order(...).limit(...)
+
+  # ---------------------------------------------------------------------------
+  # GROUP 5 - CASCADE DELETE WITHOUT GUARD
+  # `onDelete: Cascade` and `cascade="all, delete"` will silently destroy
+  # related rows. Require an explicit comment marker to acknowledge it.
+  # ---------------------------------------------------------------------------
+
+  - id: silent-accomplices.cascade-delete-prisma
+    message: >-
+      Prisma `onDelete: Cascade` will silently delete related rows. Add an
+      explicit `// cascade-ok:` comment if this is intentional.
+    severity: WARNING
+    languages: [generic]
+    pattern-regex: 'onDelete:\s*Cascade'
+
+  - id: silent-accomplices.cascade-delete-sqlalchemy
+    message: >-
+      SQLAlchemy `cascade="all, delete"` will silently delete child rows.
+      Confirm the relationship is owned, not shared.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      - pattern: relationship(..., cascade="all, delete", ...)
+      - pattern: relationship(..., cascade="all,delete", ...)
+      - pattern: relationship(..., cascade="all, delete-orphan", ...)
+
+  # ---------------------------------------------------------------------------
+  # GROUP 6 - SORT-ORDER ASSUMPTION
+  # `.sort()` with no comparator coerces to string in JS; `sorted()` over
+  # non-comparable types raises; iterating Go map order is randomised.
+  # ---------------------------------------------------------------------------
+
+  - id: silent-accomplices.sort-no-comparator-js
+    message: >-
+      `.sort()` without a comparator sorts elements as strings. For numeric
+      arrays, pass `(a, b) => a - b` or use a typed comparator.
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern: $ARR.sort()
+
+  - id: silent-accomplices.sort-no-key-python
+    message: >-
+      `sorted(...)` / `.sort()` without a key on heterogeneous data is
+      fragile. Pass `key=` to make the order explicit.
+    severity: INFO
+    languages: [python]
+    pattern-either:
+      - pattern: sorted($X)
+      - pattern: $X.sort()
+
+  - id: silent-accomplices.go-map-range-order
+    message: >-
+      Iterating a Go map with `for ... range` yields keys in random order.
+      If order matters, sort the keys explicitly first.
+    severity: INFO
+    languages: [go]
+    pattern: |
+      for $K, $V := range $M { ... }
+
+  # ---------------------------------------------------------------------------
+  # GROUP 7 - DEFAULT MUTABLE ARGUMENT (Python)
+  # `def f(x=[])` shares one list across every call that uses the default.
+  # The default value is evaluated once at function definition time.
+  # ---------------------------------------------------------------------------
+
+  - id: silent-accomplices.default-mutable-arg-python
+    message: >-
+      Default mutable argument: the list/dict default is shared across calls.
+      Use `None` and create a fresh container inside the function.
+    severity: WARNING
+    languages: [python]
+    pattern-either:
+      - pattern: |
+          def $F(..., $X=[], ...):
+              ...
+      - pattern: |
+          def $F(..., $X={}, ...):
+              ...
+      - pattern: |
+          def $F(..., $X=set(), ...):
+              ...

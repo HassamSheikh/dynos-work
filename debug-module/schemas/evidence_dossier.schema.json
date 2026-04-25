@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Evidence Dossier Schema",
+  "description": "Schema for bug investigation evidence dossier",
+  "type": "object",
+  "required": [
+    "investigation_id",
+    "bug_text",
+    "repo_path",
+    "pipeline_errors",
+    "evidence_index",
+    "languages_detected",
+    "bug_type"
+  ],
+  "properties": {
+    "investigation_id": {
+      "type": "string",
+      "description": "Unique identifier for the investigation"
+    },
+    "bug_text": {
+      "type": "string",
+      "description": "Text description of the bug"
+    },
+    "repo_path": {
+      "type": "string",
+      "description": "Path to the repository being investigated"
+    },
+    "pipeline_errors": {
+      "type": "array",
+      "description": "Array of pipeline error messages",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_index": {
+      "type": "object",
+      "description": "Index of evidence keyed by pattern-matching evidence ID",
+      "patternProperties": {
+        "^(MF|F|S|T|ST|CG)-\\d{3}$": {
+          "type": "object",
+          "description": "Evidence object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "languages_detected": {
+      "type": "array",
+      "description": "Array of programming languages detected in the codebase",
+      "items": {
+        "type": "string"
+      }
+    },
+    "bug_type": {
+      "type": "string",
+      "description": "Classification of the bug type"
+    }
+  },
+  "additionalProperties": true
+}

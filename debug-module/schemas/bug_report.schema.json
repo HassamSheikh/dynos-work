@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Bug Report Schema",
+  "description": "Schema for bug report with causal chain analysis",
+  "type": "object",
+  "required": [
+    "investigation_id",
+    "causal_chain",
+    "root_cause",
+    "recommended_fix"
+  ],
+  "properties": {
+    "investigation_id": {
+      "type": "string",
+      "description": "Unique identifier for the investigation"
+    },
+    "causal_chain": {
+      "type": "array",
+      "description": "Sequence of causal steps leading to the bug",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["step", "description", "evidence_ids"],
+        "properties": {
+          "step": {
+            "type": "integer",
+            "description": "Step number in the causal chain"
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of this causal step"
+          },
+          "evidence_ids": {
+            "type": "array",
+            "description": "Array of evidence IDs supporting this step",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "root_cause": {
+      "type": "object",
+      "description": "Root cause of the bug",
+      "required": ["description", "evidence_ids"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Description of the root cause"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "description": "Array of evidence IDs supporting the root cause",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "recommended_fix": {
+      "type": "object",
+      "description": "Recommended fix for the bug",
+      "required": ["description", "locations", "evidence_ids"],
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Description of the recommended fix"
+        },
+        "locations": {
+          "type": "array",
+          "description": "Array of code locations where the fix should be applied",
+          "items": {
+            "type": "object",
+            "required": ["file", "line"],
+            "properties": {
+              "file": {
+                "type": "string",
+                "description": "File path where the fix should be applied"
+              },
+              "line": {
+                "type": ["integer", "null"],
+                "description": "Line number in the file, or null if not applicable"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "evidence_ids": {
+          "type": "array",
+          "description": "Array of evidence IDs supporting the recommended fix",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "hypotheses_eliminated": {
+      "type": "array",
+      "description": "Hypotheses that were eliminated during investigation",
+      "items": {
+        "type": "object",
+        "required": ["hypothesis", "evidence_ids"],
+        "properties": {
+          "hypothesis": {
+            "type": "string",
+            "description": "Hypothesis that was eliminated"
+          },
+          "evidence_ids": {
+            "type": "array",
+            "description": "Array of evidence IDs that eliminated this hypothesis",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

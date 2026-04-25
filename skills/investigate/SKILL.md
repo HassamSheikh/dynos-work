@@ -5,18 +5,43 @@ description: "Deep bug investigation. Pass a short description of the problem �
 
 # dynos-work: investigate
 
-Spawn the `investigator` agent with the user's prompt as the instruction.
+Runs a deterministic-first investigation pipeline: triage first, reasoning second, citation validation third. The LLM never gathers evidence on its own — it reasons over a pre-built dossier.
 
 ## Ruthlessness Standard
 
-- The investigator must name the mechanism, not restate the symptom.
-- Every conclusion needs concrete file/function/condition evidence.
-- If the evidence does not support a claim, the agent must say so instead of guessing.
+- Name the mechanism, not the symptom.
+- Every conclusion must cite a pre-minted evidence ID from the dossier.
+- If the evidence does not support a claim, say so instead of guessing.
 
-## What to pass
+## Phase 1 — Deterministic Evidence Gathering
 
-Pass the user's full prompt verbatim. Do not summarize or sanitize it.
-Prepend a short hard wrapper that tells the agent to trace root cause, immediate cause, and detection failure with evidence.
+Run the triage orchestrator before invoking the LLM:
+
+```bash
+python3 debug-module/triage.py --bug "<bug text>" --repo <repo_path> --out /tmp/dossier.json
+```
+
+This produces an evidence dossier at `/tmp/dossier.json` with pre-minted evidence IDs (`F-001` for files, `S-001` for symbols, etc.), git blame, linter findings, and Semgrep silent-accomplice findings. The LLM does not gather evidence — it reasons over what triage has already found.
+
+## Phase 2 — Causal Reasoning
+
+Spawn the `@investigator` subagent with the dossier path. Pass the contents of `/tmp/dossier.json` as input and instruct the agent to:
+
+- Trace root cause, immediate cause, and detection failure.
+- Cite only evidence IDs that exist in the dossier.
+- Write its structured JSON output to `/tmp/bug_report.json`.
+
+The agent must not invent file paths, symbols, or findings outside the dossier.
+
+## Phase 3 — Citation Validation and Markdown Render
+
+Validate citations and render the final report:
+
+```bash
+python3 debug-module/lib/render_report.py --report /tmp/bug_report.json --dossier /tmp/dossier.json
+```
+
+`render_report.py` mechanically verifies every `evidence_ids[]` reference in `bug_report.json` exists in the dossier and renders the final Markdown. Any citation pointing to a non-existent ID surfaces as a visible WARNING in the output.
 
 ## Usage
 
