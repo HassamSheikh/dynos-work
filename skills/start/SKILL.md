@@ -242,6 +242,8 @@ python3 hooks/ctl.py run-start-classification .dynos/task-{id}
 
 `run-start-classification` validates the classification payload, applies fast-track + `tdd_required`, and advances the manifest to `SPEC_NORMALIZATION` when the task is ready to continue. If it exits non-zero, the JSON payload names the exact classification defects.
 
+**If the output contains `"tdd_required": true`:** Step 8 (TDD-First Gate) is **mandatory** for this task. Do not override this with your own risk assessment — `tdd_required` is set deterministically by the system for `high` and `critical` risk tasks. The state machine will block `PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT` if Step 8 is skipped. Note this now and plan accordingly.
+
 ---
 
 ## Step 2b — Fast-Track Gate (conditional)
@@ -489,13 +491,13 @@ The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/c
 
 ---
 
-## Step 8 — TDD-First Gate (opt-in only)
+## Step 8 — TDD-First Gate
 
-This gate is **off by default**. It is only invoked when `risk_level` is `critical` OR the spec explicitly requests TDD-first.
+This gate is **mandatory** when `manifest.classification.tdd_required` is `true` (auto-derived by the system for `high` and `critical` risk tasks; also set for explicit opt-in). **Do not skip this step based on your own risk judgment.** The `run-start-classification` output surfaces `tdd_required`; if it is `true`, this step is required and the state machine will block `PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT` without it.
 
-When NOT invoked: tests are written by `testing-executor` after production code, in the execute skill (Step 4 of execute), where the implementation context is already known. This avoids ~1.5–2M tokens of pre-code context loading per task.
+When `tdd_required` is `false`: tests are written by `testing-executor` after production code, in the execute skill (Step 4 of execute), where the implementation context is already known. This avoids ~1.5–2M tokens of pre-code context loading per task.
 
-When invoked (critical risk or explicit opt-in):
+When `tdd_required` is `true`:
 
 1. Spawn `testing-executor` with instruction:
 
