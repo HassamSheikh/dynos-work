@@ -105,8 +105,12 @@ def allowed_globs_for_role(role: str, task_dir: Path | None) -> list[str]:
             ".dynos/task-*/design-decisions.md",
             ".dynos/task-*/spec.md",
             ".dynos/task-*/plan.md",
-            ".dynos/task-*/classification.json",
-            ".dynos/task-*/execution-graph.json",
+            # NOTE: classification.json and execution-graph.json require the ctl
+            # wrapper — planning cannot write them directly. Use:
+            #   python3 hooks/ctl.py write-classification <task_dir> --from <json>
+            #   python3 hooks/ctl.py write-execution-graph <task_dir> --from <json>
+            ".dynos/task-*/classification.json (via ctl wrapper only)",
+            ".dynos/task-*/execution-graph.json (via ctl wrapper only)",
         ]
     if _matches_role(role, "repair-coordinator"):
         return [".dynos/task-*/repair-log.json"]
@@ -127,7 +131,10 @@ def allowed_globs_for_role(role: str, task_dir: Path | None) -> list[str]:
             ".dynos/task-*/repair-log.json",
         ]
     if role == "receipt-writer":
-        return [".dynos/task-*/receipts/*.json"]
+        return [
+            ".dynos/task-*/receipts/*.json",
+            ".dynos/task-*/token-usage.json",
+        ]
     if role in {"scheduler", "eventbus", "system"}:
         return [
             ".dynos/task-*/events.jsonl",
@@ -217,6 +224,18 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             return WriteDecision(
                 False,
                 f"{rel_posix} is a human-approved artifact; executor roles may not write it after PLAN_REVIEW",
+                "deny",
+            )
+
+    # ctl-owned aggregation artifacts at task root — explicit deny with a clear
+    # reason so agents receive a useful message instead of the catch-all below.
+    if rel_posix in {"audit-summary.json", "audit-plan.json"}:
+        if attempt.role != "ctl":
+            return WriteDecision(
+                False,
+                f"{rel_posix} is a ctl-owned aggregation artifact written by "
+                "`python3 hooks/ctl.py run-audit-setup` / `run-audit-summary`; "
+                "agents must not write it directly",
                 "deny",
             )
 

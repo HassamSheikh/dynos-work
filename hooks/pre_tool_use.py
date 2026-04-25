@@ -268,25 +268,20 @@ def main() -> int:
             print("pre-tool-use: Bash tool_input.command is not a string", file=sys.stderr)
             return 1
 
-        # Role authorization probe: when a task context is known, verify the
-        # resolved role is authorized to operate in the cwd. This runs for ALL
-        # Bash commands (not only ones with write destinations) so that:
-        # (a) forbidden roles are caught before any side effects occur, and
-        # (b) the resolved role is always observable via the decide_write call.
-        # Note: _emit_policy_event is intentionally NOT called for this probe
-        # to avoid duplicate events — the probe is a role-auth check, not a
-        # write-destination check.
-        if task_dir is not None and decide_write is not None and WriteAttempt is not None:
-            probe_attempt = WriteAttempt(
-                role=role,
-                task_dir=task_dir,
-                path=cwd,
-                operation="modify",
-                source="agent",
-            )
-            probe_decision = decide_write(probe_attempt)
-            if not probe_decision.allowed:
-                print(f"write-policy: {probe_decision.reason}", file=sys.stderr)
+        # Role authorization probe: verify the resolved role is recognized before
+        # any side effects occur. Check directly against _EXECUTOR_ROLE_ALLOWLIST
+        # rather than calling decide_write(path=cwd) — passing the repo root
+        # through decide_write always produces "path escapes task boundary" for
+        # non-executor roles (planning, audit-*, repair-coordinator), blocking
+        # every Bash command including required ctl wrapper calls. The allowlist
+        # is the authoritative set of valid agent roles; anything else is a
+        # mis-configured or injected role and should be denied unconditionally.
+        if task_dir is not None:
+            if role not in _EXECUTOR_ROLE_ALLOWLIST and not role.endswith("-executor"):
+                print(
+                    f"write-policy: role '{role}' is not in the authorized role allowlist",
+                    file=sys.stderr,
+                )
                 return 2
 
         destinations = _extract_bash_destinations(command)
