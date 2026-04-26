@@ -512,6 +512,7 @@ export interface AttentionItem {
   status: string;
   recommendation: string | null;
   delta_composite: number | null;
+  task_offset?: number | string | null;
 }
 
 export interface ControlPlaneData {
@@ -586,4 +587,104 @@ export interface ProjectSummary {
   last_active_at: string | null;
   prevention_rule_count: number | null;
   learned_routes_count: number | null;
+}
+
+// ---- Operator Dashboard: New Endpoint Types ----
+
+/**
+ * Machine-wide operational summary returned by GET /api/machine-summary.
+ * Aggregates across all repos: live counters, cost, error rate, stalled
+ * agents, queue depth, and top-N repo/task rankings. Per AC 4.
+ */
+export interface MachineSummary {
+  active_repos: number;
+  active_tasks: number;
+  active_agents: number;
+  token_burn_rate_per_min: number;
+  current_cost_by_model: Record<string, { input_tokens: number; output_tokens: number; estimated_usd: number }>;
+  error_rate: number | null;
+  stalled_agents: Array<{ task_id: string; repo_slug: string; stage: string; stage_age_seconds: number }>;
+  orphan_token_events: number;
+  receipt_failures: number;
+  stage_lag: Array<{ task_id: string; repo_slug: string; stage: string; last_change_at: string }>;
+  queue_depth: number;
+  retry_rate: number | null;
+  top_failing_repos: Array<{ slug: string; error_rate: number }>;
+  top_expensive_repos: Array<{ slug: string; total_estimated_usd: number }>;
+  top_expensive_tasks: Array<{ task_id: string; repo_slug: string; total_tokens: number; estimated_usd: number }>;
+  repos_failed: Array<{ slug: string; reason: string }>;
+  degraded: boolean;
+  repos_skipped: string[];
+  computed_at: string;
+}
+
+/**
+ * Trust-substrate summary returned by GET /api/trust-summary.
+ * Reports deterministic vs prompt-owned operations, missing receipts,
+ * skipped gates, and unverifiable transitions. Per AC 5.
+ *
+ * Note: `stale_skill_installs` is intentionally typed as the literal
+ * `null` because the backend has no source of truth for this metric
+ * yet; future work will replace this with a concrete shape.
+ */
+export interface TrustSummary {
+  deterministic_ops: number;
+  prompt_owned_ops: number;
+  missing_receipts: Array<{ task_id: string; repo_slug: string; receipt_name: string }>;
+  skipped_gates: Array<{ task_id: string; repo_slug: string; stage: string }>;
+  stale_skill_installs: null;
+  unverifiable_transitions: Array<{ task_id: string; repo_slug: string; reason: string }>;
+  computed_at: string;
+  data_source_caveats: string[];
+}
+
+/**
+ * Single entry in the cross-repo events feed returned by
+ * GET /api/events-feed. Index signature permits event-specific
+ * fields beyond the canonical envelope. Per AC 6.
+ */
+export interface EventsFeedEntry {
+  ts: string;
+  event: string;
+  repo_slug: string;
+  task_id?: string;
+  [key: string]: unknown;
+}
+
+/** Wrapper response for GET /api/events-feed. Per AC 6. */
+export interface EventsFeedResponse {
+  events: EventsFeedEntry[];
+}
+
+/**
+ * Single entry in the cross-repo timeline returned by
+ * GET /api/cross-repo-timeline. Per AC 7.
+ */
+export interface CrossRepoTimelineEntry {
+  task_id: string;
+  repo_slug: string;
+  title: string;
+  stage: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Command-palette index returned by GET /api/palette-index.
+ * Provides searchable repo and task entries. Per AC 8.
+ */
+export interface PaletteIndex {
+  repos: Array<{ slug: string; name: string }>;
+  tasks: Array<{ task_id: string; title: string; repo_slug: string; stage: string }>;
+}
+
+/**
+ * Single issue rendered by the shared DiagnosticsPanel component.
+ * Used by trust/machine summary panels to surface degraded state,
+ * missing receipts, etc. Per AC 54.
+ */
+export interface Issue {
+  severity: 'error' | 'warning' | 'info';
+  description: string;
+  href?: string;
 }

@@ -1,502 +1,439 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useMemo } from "react";
-import { Link, useParams, useNavigate } from "react-router";
-import { useProjectsSummary, usePollingData } from "@/data/hooks";
-import { Skeleton } from "@/components/ui/skeleton";
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-function formatDate(iso) {
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
+/**
+ * RepoPage — per-repository mission control board.
+ * Route: /repo/:slug
+ *
+ * Resolves slug → projectPath via /api/projects-summary, then renders
+ * tabbed sections (Overview / Tasks / Events / Agents) with:
+ *   - breadcrumb + page header (eyebrow + title + daemon chip + refresh)
+ *   - 4-tile stats bar (active / done / failed / avg quality)
+ *   - alert bar when any non-terminal task is stalled (>2h since created)
+ *
+ * Styling uses ONLY the index.css design system classes; no Tailwind.
+ */
+import { useState } from 'react';
+import { useParams, Link } from 'react-router';
+import { usePollingData, useProjectsSummary, TERMINAL_STAGES } from '../data/hooks';
+// ─── Constants ────────────────────────────────────────────────────────────────
+const STALL_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+const TERMINAL_SET = new Set(TERMINAL_STAGES);
+const TITLE_TRUNCATE_MAX = 80;
+const DETAIL_TRUNCATE_MAX = 100;
+const RECENT_TASKS_LIMIT = 8;
+const RECENT_EVENTS_LIMIT = 10;
+const EVENTS_TAB_LIMIT = 50;
+const PATH_NOISE_PARTS = new Set([
+    'users', 'hassam', 'documents', 'home', 'library', 'local',
+]);
+// ─── Pure helpers ─────────────────────────────────────────────────────────────
+function shortName(slug) {
+    if (!slug)
+        return '—';
+    const parts = slug.split('-').filter(p => p.length > 0 && !PATH_NOISE_PARTS.has(p.toLowerCase()));
+    if (parts.length === 0)
+        return slug;
+    return parts.join('-');
+}
+function shortPath(p) {
+    if (!p)
+        return '—';
+    return p.replace(/^\/?Users\/[^/]+\/Documents\//, '~/');
+}
+function formatDateShort(iso) {
     if (!iso)
-        return "—";
+        return '—';
     try {
-        return new Date(iso).toLocaleDateString(undefined, {
-            year: "numeric",
-            month: "short",
-            day: "numeric",
-        });
+        const d = new Date(iso);
+        if (isNaN(d.getTime()))
+            return '—';
+        const mo = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        return `${mo}/${day} ${hh}:${mm}`;
     }
     catch {
-        return iso;
+        return '—';
     }
 }
-function formatQuality(score) {
-    if (score === null || score === undefined)
-        return "—";
-    return score.toFixed(1);
+function formatDate(iso) {
+    if (!iso)
+        return '—';
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime()))
+            return '—';
+        return (`${d.getFullYear()}-` +
+            `${String(d.getMonth() + 1).padStart(2, '0')}-` +
+            `${String(d.getDate()).padStart(2, '0')}`);
+    }
+    catch {
+        return '—';
+    }
 }
-function formatLeadTime(seconds) {
-    if (seconds === null || seconds === undefined)
-        return "—";
-    return `${Math.round(seconds)}s`;
+function formatRelative(iso) {
+    if (!iso)
+        return '—';
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime()))
+            return '—';
+        const diffMs = Date.now() - d.getTime();
+        const sec = Math.round(diffMs / 1000);
+        if (sec < 60)
+            return `${sec}s ago`;
+        const min = Math.round(sec / 60);
+        if (min < 60)
+            return `${min}m ago`;
+        const hr = Math.round(min / 60);
+        if (hr < 24)
+            return `${hr}h ago`;
+        const days = Math.round(hr / 24);
+        return `${days}d ago`;
+    }
+    catch {
+        return '—';
+    }
 }
-function formatChangeFailureRate(rate) {
-    if (rate === null || rate === undefined)
-        return "—";
-    return `${(rate * 100).toFixed(1)}%`;
+function formatCost(val) {
+    if (val === null || val === undefined || Number.isNaN(val))
+        return '—';
+    return `$${val.toFixed(2)}`;
 }
-function formatRecoveryTime(seconds) {
-    if (seconds === null || seconds === undefined)
-        return "—";
-    return `${Math.round(seconds)}s`;
+function formatQuality(val) {
+    if (val === null || val === undefined || Number.isNaN(val))
+        return '—';
+    return val.toFixed(3);
 }
-function truncateTitle(title, max = 80) {
-    return title.length > max ? `${title.slice(0, max - 3)}...` : title;
+function truncate(s, max) {
+    if (!s)
+        return '—';
+    return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
-// ---------------------------------------------------------------------------
-// Stage pill
-// ---------------------------------------------------------------------------
-const STAGE_COLORS = {
-    DONE: "#6ee7b7",
-    FAILED: "#ff6b6b",
-    CALIBRATED: "#b47aff",
-    PLANNING: "#6ea8fe",
-    EXECUTING: "#ffd166",
-    AUDITING: "#ff9f43",
-    REPAIRING: "#ff9f43",
-};
-function stagePillStyle(stage) {
-    const color = STAGE_COLORS[stage] ?? "#888";
-    return {
-        display: "inline-block",
-        padding: "2px 8px",
-        borderRadius: 9999,
-        fontSize: 10,
-        fontFamily: "JetBrains Mono, monospace",
-        letterSpacing: "0.08em",
-        textTransform: "uppercase",
-        color,
-        border: `1px solid ${color}44`,
-        backgroundColor: `${color}11`,
-        whiteSpace: "nowrap",
-    };
+function stageBadgeClass(stage) {
+    const s = (stage ?? '').toUpperCase();
+    if (s === 'DONE' || s === 'CALIBRATED')
+        return 'badge ok';
+    if (s.includes('FAIL'))
+        return 'badge err';
+    if (s.includes('AUDIT'))
+        return 'badge info';
+    if (s.startsWith('REPAIR'))
+        return 'badge warn';
+    if (s === 'PLANNING' || s.startsWith('SPEC'))
+        return 'badge idle';
+    return 'badge active';
 }
-// ---------------------------------------------------------------------------
-// Breadcrumb
-// ---------------------------------------------------------------------------
-function Breadcrumb({ name }) {
-    return (_jsxs("nav", { "aria-label": "Breadcrumb", style: { fontFamily: "JetBrains Mono, monospace", fontSize: 13 }, children: [_jsx(Link, { to: "/", style: { color: "#6ee7b7", textDecoration: "none" }, "aria-label": "Back to repos list", children: "Repos" }), _jsx("span", { style: { color: "#888", margin: "0 6px" }, "aria-hidden": "true", children: ">" }), _jsx("span", { style: {
-                    color: "#e5e5e5",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    maxWidth: "min(60vw, 480px)",
-                    display: "inline-block",
-                    verticalAlign: "bottom",
-                }, title: name, children: name })] }));
+function eventChipClass(event) {
+    const e = (event ?? '').toLowerCase();
+    if (e.includes('denied') || e.includes('deny'))
+        return 'event-chip denied';
+    if (e.includes('postmortem') || e.includes('post-mortem'))
+        return 'event-chip post';
+    if (e.includes('repair'))
+        return 'event-chip repair';
+    if (e.includes('stage') || e.includes('transition'))
+        return 'event-chip stage';
+    return 'event-chip';
 }
-// ---------------------------------------------------------------------------
-// 404 view
-// ---------------------------------------------------------------------------
-function NotFoundView() {
-    return (_jsxs("div", { style: {
-            minHeight: "60vh",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 16,
-            fontFamily: "JetBrains Mono, monospace",
-            color: "#e5e5e5",
-            padding: "48px 24px",
-            textAlign: "center",
-        }, role: "main", "aria-label": "Repo not found", children: [_jsx("div", { style: { fontSize: 48, color: "#333", lineHeight: 1 }, children: "404" }), _jsx("div", { style: { fontSize: 20, color: "#e5e5e5" }, children: "Repo not found" }), _jsx("p", { style: { color: "#888", fontSize: 13, maxWidth: 360 }, children: "This repository slug is not registered. Check the URL or return to the repos list." }), _jsx(Link, { to: "/", style: {
-                    color: "#6ee7b7",
-                    textDecoration: "none",
-                    border: "1px solid #6ee7b744",
-                    borderRadius: 8,
-                    padding: "8px 20px",
-                    fontSize: 12,
-                    fontFamily: "JetBrains Mono, monospace",
-                    letterSpacing: "0.08em",
-                    backgroundColor: "#6ee7b711",
-                }, "aria-label": "Go back to repos list", children: "Back to Repos" })] }));
+function eventChipLabel(event) {
+    const e = (event ?? '').toLowerCase();
+    if (e.includes('denied') || e.includes('deny'))
+        return 'denied';
+    if (e.includes('postmortem') || e.includes('post-mortem'))
+        return 'postmortem';
+    if (e.includes('repair'))
+        return 'repair';
+    if (e.includes('stage') || e.includes('transition'))
+        return 'stage';
+    return 'event';
 }
-// ---------------------------------------------------------------------------
-// Task table skeleton
-// ---------------------------------------------------------------------------
-function TaskTableSkeleton() {
-    return (_jsxs("div", { role: "status", "aria-label": "Loading tasks", children: [_jsx("div", { style: {
-                    display: "grid",
-                    gridTemplateColumns: "2fr 3fr 1fr 1fr 1fr 1.2fr",
-                    gap: "0 16px",
-                    padding: "8px 0",
-                    borderBottom: "1px solid #222",
-                    marginBottom: 4,
-                }, children: ["ID", "TITLE", "STAGE", "QUALITY", "COST", "CREATED"].map((h) => (_jsx("div", { style: {
-                        fontSize: 10,
-                        fontFamily: "JetBrains Mono, monospace",
-                        color: "#555",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.1em",
-                        padding: "4px 0",
-                    }, children: h }, h))) }), Array.from({ length: 5 }).map((_, i) => (_jsxs("div", { style: {
-                    display: "grid",
-                    gridTemplateColumns: "2fr 3fr 1fr 1fr 1fr 1.2fr",
-                    gap: "0 16px",
-                    padding: "10px 0",
-                    borderBottom: "1px solid #1a1a1a",
-                }, children: [_jsx(Skeleton, { className: "h-3 bg-white/5", style: { width: "70%" } }), _jsx(Skeleton, { className: "h-3 bg-white/5", style: { width: "90%" } }), _jsx(Skeleton, { className: "h-3 bg-white/5", style: { width: "60%" } }), _jsx(Skeleton, { className: "h-3 bg-white/5", style: { width: "50%" } }), _jsx(Skeleton, { className: "h-3 bg-white/5", style: { width: "50%" } }), _jsx(Skeleton, { className: "h-3 bg-white/5", style: { width: "65%" } })] }, i)))] }));
+function healthFillColor(active, failed, total) {
+    if (total === 0)
+        return 'lime';
+    const failRatio = failed / Math.max(total, 1);
+    if (failRatio >= 0.25)
+        return 'red';
+    if (failRatio >= 0.10)
+        return 'orange';
+    if (active > 0)
+        return 'lime';
+    return 'teal';
 }
-function DoraMetrics({ loading, leadTime, cfr, recoveryTime }) {
-    return (_jsxs("section", { "aria-label": "DORA metrics", children: [_jsx("h2", { style: {
-                    fontFamily: "JetBrains Mono, monospace",
-                    fontSize: 11,
-                    color: "#555",
-                    textTransform: "uppercase",
-                    letterSpacing: "0.12em",
-                    margin: "0 0 12px",
-                }, children: "DORA Metrics" }), _jsx("div", { style: {
-                    display: "grid",
-                    gridTemplateColumns: "repeat(3, 1fr)",
-                    gap: 12,
-                }, children: [
-                    { label: "Lead Time", value: leadTime, detail: "Most recent DONE task" },
-                    { label: "Change Failure Rate", value: cfr, detail: "As % of changes" },
-                    { label: "Recovery Time", value: recoveryTime, detail: "Mean time to recover" },
-                ].map(({ label, value, detail }) => (_jsxs("div", { style: {
-                        background: "#111",
-                        border: "1px solid #222",
-                        borderRadius: 12,
-                        padding: "16px",
-                    }, children: [_jsx("div", { style: {
-                                fontSize: 10,
-                                fontFamily: "JetBrains Mono, monospace",
-                                color: "#555",
-                                textTransform: "uppercase",
-                                letterSpacing: "0.1em",
-                                marginBottom: 8,
-                            }, children: label }), loading ? (_jsx(Skeleton, { className: "h-6 bg-white/5", style: { width: "60%" } })) : (_jsx("div", { style: {
-                                fontSize: 22,
-                                fontFamily: "JetBrains Mono, monospace",
-                                color: value === "—" ? "#444" : "#6ee7b7",
-                                lineHeight: 1,
-                                marginBottom: 4,
-                            }, "aria-label": `${label}: ${value}`, children: value })), _jsx("div", { style: {
-                                fontSize: 11,
-                                fontFamily: "Inter, sans-serif",
-                                color: "#555",
-                                marginTop: 6,
-                            }, children: detail })] }, label))) })] }));
+function healthFillPercent(done, total) {
+    if (total === 0)
+        return 0;
+    return Math.min(100, Math.max(0, Math.round((done / total) * 100)));
 }
-function ProjectMeta({ preventionRuleCount, learnedRoutesCount }) {
-    const items = [
-        {
-            label: "Prevention Rules",
-            value: preventionRuleCount !== null ? String(preventionRuleCount) : "—",
-        },
-        {
-            label: "Learned Routes",
-            value: learnedRoutesCount !== null ? String(learnedRoutesCount) : "—",
-        },
-    ];
-    return (_jsx("div", { style: {
-            display: "flex",
-            gap: 12,
-            flexWrap: "wrap",
-        }, children: items.map(({ label, value }) => (_jsxs("div", { style: {
-                background: "#111",
-                border: "1px solid #222",
-                borderRadius: 12,
-                padding: "12px 20px",
-                minWidth: 140,
-            }, children: [_jsx("div", { style: {
-                        fontSize: 10,
-                        fontFamily: "JetBrains Mono, monospace",
-                        color: "#555",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.1em",
-                        marginBottom: 6,
-                    }, children: label }), _jsx("div", { style: {
-                        fontSize: 20,
-                        fontFamily: "JetBrains Mono, monospace",
-                        color: value === "—" ? "#444" : "#e5e5e5",
-                    }, "aria-label": `${label}: ${value}`, children: value })] }, label))) }));
-}
-function TaskRow({ task, slug, retro }) {
-    const navigate = useNavigate();
-    function handleKeyDown(e) {
-        if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            navigate(`/repo/${slug}/task/${task.task_id}`);
+// ─── Stall detection ──────────────────────────────────────────────────────────
+function stalledTaskCount(tasks) {
+    const now = Date.now();
+    let n = 0;
+    for (const t of tasks) {
+        if (TERMINAL_SET.has(t.stage))
+            continue;
+        try {
+            const ts = new Date(t.created_at).getTime();
+            if (!isNaN(ts) && now - ts > STALL_THRESHOLD_MS)
+                n += 1;
+        }
+        catch {
+            /* ignore */
         }
     }
-    const qualityDisplay = retro?.quality_score != null ? retro.quality_score.toFixed(1) : "—";
-    return (_jsxs("tr", { style: { cursor: "pointer" }, onClick: () => navigate(`/repo/${slug}/task/${task.task_id}`), onKeyDown: handleKeyDown, tabIndex: 0, role: "row", "aria-label": `Task ${task.task_id}: ${task.title}, stage ${task.stage}`, children: [_jsx("td", { style: {
-                    padding: "10px 12px 10px 0",
-                    borderBottom: "1px solid #1a1a1a",
-                    fontFamily: "JetBrains Mono, monospace",
-                    fontSize: 11,
-                    color: "#6ee7b7",
-                    whiteSpace: "nowrap",
-                    verticalAlign: "top",
-                }, children: task.task_id }), _jsx("td", { style: {
-                    padding: "10px 12px 10px 0",
-                    borderBottom: "1px solid #1a1a1a",
-                    fontFamily: "Inter, sans-serif",
-                    fontSize: 13,
-                    color: "#e5e5e5",
-                    maxWidth: 0,
-                    width: "100%",
-                    verticalAlign: "top",
-                }, children: _jsx("span", { style: {
-                        display: "block",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                    }, title: task.title, children: truncateTitle(task.title) }) }), _jsx("td", { style: {
-                    padding: "10px 12px 10px 0",
-                    borderBottom: "1px solid #1a1a1a",
-                    verticalAlign: "top",
-                    whiteSpace: "nowrap",
-                }, children: _jsx("span", { style: stagePillStyle(task.stage), children: task.stage }) }), _jsx("td", { style: {
-                    padding: "10px 12px 10px 0",
-                    borderBottom: "1px solid #1a1a1a",
-                    fontFamily: "JetBrains Mono, monospace",
-                    fontSize: 12,
-                    color: qualityDisplay === "—" ? "#888" : "#e5e5e5",
-                    whiteSpace: "nowrap",
-                    verticalAlign: "top",
-                }, "aria-label": `Quality: ${qualityDisplay}`, children: qualityDisplay }), _jsx("td", { style: {
-                    padding: "10px 12px 10px 0",
-                    borderBottom: "1px solid #1a1a1a",
-                    fontFamily: "JetBrains Mono, monospace",
-                    fontSize: 12,
-                    color: "#888",
-                    whiteSpace: "nowrap",
-                    verticalAlign: "top",
-                }, children: "\u2014" }), _jsx("td", { style: {
-                    padding: "10px 0 10px 0",
-                    borderBottom: "1px solid #1a1a1a",
-                    fontFamily: "JetBrains Mono, monospace",
-                    fontSize: 11,
-                    color: "#666",
-                    whiteSpace: "nowrap",
-                    verticalAlign: "top",
-                }, children: formatDate(task.created_at) })] }));
+    return n;
 }
-function RepoPageInner({ slug, name, projectPath, preventionRuleCount, learnedRoutesCount, }) {
-    // Task list — usePollingData appends &project=<context> automatically;
-    // the explicit project param in the URL ensures correct scoping regardless.
-    const tasksResult = usePollingData(`/api/tasks?project=${encodeURIComponent(projectPath)}`);
-    const tasks = tasksResult.data;
-    // All retrospectives for this project — usePollingData appends ?project= automatically.
-    const retrosResult = usePollingData("/api/retrospectives");
-    // O(1) lookup map: task_id → retrospective
-    const retroMap = useMemo(() => {
-        const map = new Map();
-        if (retrosResult.data) {
-            for (const r of retrosResult.data) {
-                map.set(r.task_id, r);
-            }
+// ─── 404 view ─────────────────────────────────────────────────────────────────
+function NotFoundView({ slug }) {
+    return (_jsxs("div", { role: "main", "aria-label": "Repository not found", children: [_jsxs("nav", { className: "breadcrumb", "aria-label": "Breadcrumb", children: [_jsx(Link, { to: "/", children: "home" }), _jsx("span", { className: "breadcrumb-sep", "aria-hidden": "true", children: "/" }), _jsx("span", { className: "breadcrumb-cur", children: "not found" })] }), _jsx("div", { className: "card", children: _jsx("div", { className: "card-body", children: _jsxs("div", { className: "empty-state", role: "status", children: [_jsx("div", { style: { marginBottom: 12, fontSize: 14, color: 'var(--bone)', fontWeight: 600 }, children: "Repository not found" }), _jsxs("div", { style: { marginBottom: 16 }, children: ["No registered project matches the slug ", _jsx("code", { children: slug || '(empty)' }), "."] }), _jsx(Link, { to: "/", className: "btn btn--ghost btn--sm", "aria-label": "Back to home", children: "\u2190 back to home" })] }) }) })] }));
+}
+// ─── Daemon status chip ───────────────────────────────────────────────────────
+function DaemonChip({ projectPath }) {
+    const result = usePollingData(projectPath ? `/api/maintainer-status?project=${encodeURIComponent(projectPath)}` : '', 15000, { globalScope: true });
+    if (result.loading && !result.data) {
+        return _jsx("span", { className: "badge idle", "aria-label": "Daemon status loading", children: "\u2026" });
+    }
+    if (result.error && !result.data) {
+        return _jsx("span", { className: "badge warn", "aria-label": "Daemon status unavailable", children: "unknown" });
+    }
+    const running = result.data?.running === true;
+    return (_jsx("span", { className: running ? 'badge ok' : 'badge idle', "aria-label": running ? 'Daemon running' : 'Daemon stopped', children: running ? 'RUNNING' : 'STOPPED' }));
+}
+const TABS = [
+    { key: 'overview', label: 'Overview' },
+    { key: 'tasks', label: 'Tasks' },
+    { key: 'events', label: 'Events' },
+    { key: 'agents', label: 'Agents' },
+];
+// ─── Reusable section helpers ─────────────────────────────────────────────────
+function LoadingBlock({ label }) {
+    return (_jsx("div", { className: "loading-row", role: "status", "aria-label": label, children: label }));
+}
+function ErrorBlock({ message, onRetry, }) {
+    return (_jsxs("div", { className: "alert-bar alert-bar--crit", role: "alert", children: [_jsx("span", { className: "alert-dot", "aria-hidden": "true" }), _jsx("span", { style: { flex: 1 }, children: message }), onRetry && (_jsx("button", { className: "btn btn--ghost btn--sm", onClick: onRetry, "aria-label": "Retry", children: "retry" }))] }));
+}
+function EmptyBlock({ message }) {
+    return (_jsx("div", { className: "empty-state", role: "status", children: message }));
+}
+function normalizeTasks(raw) {
+    if (!raw)
+        return null;
+    if (Array.isArray(raw))
+        return raw;
+    const maybe = raw;
+    if (Array.isArray(maybe.tasks))
+        return maybe.tasks;
+    return null;
+}
+function sortTasksByCreatedDesc(tasks) {
+    return [...tasks].sort((a, b) => {
+        const ta = new Date(a.created_at).getTime() || 0;
+        const tb = new Date(b.created_at).getTime() || 0;
+        return tb - ta;
+    });
+}
+function aggregateRetros(retros) {
+    const qualityScores = [];
+    const costByTask = new Map();
+    const qualityByTask = new Map();
+    if (!retros)
+        return { qualityScores, costByTask, qualityByTask };
+    for (const r of retros) {
+        if (typeof r.quality_score === 'number' && !Number.isNaN(r.quality_score)) {
+            qualityScores.push(r.quality_score);
+            qualityByTask.set(r.task_id, r.quality_score);
         }
-        return map;
-    }, [retrosResult.data]);
-    // Sort newest-first; memoized to avoid re-sort on every render.
-    const sortedTasks = useMemo(() => {
-        if (!tasks)
-            return null;
-        return [...tasks].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    }, [tasks]);
-    // Most recently completed task — used for DORA metrics.
-    const mostRecentDoneTask = useMemo(() => {
-        if (!tasks)
-            return null;
-        const done = tasks.filter((t) => t.stage === "DONE");
-        if (done.length === 0)
-            return null;
-        return done.reduce((latest, t) => {
-            const latestTime = new Date(latest.completed_at ?? latest.created_at).getTime();
-            const tTime = new Date(t.completed_at ?? t.created_at).getTime();
-            return tTime > latestTime ? t : latest;
-        });
-    }, [tasks]);
-    // DORA: fetch retrospective for the most recently done task only.
-    // Fall back to a sentinel URL that will 404 gracefully when there's no done task.
-    const retroUrl = mostRecentDoneTask
-        ? `/api/tasks/${encodeURIComponent(mostRecentDoneTask.task_id)}/retrospective?project=${encodeURIComponent(projectPath)}`
-        : `/api/tasks/__none__/retrospective?project=${encodeURIComponent(projectPath)}`;
-    const retroResult = usePollingData(retroUrl);
-    const retro = mostRecentDoneTask ? retroResult.data : null;
-    const doraValues = {
-        leadTime: formatLeadTime(retro?.lead_time_seconds),
-        cfr: formatChangeFailureRate(retro?.change_failure_rate),
-        recoveryTime: formatRecoveryTime(retro?.recovery_time_seconds),
-    };
-    const doraLoading = Boolean(mostRecentDoneTask) && retroResult.loading;
-    return (_jsxs("div", { style: {
-            background: "#0a0a0a",
-            minHeight: "100vh",
-            padding: "32px 24px",
-            maxWidth: 1200,
-            margin: "0 auto",
-        }, children: [_jsxs("div", { style: { marginBottom: 24 }, children: [_jsx(Breadcrumb, { name: name }), _jsx("h1", { style: {
-                            fontFamily: "Inter, sans-serif",
-                            fontSize: "clamp(22px, 5vw, 32px)",
-                            fontWeight: 600,
-                            color: "#e5e5e5",
-                            margin: "16px 0 0",
-                            lineHeight: 1.2,
-                            wordBreak: "break-word",
-                        }, children: name })] }), _jsx("div", { style: { marginBottom: 32 }, children: _jsx(ProjectMeta, { preventionRuleCount: preventionRuleCount, learnedRoutesCount: learnedRoutesCount }) }), _jsx("div", { style: {
-                    background: "#111",
-                    border: "1px solid #222",
-                    borderRadius: 16,
-                    padding: "24px",
-                    marginBottom: 32,
-                }, children: _jsx(DoraMetrics, { loading: doraLoading, leadTime: doraValues.leadTime, cfr: doraValues.cfr, recoveryTime: doraValues.recoveryTime }) }), _jsxs("section", { "aria-label": "Task list", children: [_jsxs("h2", { style: {
-                            fontFamily: "JetBrains Mono, monospace",
-                            fontSize: 11,
-                            color: "#555",
-                            textTransform: "uppercase",
-                            letterSpacing: "0.12em",
-                            margin: "0 0 12px",
-                        }, children: ["Tasks", sortedTasks !== null && (_jsxs("span", { style: {
-                                    marginLeft: 8,
-                                    color: "#444",
-                                    fontFamily: "JetBrains Mono, monospace",
-                                    fontSize: 11,
-                                }, children: ["(", sortedTasks.length, ")"] }))] }), tasksResult.loading && !tasks && _jsx(TaskTableSkeleton, {}), tasksResult.error && !tasks && (_jsxs("div", { style: {
-                            background: "#111",
-                            border: "1px solid #2a1a1a",
-                            borderRadius: 12,
-                            padding: 24,
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 12,
-                        }, role: "alert", children: [_jsx("p", { style: {
-                                    fontFamily: "Inter, sans-serif",
-                                    fontSize: 14,
-                                    color: "#e5e5e5",
-                                    margin: 0,
-                                }, children: "Failed to load tasks" }), _jsx("p", { style: {
-                                    fontFamily: "Inter, sans-serif",
-                                    fontSize: 12,
-                                    color: "#888",
-                                    margin: 0,
-                                }, children: tasksResult.error }), _jsx("button", { onClick: tasksResult.refetch, style: {
-                                    alignSelf: "flex-start",
-                                    background: "#6ee7b711",
-                                    border: "1px solid #6ee7b744",
-                                    borderRadius: 8,
-                                    padding: "6px 16px",
-                                    fontFamily: "JetBrains Mono, monospace",
-                                    fontSize: 11,
-                                    color: "#6ee7b7",
-                                    cursor: "pointer",
-                                    letterSpacing: "0.08em",
-                                }, "aria-label": "Retry loading tasks", children: "Retry" })] })), !tasksResult.loading && !tasksResult.error && sortedTasks !== null && sortedTasks.length === 0 && (_jsxs("div", { style: {
-                            background: "#111",
-                            border: "1px solid #222",
-                            borderRadius: 12,
-                            padding: "48px 24px",
-                            textAlign: "center",
-                        }, role: "status", "aria-label": "No tasks", children: [_jsx("p", { style: {
-                                    fontFamily: "Inter, sans-serif",
-                                    fontSize: 14,
-                                    color: "#666",
-                                    margin: 0,
-                                }, children: "No tasks yet" }), _jsx("p", { style: {
-                                    fontFamily: "Inter, sans-serif",
-                                    fontSize: 12,
-                                    color: "#444",
-                                    margin: "8px 0 0",
-                                }, children: "Tasks will appear here once work is queued for this project." })] })), sortedTasks !== null && sortedTasks.length > 0 && (_jsx("div", { style: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: _jsxs("table", { style: {
-                                width: "100%",
-                                borderCollapse: "collapse",
-                                tableLayout: "fixed",
-                            }, role: "table", "aria-label": "Task list", children: [_jsx("thead", { children: _jsx("tr", { role: "row", children: [
-                                            { label: "ID", style: { width: "14%" } },
-                                            { label: "Title", style: { width: "auto" } },
-                                            { label: "Stage", style: { width: "10%" } },
-                                            { label: "Quality", style: { width: "8%" } },
-                                            { label: "Cost", style: { width: "8%" } },
-                                            { label: "Created", style: { width: "12%" } },
-                                        ].map(({ label, style }) => (_jsx("th", { scope: "col", style: {
-                                                ...style,
-                                                textAlign: "left",
-                                                fontFamily: "JetBrains Mono, monospace",
-                                                fontSize: 10,
-                                                color: "#555",
-                                                textTransform: "uppercase",
-                                                letterSpacing: "0.1em",
-                                                padding: "8px 12px 8px 0",
-                                                borderBottom: "1px solid #222",
-                                                fontWeight: 400,
-                                            }, children: label }, label))) }) }), _jsx("tbody", { children: sortedTasks.map((task) => (_jsx(TaskRow, { task: task, slug: slug, retro: retroMap.get(task.task_id) }, task.task_id))) })] }) }))] })] }));
+        if (typeof r.cost_score === 'number' && !Number.isNaN(r.cost_score)) {
+            costByTask.set(r.task_id, r.cost_score);
+        }
+    }
+    return { qualityScores, costByTask, qualityByTask };
 }
-// ---------------------------------------------------------------------------
-// RepoPage — top-level; resolves slug → project, then delegates
-// ---------------------------------------------------------------------------
+function average(nums) {
+    if (nums.length === 0)
+        return null;
+    const sum = nums.reduce((a, b) => a + b, 0);
+    return sum / nums.length;
+}
+function StatsBar({ tasks, loading, avgQuality }) {
+    const active = tasks ? tasks.filter(t => !TERMINAL_SET.has(t.stage)).length : null;
+    const done = tasks ? tasks.filter(t => t.stage === 'DONE' || t.stage === 'CALIBRATED').length : null;
+    const failed = tasks ? tasks.filter(t => (t.stage || '').toUpperCase().includes('FAIL')).length : null;
+    const fmt = (n) => loading && n === null ? '…' : (n === null ? '—' : String(n));
+    return (_jsxs("div", { className: "stats-bar", role: "region", "aria-label": "Repository stats", children: [_jsxs("div", { className: "stat-tile lime", children: [_jsx("div", { className: "stat-label", children: "Active Tasks" }), _jsx("div", { className: "stat-value lime", "aria-label": `Active tasks: ${active ?? 'unknown'}`, children: fmt(active) }), _jsx("div", { className: "stat-sub", children: "non-terminal" })] }), _jsxs("div", { className: "stat-tile teal", children: [_jsx("div", { className: "stat-label", children: "Done Tasks" }), _jsx("div", { className: "stat-value teal", "aria-label": `Done tasks: ${done ?? 'unknown'}`, children: fmt(done) }), _jsx("div", { className: "stat-sub", children: "DONE + CALIBRATED" })] }), _jsxs("div", { className: "stat-tile red", children: [_jsx("div", { className: "stat-label", children: "Failed Tasks" }), _jsx("div", { className: "stat-value red", "aria-label": `Failed tasks: ${failed ?? 'unknown'}`, children: fmt(failed) }), _jsx("div", { className: "stat-sub", children: "includes *FAIL*" })] }), _jsxs("div", { className: "stat-tile orange", children: [_jsx("div", { className: "stat-label", children: "Avg Quality" }), _jsx("div", { className: 'stat-value ' +
+                            (avgQuality === null
+                                ? ''
+                                : avgQuality >= 0.8 ? 'teal'
+                                    : avgQuality >= 0.5 ? 'orange'
+                                        : 'red'), "aria-label": `Average quality: ${avgQuality === null ? 'unknown' : avgQuality.toFixed(3)}`, children: avgQuality === null ? '—' : avgQuality.toFixed(2) }), _jsx("div", { className: "stat-sub", children: "from retrospectives" })] })] }));
+}
+function OverviewTab(p) {
+    const total = p.tasks?.length ?? 0;
+    const active = p.tasks ? p.tasks.filter(t => !TERMINAL_SET.has(t.stage)).length : 0;
+    const done = p.tasks ? p.tasks.filter(t => t.stage === 'DONE' || t.stage === 'CALIBRATED').length : 0;
+    const failed = p.tasks ? p.tasks.filter(t => (t.stage || '').toUpperCase().includes('FAIL')).length : 0;
+    const lastUpdated = p.tasks && p.tasks.length
+        ? sortTasksByCreatedDesc(p.tasks)[0].created_at
+        : null;
+    const recent = p.tasks ? sortTasksByCreatedDesc(p.tasks).slice(0, RECENT_TASKS_LIMIT) : null;
+    const trustScore = p.avgQuality;
+    const healthCls = healthFillColor(active, failed, total);
+    const healthPct = healthFillPercent(done, total);
+    return (_jsxs(_Fragment, { children: [_jsxs("div", { className: "card", children: [_jsx("div", { className: "card-header", children: _jsx("span", { className: "card-title", children: "Repo Summary" }) }), _jsxs("div", { className: "card-body", children: [_jsxs("div", { style: { marginBottom: 18 }, children: [_jsxs("div", { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 6 }, children: [_jsx("span", { className: "stat-label", style: { marginBottom: 0 }, children: "Health" }), _jsxs("span", { className: "stat-sub", style: { marginTop: 0 }, children: [done, "/", total, " done \u00B7 ", failed, " failed"] })] }), _jsx("div", { className: "health-track", "aria-label": `Health ${healthPct}%`, children: _jsx("div", { className: `health-fill ${healthCls}`, style: { width: `${healthPct}%` }, role: "progressbar", "aria-valuenow": healthPct, "aria-valuemin": 0, "aria-valuemax": 100 }) })] }), _jsxs("div", { className: "kv", children: [_jsx("div", { className: "kv-key", children: "Path" }), _jsx("div", { className: "kv-val", title: p.projectPath, children: shortPath(p.projectPath) }), _jsx("div", { className: "kv-key", children: "Active tasks" }), _jsx("div", { className: "kv-val", children: p.tasksLoading && !p.tasks ? '…' : active }), _jsx("div", { className: "kv-key", children: "Last updated" }), _jsx("div", { className: "kv-val", children: formatRelative(lastUpdated) }), _jsx("div", { className: "kv-key", children: "Trust score" }), _jsx("div", { className: "kv-val", children: p.retroLoading && trustScore === null
+                                            ? '…'
+                                            : trustScore === null
+                                                ? '—'
+                                                : formatQuality(trustScore) })] })] })] }), _jsxs("div", { className: "card", children: [_jsx("div", { className: "card-header", children: _jsx("span", { className: "card-title", children: "Recent Tasks" }) }), p.tasksLoading && !p.tasks && (_jsx("div", { className: "card-body", children: _jsx(LoadingBlock, { label: "Loading tasks\u2026" }) })), p.tasksError && !p.tasks && (_jsx("div", { className: "card-body", children: _jsx(ErrorBlock, { message: `Failed to load tasks: ${p.tasksError}.`, onRetry: p.onRetryTasks }) })), recent && recent.length === 0 && (_jsx("div", { className: "card-body", children: _jsx(EmptyBlock, { message: "No tasks yet for this repository." }) })), recent && recent.length > 0 && (_jsx("div", { className: "card-body--flush", children: _jsx("div", { className: "table-wrap", children: _jsxs("table", { className: "dt", "aria-label": "Recent tasks", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { scope: "col", children: "Task ID" }), _jsx("th", { scope: "col", children: "Title" }), _jsx("th", { scope: "col", children: "Stage" }), _jsx("th", { scope: "col", children: "Quality" }), _jsx("th", { scope: "col", children: "Created" })] }) }), _jsx("tbody", { children: recent.map(task => {
+                                            const q = p.qualityByTask.get(task.task_id);
+                                            return (_jsxs("tr", { children: [_jsx("td", { className: "col-id", children: _jsx(Link, { to: `/repo/${slugUriPart(p.slug)}/task/${task.task_id}`, children: task.task_id }) }), _jsx("td", { className: "col-bone", title: task.title, children: truncate(task.title, TITLE_TRUNCATE_MAX) }), _jsx("td", { children: _jsx("span", { className: stageBadgeClass(task.stage), children: task.stage }) }), _jsx("td", { className: "col-mono col-dim", children: formatQuality(q) }), _jsx("td", { className: "col-mono col-dim", children: formatRelative(task.created_at) })] }, task.task_id));
+                                        }) })] }) }) }))] }), _jsxs("div", { className: "card", children: [_jsx("div", { className: "card-header", children: _jsx("span", { className: "card-title", children: "Recent Events" }) }), p.eventsLoading && !p.events && (_jsx("div", { className: "card-body", children: _jsx(LoadingBlock, { label: "Loading events\u2026" }) })), p.eventsError && !p.events && (_jsx("div", { className: "card-body", children: _jsx(ErrorBlock, { message: `Failed to load events: ${p.eventsError}.`, onRetry: p.onRetryEvents }) })), p.events && p.events.length === 0 && (_jsx("div", { className: "card-body", children: _jsx(EmptyBlock, { message: "No recent events for this repository." }) })), p.events && p.events.length > 0 && (_jsx("div", { className: "card-body--flush", children: _jsx("div", { className: "table-wrap", children: _jsxs("table", { className: "dt", "aria-label": "Recent events", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { scope: "col", children: "Time" }), _jsx("th", { scope: "col", children: "Type" }), _jsx("th", { scope: "col", children: "Event" }), _jsx("th", { scope: "col", children: "Detail" })] }) }), _jsx("tbody", { children: p.events.slice(0, RECENT_EVENTS_LIMIT).map((ev, i) => (_jsxs("tr", { children: [_jsx("td", { className: "col-mono col-dim", children: formatDateShort(ev.ts) }), _jsx("td", { children: _jsx("span", { className: eventChipClass(ev.event), children: eventChipLabel(ev.event) }) }), _jsx("td", { className: "col-mono col-bone", title: ev.event, children: truncate(ev.event, 40) }), _jsx("td", { className: "col-mono col-dim", title: summarizeEventDetail(ev), children: truncate(summarizeEventDetail(ev), DETAIL_TRUNCATE_MAX) })] }, `${ev.ts}-${i}`))) })] }) }) }))] })] }));
+}
+function summarizeEventDetail(ev) {
+    // pick a few common payload fields without exposing huge JSON
+    const keys = ['stage', 'task_id', 'agent', 'role', 'reason', 'path', 'mode', 'status'];
+    const parts = [];
+    for (const k of keys) {
+        const v = ev[k];
+        if (v === undefined || v === null)
+            continue;
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+            parts.push(`${k}=${String(v)}`);
+        }
+    }
+    return parts.length ? parts.join(' · ') : '—';
+}
+// Encode the slug for URL inclusion only — keep it stable across links.
+function slugUriPart(slug) {
+    return encodeURIComponent(slug);
+}
+function TasksTab(p) {
+    const [stageFilter, setStageFilter] = useState('');
+    const [search, setSearch] = useState('');
+    const stageOptions = p.tasks
+        ? Array.from(new Set(p.tasks.map(t => t.stage))).filter(Boolean).sort()
+        : [];
+    const filtered = (() => {
+        if (!p.tasks)
+            return null;
+        let list = p.tasks;
+        if (stageFilter)
+            list = list.filter(t => t.stage === stageFilter);
+        if (search.trim()) {
+            const q = search.trim().toLowerCase();
+            list = list.filter(t => (t.task_id || '').toLowerCase().includes(q) ||
+                (t.title || '').toLowerCase().includes(q));
+        }
+        return sortTasksByCreatedDesc(list);
+    })();
+    return (_jsxs("div", { className: "card", children: [_jsxs("div", { className: "card-header", children: [_jsxs("span", { className: "card-title", children: ["Tasks", filtered !== null ? ` (${filtered.length})` : ''] }), _jsxs("div", { style: { display: 'flex', gap: 8, alignItems: 'center' }, children: [_jsxs("select", { className: "search-input", style: { width: 160, paddingLeft: 14 }, value: stageFilter, onChange: e => setStageFilter(e.target.value), "aria-label": "Filter by stage", children: [_jsx("option", { value: "", children: "All stages" }), stageOptions.map(s => (_jsx("option", { value: s, children: s }, s)))] }), _jsxs("div", { className: "search-box", children: [_jsx("span", { className: "search-icon", "aria-hidden": "true", children: "\u2315" }), _jsx("input", { className: "search-input", placeholder: "Search tasks\u2026", value: search, onChange: e => setSearch(e.target.value), "aria-label": "Search tasks" })] })] })] }), p.loading && !p.tasks && (_jsx("div", { className: "card-body", children: _jsx(LoadingBlock, { label: "Loading tasks\u2026" }) })), p.error && !p.tasks && (_jsx("div", { className: "card-body", children: _jsx(ErrorBlock, { message: `Failed to load tasks: ${p.error}.`, onRetry: p.onRetry }) })), filtered && filtered.length === 0 && (_jsx("div", { className: "card-body", children: _jsx(EmptyBlock, { message: stageFilter || search
+                        ? `No tasks match the current filter.`
+                        : 'No tasks yet for this repository.' }) })), filtered && filtered.length > 0 && (_jsx("div", { className: "card-body--flush", children: _jsx("div", { className: "table-wrap", children: _jsxs("table", { className: "dt", "aria-label": "Tasks", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { scope: "col", children: "Task ID" }), _jsx("th", { scope: "col", children: "Title" }), _jsx("th", { scope: "col", children: "Stage" }), _jsx("th", { scope: "col", children: "Quality" }), _jsx("th", { scope: "col", children: "Est. Cost" }), _jsx("th", { scope: "col", children: "Created" })] }) }), _jsx("tbody", { children: filtered.map(task => {
+                                    const q = p.qualityByTask.get(task.task_id);
+                                    const c = p.costByTask.get(task.task_id);
+                                    return (_jsxs("tr", { children: [_jsx("td", { className: "col-id", children: _jsx(Link, { to: `/repo/${slugUriPart(p.slug)}/task/${task.task_id}`, "aria-label": `View task ${task.task_id}`, children: task.task_id }) }), _jsx("td", { className: "col-bone", title: task.title, children: truncate(task.title, TITLE_TRUNCATE_MAX) }), _jsx("td", { children: _jsx("span", { className: stageBadgeClass(task.stage), children: task.stage }) }), _jsx("td", { className: "col-mono col-dim", children: formatQuality(q) }), _jsx("td", { className: "col-mono", children: c === undefined
+                                                    ? _jsx("span", { className: "col-dim", children: "\u2014" })
+                                                    : _jsx("span", { className: "cost-val", children: formatCost(c) }) }), _jsx("td", { className: "col-mono col-dim", children: formatDateShort(task.created_at) })] }, task.task_id));
+                                }) })] }) }) }))] }));
+}
+function EventsTab({ slug, projectPath }) {
+    const result = usePollingData(projectPath
+        ? `/api/events-feed?limit=${EVENTS_TAB_LIMIT}&project=${encodeURIComponent(projectPath)}`
+        : '', 10000, { globalScope: true });
+    const events = (() => {
+        const raw = result.data;
+        if (!raw)
+            return null;
+        if (Array.isArray(raw))
+            return raw;
+        if (Array.isArray(raw.events))
+            return raw.events;
+        return null;
+    })();
+    return (_jsxs("div", { className: "card", children: [_jsx("div", { className: "card-header", children: _jsxs("span", { className: "card-title", children: ["Events", events !== null ? ` (${events.length})` : ''] }) }), result.loading && !events && (_jsx("div", { className: "card-body", children: _jsx(LoadingBlock, { label: "Loading events\u2026" }) })), result.error && !events && (_jsx("div", { className: "card-body", children: _jsx(ErrorBlock, { message: `Failed to load events: ${result.error}.`, onRetry: result.refetch }) })), events && events.length === 0 && (_jsx("div", { className: "card-body", children: _jsx(EmptyBlock, { message: "No recent events for this repository." }) })), events && events.length > 0 && (_jsx("div", { className: "card-body--flush", children: _jsx("div", { className: "table-wrap", children: _jsxs("table", { className: "dt", "aria-label": "Events", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { scope: "col", children: "Time" }), _jsx("th", { scope: "col", children: "Type" }), _jsx("th", { scope: "col", children: "Event" }), _jsx("th", { scope: "col", children: "Repo" }), _jsx("th", { scope: "col", children: "Detail" })] }) }), _jsx("tbody", { children: events.map((ev, i) => (_jsxs("tr", { children: [_jsx("td", { className: "col-mono col-dim", children: formatDateShort(ev.ts) }), _jsx("td", { children: _jsx("span", { className: eventChipClass(ev.event), children: eventChipLabel(ev.event) }) }), _jsx("td", { className: "col-mono col-bone", title: ev.event, children: ev.task_id
+                                                ? _jsx(Link, { to: `/repo/${slugUriPart(slug)}/task/${ev.task_id}`, children: truncate(ev.event, 40) })
+                                                : truncate(ev.event, 40) }), _jsx("td", { className: "col-mono col-dim", title: ev.repo_slug, children: truncate(ev.repo_slug, 32) }), _jsx("td", { className: "col-mono col-dim", title: summarizeEventDetail(ev), children: truncate(summarizeEventDetail(ev), DETAIL_TRUNCATE_MAX) })] }, `${ev.ts}-${i}`))) })] }) }) }))] }));
+}
+// ─── Agents tab ───────────────────────────────────────────────────────────────
+function AgentsTab({ projectPath }) {
+    const result = usePollingData(projectPath ? `/api/agents?project=${encodeURIComponent(projectPath)}` : '', 15000, { globalScope: true });
+    const agents = Array.isArray(result.data) ? result.data : null;
+    const sorted = agents
+        ? [...agents].sort((a, b) => (b.benchmark_summary?.mean_composite ?? -Infinity) -
+            (a.benchmark_summary?.mean_composite ?? -Infinity))
+        : null;
+    return (_jsxs("div", { className: "card", children: [_jsx("div", { className: "card-header", children: _jsxs("span", { className: "card-title", children: ["Learned Agents", sorted !== null ? ` (${sorted.length})` : ''] }) }), result.loading && !agents && (_jsx("div", { className: "card-body", children: _jsx(LoadingBlock, { label: "Loading agents\u2026" }) })), result.error && !agents && (_jsx("div", { className: "card-body", children: _jsx(ErrorBlock, { message: `Failed to load agents: ${result.error}.`, onRetry: result.refetch }) })), sorted && sorted.length === 0 && (_jsx("div", { className: "card-body", children: _jsx(EmptyBlock, { message: "No learned agents registered for this repository." }) })), sorted && sorted.length > 0 && (_jsx("div", { className: "card-body--flush", children: _jsx("div", { className: "table-wrap", children: _jsxs("table", { className: "dt", "aria-label": "Learned agents", children: [_jsx("thead", { children: _jsxs("tr", { children: [_jsx("th", { scope: "col", children: "Name" }), _jsx("th", { scope: "col", children: "Role" }), _jsx("th", { scope: "col", children: "Score" }), _jsx("th", { scope: "col", children: "Benchmark" }), _jsx("th", { scope: "col", children: "Last Eval" })] }) }), _jsx("tbody", { children: sorted.map(agent => {
+                                    const score = agent.benchmark_summary?.mean_composite;
+                                    const samples = agent.benchmark_summary?.sample_count;
+                                    const evalAt = agent.last_evaluation?.evaluated_at;
+                                    const scoreCls = score === undefined || score === null ? 'col-dim'
+                                        : score >= 0.8 ? ''
+                                            : score >= 0.5 ? ''
+                                                : '';
+                                    return (_jsxs("tr", { children: [_jsx("td", { className: "col-mono col-bone", title: agent.agent_name, children: truncate(agent.agent_name, 40) }), _jsx("td", { className: "col-dim", children: agent.role || '—' }), _jsx("td", { className: `col-mono ${scoreCls}`, children: score !== undefined && score !== null ? score.toFixed(3) : '—' }), _jsx("td", { className: "col-mono col-dim", children: samples !== undefined ? `${samples} runs` : '—' }), _jsx("td", { className: "col-mono col-dim", children: formatRelative(evalAt) })] }, `${agent.agent_name}:${agent.task_type}`));
+                                }) })] }) }) }))] }));
+}
+function RepoPageInner({ slug, projectPath }) {
+    const [tab, setTab] = useState('overview');
+    // Top-level tasks fetch — shared across stats bar, alert bar, overview, tasks
+    const tasksResult = usePollingData(projectPath ? `/api/tasks?project=${encodeURIComponent(projectPath)}` : '', 10000, { globalScope: true });
+    // Retrospectives — for avg quality + per-task quality/cost overlay
+    const retrosResult = usePollingData(projectPath ? `/api/retrospectives?project=${encodeURIComponent(projectPath)}` : '', 30000, { globalScope: true });
+    // Recent events — used by overview tab
+    const eventsResult = usePollingData(projectPath
+        ? `/api/events-feed?limit=${RECENT_EVENTS_LIMIT}&project=${encodeURIComponent(projectPath)}`
+        : '', 10000, { globalScope: true });
+    const tasks = normalizeTasks(tasksResult.data);
+    const stalled = tasks ? stalledTaskCount(tasks) : 0;
+    const retros = Array.isArray(retrosResult.data) ? retrosResult.data : null;
+    const aggregate = aggregateRetros(retros);
+    const avgQuality = average(aggregate.qualityScores);
+    const events = (() => {
+        const raw = eventsResult.data;
+        if (!raw)
+            return null;
+        if (Array.isArray(raw))
+            return raw;
+        if (Array.isArray(raw.events))
+            return raw.events;
+        return null;
+    })();
+    const handleRefreshAll = () => {
+        tasksResult.refetch();
+        retrosResult.refetch();
+        eventsResult.refetch();
+    };
+    const display = shortName(slug);
+    return (_jsxs("div", { role: "main", "aria-label": `Repository ${display}`, children: [_jsxs("nav", { className: "breadcrumb", "aria-label": "Breadcrumb", children: [_jsx(Link, { to: "/", children: "home" }), _jsx("span", { className: "breadcrumb-sep", "aria-hidden": "true", children: "/" }), _jsx("span", { className: "breadcrumb-cur", title: slug, style: {
+                            maxWidth: 'min(60vw, 480px)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            display: 'inline-block',
+                            verticalAlign: 'bottom',
+                        }, children: display })] }), _jsxs("div", { className: "page-header", children: [_jsxs("div", { className: "page-header-left", children: [_jsx("div", { className: "page-eyebrow", children: "Repository" }), _jsx("h1", { className: "page-title", title: slug, style: {
+                                    maxWidth: 'min(70vw, 720px)',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                }, children: display })] }), _jsxs("div", { className: "page-header-actions", children: [_jsx(DaemonChip, { projectPath: projectPath }), _jsx("button", { className: "btn btn--ghost btn--sm", onClick: handleRefreshAll, disabled: tasksResult.loading && !tasks, "aria-label": "Refresh repository data", children: tasksResult.loading && !tasks ? 'refreshing…' : '↺ refresh' })] })] }), _jsx(StatsBar, { tasks: tasks, loading: tasksResult.loading, avgQuality: avgQuality }), stalled > 0 && (_jsxs("div", { className: "alert-bar alert-bar--warn", role: "alert", "aria-live": "polite", children: [_jsx("span", { className: "alert-dot", "aria-hidden": "true" }), _jsxs("span", { children: [stalled, " task", stalled !== 1 ? 's' : '', " may be stalled \u2014 non-terminal for over 2 hours."] })] })), _jsx("div", { className: "page-tabs", role: "tablist", "aria-label": "Repository sections", children: TABS.map(t => (_jsx("button", { role: "tab", "aria-selected": tab === t.key, "aria-controls": `panel-${t.key}`, id: `tab-${t.key}`, className: `page-tab${tab === t.key ? ' active' : ''}`, onClick: () => setTab(t.key), children: t.label }, t.key))) }), _jsxs("div", { role: "tabpanel", id: `panel-${tab}`, "aria-labelledby": `tab-${tab}`, children: [tab === 'overview' && (_jsx(OverviewTab, { slug: slug, projectPath: projectPath, tasks: tasks, tasksLoading: tasksResult.loading, tasksError: tasksResult.error, avgQuality: avgQuality, qualityByTask: aggregate.qualityByTask, retroLoading: retrosResult.loading, retroError: retrosResult.error, events: events, eventsLoading: eventsResult.loading, eventsError: eventsResult.error, onRetryTasks: tasksResult.refetch, onRetryEvents: eventsResult.refetch })), tab === 'tasks' && (_jsx(TasksTab, { slug: slug, tasks: tasks, loading: tasksResult.loading, error: tasksResult.error, costByTask: aggregate.costByTask, qualityByTask: aggregate.qualityByTask, onRetry: tasksResult.refetch })), tab === 'events' && (_jsx(EventsTab, { slug: slug, projectPath: projectPath })), tab === 'agents' && (_jsx(AgentsTab, { projectPath: projectPath }))] })] }));
+}
+// ─── Top-level export ─────────────────────────────────────────────────────────
 export default function RepoPage() {
-    const { slug } = useParams();
+    const { slug: rawSlug } = useParams();
+    const slug = rawSlug ?? '';
     const projects = useProjectsSummary();
-    // Loading state: waiting for projects list
+    // Initial registry load
     if (projects.loading && !projects.data) {
-        return (_jsxs("div", { style: {
-                background: "#0a0a0a",
-                minHeight: "100vh",
-                padding: "32px 24px",
-                maxWidth: 1200,
-                margin: "0 auto",
-            }, role: "status", "aria-label": "Loading project", children: [_jsx(Skeleton, { className: "h-4 bg-white/5", style: { width: 180, marginBottom: 20 } }), _jsx(Skeleton, { className: "h-8 bg-white/5", style: { width: 320, marginBottom: 32 } }), _jsxs("div", { style: { display: "flex", gap: 12, marginBottom: 32 }, children: [_jsx(Skeleton, { className: "h-16 bg-white/5", style: { width: 140, borderRadius: 12 } }), _jsx(Skeleton, { className: "h-16 bg-white/5", style: { width: 140, borderRadius: 12 } })] }), _jsx("div", { style: {
-                        background: "#111",
-                        border: "1px solid #222",
-                        borderRadius: 16,
-                        padding: 24,
-                        marginBottom: 32,
-                        display: "grid",
-                        gridTemplateColumns: "repeat(3, 1fr)",
-                        gap: 12,
-                    }, children: Array.from({ length: 3 }).map((_, i) => (_jsxs("div", { style: { padding: 16, border: "1px solid #222", borderRadius: 12 }, children: [_jsx(Skeleton, { className: "h-3 bg-white/5", style: { width: "60%", marginBottom: 12 } }), _jsx(Skeleton, { className: "h-6 bg-white/5", style: { width: "50%" } })] }, i))) }), _jsx(TaskTableSkeleton, {})] }));
+        return (_jsxs("div", { role: "main", "aria-label": "Loading repository", children: [_jsxs("nav", { className: "breadcrumb", "aria-label": "Breadcrumb", children: [_jsx(Link, { to: "/", children: "home" }), _jsx("span", { className: "breadcrumb-sep", "aria-hidden": "true", children: "/" }), _jsx("span", { className: "breadcrumb-cur", children: shortName(slug) || '…' })] }), _jsx("div", { className: "card", children: _jsx("div", { className: "card-body", children: _jsx(LoadingBlock, { label: "Loading repository\u2026" }) }) })] }));
     }
-    // Projects fetch error (with no prior data) — still attempt slug match
-    // but if we have no data at all, show a generic error
+    // Registry fetch failed and no cached data
     if (projects.error && !projects.data) {
-        return (_jsxs("div", { style: {
-                minHeight: "60vh",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 16,
-                padding: "48px 24px",
-                textAlign: "center",
-            }, role: "alert", "aria-label": "Projects failed to load", children: [_jsx("p", { style: {
-                        fontFamily: "Inter, sans-serif",
-                        fontSize: 14,
-                        color: "#e5e5e5",
-                    }, children: "Unable to load project data" }), _jsx("p", { style: {
-                        fontFamily: "Inter, sans-serif",
-                        fontSize: 12,
-                        color: "#888",
-                        maxWidth: 360,
-                    }, children: projects.error }), _jsxs("div", { style: { display: "flex", gap: 12 }, children: [_jsx("button", { onClick: projects.refetch, style: {
-                                background: "#6ee7b711",
-                                border: "1px solid #6ee7b744",
-                                borderRadius: 8,
-                                padding: "8px 20px",
-                                fontFamily: "JetBrains Mono, monospace",
-                                fontSize: 11,
-                                color: "#6ee7b7",
-                                cursor: "pointer",
-                                letterSpacing: "0.08em",
-                            }, "aria-label": "Retry loading project", children: "Retry" }), _jsx(Link, { to: "/", style: {
-                                color: "#888",
-                                textDecoration: "none",
-                                border: "1px solid #333",
-                                borderRadius: 8,
-                                padding: "8px 20px",
-                                fontSize: 12,
-                                fontFamily: "JetBrains Mono, monospace",
-                                letterSpacing: "0.08em",
-                            }, "aria-label": "Back to repos list", children: "Back to Repos" })] })] }));
+        return (_jsxs("div", { role: "main", "aria-label": "Error loading repository", children: [_jsxs("nav", { className: "breadcrumb", "aria-label": "Breadcrumb", children: [_jsx(Link, { to: "/", children: "home" }), _jsx("span", { className: "breadcrumb-sep", "aria-hidden": "true", children: "/" }), _jsx("span", { className: "breadcrumb-cur", children: "error" })] }), _jsx(ErrorBlock, { message: `Unable to load project registry: ${projects.error}.`, onRetry: projects.refetch }), _jsx("div", { style: { marginTop: 12 }, children: _jsx(Link, { to: "/", className: "btn btn--ghost btn--sm", "aria-label": "Back to home", children: "\u2190 back to home" }) })] }));
     }
-    // Slug resolution: find project in the fetched list
-    const project = (projects.data ?? []).find((p) => p.slug === slug);
-    // 404: data loaded but slug not matched
+    // Resolve slug → project entry
+    const project = (projects.data ?? []).find(p => p.slug === slug);
     if (!project) {
-        return _jsx(NotFoundView, {});
+        return _jsx(NotFoundView, { slug: slug });
     }
-    return (_jsx(RepoPageInner, { slug: slug, name: project.name, projectPath: project.path, preventionRuleCount: project.prevention_rule_count, learnedRoutesCount: project.learned_routes_count }));
+    return _jsx(RepoPageInner, { slug: slug, projectPath: project.path });
 }

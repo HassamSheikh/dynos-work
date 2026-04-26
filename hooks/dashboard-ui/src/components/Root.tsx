@@ -1,106 +1,47 @@
-import { useState, useEffect } from "react";
-import { Outlet, NavLink, useLocation } from "react-router";
-import { House, Activity } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
+import { useState, useEffect } from 'react';
+import { Outlet, NavLink } from 'react-router';
 
-const NAV_ITEMS = [
-  { path: "/", icon: House, label: "REPOS" },
-] as const;
-
-function formatElapsed(totalSeconds: number): string {
-  const h = Math.floor(totalSeconds / 3600);
-  const m = Math.floor((totalSeconds % 3600) / 60);
-  const s = totalSeconds % 60;
-  return [h, m, s].map((v) => String(v).padStart(2, "0")).join(":");
+function Uptime() {
+  const [s, setS] = useState(0);
+  useEffect(() => { const id = setInterval(() => setS(p => p + 1), 1000); return () => clearInterval(id); }, []);
+  const fmt = (n: number) => String(n).padStart(2, '0');
+  return <span className="uptime-chip">{fmt(Math.floor(s/3600))}:{fmt(Math.floor((s%3600)/60))}:{fmt(s%60)}</span>;
 }
 
-function UptimeCounter() {
-  const [elapsed, setElapsed] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => setElapsed((prev) => prev + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  return (
-    <span
-      className="font-mono text-[10px] text-[#7A776E] tabular-nums whitespace-nowrap"
-      role="timer"
-      aria-label={`Uptime ${formatElapsed(elapsed)}`}
-    >
-      UPTIME {formatElapsed(elapsed)}
-    </span>
-  );
+function IconHome() {
+  return <svg viewBox="0 0 16 16" fill="none"><path d="M2 7L8 2l6 5v6a1 1 0 01-1 1H3a1 1 0 01-1-1V7z" stroke="currentColor" strokeWidth="1.3"/><path d="M5.5 14V9.5h5V14" stroke="currentColor" strokeWidth="1.3"/></svg>;
+}
+function LogoMark() {
+  return <svg viewBox="0 0 20 22" fill="none" width="18" height="18">
+    <rect x="2"  y="8"  width="4" height="12" rx="1" fill="rgba(189,240,0,0.7)"/>
+    <rect x="8"  y="2"  width="4" height="18" rx="1" fill="#BDF000"/>
+    <rect x="14" y="10" width="4" height="10" rx="1" fill="rgba(189,240,0,0.4)"/>
+  </svg>;
 }
 
 export default function Root() {
-  const location = useLocation();
-
   return (
-    <div className="min-h-screen bg-[#090909] text-[#e5e5e5] font-sans overflow-hidden flex flex-col relative selection:bg-[#6ee7b7]/30">
-      <div className="cosmic-bg" aria-hidden="true" />
-
-      <header className="relative z-20 flex items-center justify-between px-4 sm:px-6 py-4 border-b border-white/6 bg-[#090909]/80 backdrop-blur-md">
-        <div className="flex items-center gap-3 min-w-0">
-          <Activity className="w-5 h-5 text-[#6ee7b7] shrink-0" aria-hidden="true" />
-          <span className="font-mono text-xs font-semibold text-[#6ee7b7] tracking-widest whitespace-nowrap">
-            DYNOS-WORK
-          </span>
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="sidebar-logo">
+          <div className="sidebar-logo-mark"><LogoMark /></div>
+          <div>
+            <div className="sidebar-logo-name">dynos</div>
+            <div className="sidebar-logo-sub">operator</div>
+          </div>
         </div>
-        <UptimeCounter />
-      </header>
-
-      <div className="flex-1 flex relative z-10 overflow-hidden">
-        <nav
-          className="hidden md:flex flex-col items-center w-16 lg:w-20 border-r border-white/6 bg-[#090909]/60 backdrop-blur-sm py-6 gap-8 z-20 shrink-0"
-          aria-label="Main navigation"
-        >
-          {NAV_ITEMS.map((item) => {
-            const active = item.path === "/" ? location.pathname === "/" : location.pathname.startsWith(item.path);
-            return (
-              <NavLink
-                key={item.path}
-                to={item.path}
-                className="relative group flex items-center justify-center w-full"
-                aria-label={item.label}
-                end={item.path === "/"}
-              >
-                <div
-                  className={`p-3 rounded-xl transition-all duration-300 ${
-                    active ? "bg-[#6ee7b7]/10 shadow-[0_0_15px_rgba(110,231,183,0.1)]" : "hover:bg-white/5"
-                  }`}
-                >
-                  <item.icon
-                    className={`w-5 h-5 transition-colors ${
-                      active ? "text-[#6ee7b7]" : "text-slate-500 group-hover:text-[#6ee7b7]"
-                    }`}
-                    aria-hidden="true"
-                  />
-                </div>
-                {active && (
-                  <motion.div
-                    layoutId="activeNav"
-                    className="absolute right-0 top-1/2 -translate-y-1/2 w-1 h-8 bg-[#6ee7b7] rounded-l shadow-[0_0_8px_rgba(110,231,183,0.8)]"
-                  />
-                )}
-              </NavLink>
-            );
-          })}
-        </nav>
-
-        <main className="flex-1 overflow-x-hidden overflow-y-auto relative">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={location.pathname}
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -12 }}
-              transition={{ duration: 0.28, ease: "easeOut" }}
-            >
-              <Outlet />
-            </motion.div>
-          </AnimatePresence>
-        </main>
+        <div className="sidebar-section">
+          <div className="sidebar-section-label">Monitor</div>
+          <NavLink to="/" end className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
+            <IconHome /><span>Home</span>
+          </NavLink>
+        </div>
+        <div style={{ marginTop: 'auto' }}>
+          <div className="sidebar-footer"><Uptime /></div>
+        </div>
+      </aside>
+      <div className="page-wrap">
+        <div className="page-body"><Outlet /></div>
       </div>
     </div>
   );

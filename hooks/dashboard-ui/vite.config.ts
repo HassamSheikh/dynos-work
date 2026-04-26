@@ -1,6 +1,5 @@
 import path from "path";
 import react from "@vitejs/plugin-react";
-import tailwindcss from "@tailwindcss/vite";
 import { defineConfig, type Plugin } from "vite";
 
 // Conditional import: the custom plugin is created by seg-4.
@@ -14,7 +13,7 @@ try {
 }
 
 export default defineConfig({
-  plugins: [react(), tailwindcss(), dynosApi()],
+  plugins: [react(), dynosApi()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

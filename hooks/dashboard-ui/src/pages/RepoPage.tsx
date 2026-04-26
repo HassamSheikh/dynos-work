@@ -1,1603 +1,1145 @@
-import { useMemo, useRef, useEffect } from "react";
-import { Link, useParams, useNavigate } from "react-router";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-} from "recharts";
-import { useProjectsSummary, usePollingData, useAutoRefresh, TERMINAL_STAGES } from "@/data/hooks";
-import { Skeleton } from "@/components/ui/skeleton";
-import type { TaskManifest, TaskRetrospective, ExecutionLogResponse } from "@/data/types";
+/**
+ * RepoPage — per-repository mission control board.
+ * Route: /repo/:slug
+ *
+ * Resolves slug → projectPath via /api/projects-summary, then renders
+ * tabbed sections (Overview / Tasks / Events / Agents) with:
+ *   - breadcrumb + page header (eyebrow + title + daemon chip + refresh)
+ *   - 4-tile stats bar (active / done / failed / avg quality)
+ *   - alert bar when any non-terminal task is stalled (>2h since created)
+ *
+ * Styling uses ONLY the index.css design system classes; no Tailwind.
+ */
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import { useState } from 'react';
+import { useParams, Link } from 'react-router';
+import { usePollingData, useProjectsSummary, TERMINAL_STAGES } from '../data/hooks';
+import type {
+  TaskManifest,
+  LearnedAgent,
+  EventsFeedEntry,
+  TaskRetrospective,
+  MaintainerStatus,
+} from '../data/types';
 
-function formatDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const STALL_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+const TERMINAL_SET = new Set<string>(TERMINAL_STAGES as readonly string[]);
+const TITLE_TRUNCATE_MAX = 80;
+const DETAIL_TRUNCATE_MAX = 100;
+const RECENT_TASKS_LIMIT = 8;
+const RECENT_EVENTS_LIMIT = 10;
+const EVENTS_TAB_LIMIT = 50;
+
+const PATH_NOISE_PARTS = new Set([
+  'users', 'hassam', 'documents', 'home', 'library', 'local',
+]);
+
+// ─── Pure helpers ─────────────────────────────────────────────────────────────
+
+function shortName(slug: string): string {
+  if (!slug) return '—';
+  const parts = slug.split('-').filter(p => p.length > 0 && !PATH_NOISE_PARTS.has(p.toLowerCase()));
+  if (parts.length === 0) return slug;
+  return parts.join('-');
+}
+
+function shortPath(p: string): string {
+  if (!p) return '—';
+  return p.replace(/^\/?Users\/[^/]+\/Documents\//, '~/');
+}
+
+function formatDateShort(iso: string | null | undefined): string {
+  if (!iso) return '—';
   try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `${mo}/${day} ${hh}:${mm}`;
   } catch {
-    return iso;
+    return '—';
   }
 }
 
-function formatQuality(score: number | null | undefined): string {
-  if (score === null || score === undefined) return "—";
-  return score.toFixed(1);
+function formatDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    return (
+      `${d.getFullYear()}-` +
+      `${String(d.getMonth() + 1).padStart(2, '0')}-` +
+      `${String(d.getDate()).padStart(2, '0')}`
+    );
+  } catch {
+    return '—';
+  }
 }
 
-function formatLeadTime(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined) return "—";
-  return `${Math.round(seconds)}s`;
+function formatRelative(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    const diffMs = Date.now() - d.getTime();
+    const sec = Math.round(diffMs / 1000);
+    if (sec < 60) return `${sec}s ago`;
+    const min = Math.round(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.round(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const days = Math.round(hr / 24);
+    return `${days}d ago`;
+  } catch {
+    return '—';
+  }
 }
 
-function formatChangeFailureRate(rate: number | null | undefined): string {
-  if (rate === null || rate === undefined) return "—";
-  return `${(rate * 100).toFixed(1)}%`;
+function formatCost(val: number | null | undefined): string {
+  if (val === null || val === undefined || Number.isNaN(val)) return '—';
+  return `$${val.toFixed(2)}`;
 }
 
-function formatRecoveryTime(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined) return "—";
-  return `${Math.round(seconds)}s`;
+function formatQuality(val: number | null | undefined): string {
+  if (val === null || val === undefined || Number.isNaN(val)) return '—';
+  return val.toFixed(3);
 }
 
-function truncateTitle(title: string, max = 80): string {
-  return title.length > max ? `${title.slice(0, max - 3)}...` : title;
+function truncate(s: string | null | undefined, max: number): string {
+  if (!s) return '—';
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
-// ---------------------------------------------------------------------------
-// Cost computation helpers
-// ---------------------------------------------------------------------------
+function stageBadgeClass(stage: string | null | undefined): string {
+  const s = (stage ?? '').toUpperCase();
+  if (s === 'DONE' || s === 'CALIBRATED')        return 'badge ok';
+  if (s.includes('FAIL'))                          return 'badge err';
+  if (s.includes('AUDIT'))                         return 'badge info';
+  if (s.startsWith('REPAIR'))                      return 'badge warn';
+  if (s === 'PLANNING' || s.startsWith('SPEC'))    return 'badge idle';
+  return 'badge active';
+}
 
-const RATES = {
-  haiku: { in: 0.80, out: 4.00 },
-  sonnet: { in: 3.00, out: 15.00 },
-  opus: { in: 15.00, out: 75.00 },
-};
+function eventChipClass(event: string | null | undefined): string {
+  const e = (event ?? '').toLowerCase();
+  if (e.includes('denied') || e.includes('deny'))            return 'event-chip denied';
+  if (e.includes('postmortem') || e.includes('post-mortem')) return 'event-chip post';
+  if (e.includes('repair'))                                  return 'event-chip repair';
+  if (e.includes('stage') || e.includes('transition'))       return 'event-chip stage';
+  return 'event-chip';
+}
 
-function getRate(model: string): { in: number; out: number } | null {
-  const m = model.toLowerCase();
-  if (m.includes("haiku")) return RATES.haiku;
-  if (m.includes("sonnet")) return RATES.sonnet;
-  if (m.includes("opus")) return RATES.opus;
+function eventChipLabel(event: string | null | undefined): string {
+  const e = (event ?? '').toLowerCase();
+  if (e.includes('denied') || e.includes('deny'))            return 'denied';
+  if (e.includes('postmortem') || e.includes('post-mortem')) return 'postmortem';
+  if (e.includes('repair'))                                  return 'repair';
+  if (e.includes('stage') || e.includes('transition'))       return 'stage';
+  return 'event';
+}
+
+function healthFillColor(active: number, failed: number, total: number): string {
+  if (total === 0) return 'lime';
+  const failRatio = failed / Math.max(total, 1);
+  if (failRatio >= 0.25) return 'red';
+  if (failRatio >= 0.10) return 'orange';
+  if (active > 0)        return 'lime';
+  return 'teal';
+}
+
+function healthFillPercent(done: number, total: number): number {
+  if (total === 0) return 0;
+  return Math.min(100, Math.max(0, Math.round((done / total) * 100)));
+}
+
+// ─── Stall detection ──────────────────────────────────────────────────────────
+
+function stalledTaskCount(tasks: TaskManifest[]): number {
+  const now = Date.now();
+  let n = 0;
+  for (const t of tasks) {
+    if (TERMINAL_SET.has(t.stage)) continue;
+    try {
+      const ts = new Date(t.created_at).getTime();
+      if (!isNaN(ts) && now - ts > STALL_THRESHOLD_MS) n += 1;
+    } catch {
+      /* ignore */
+    }
+  }
+  return n;
+}
+
+// ─── 404 view ─────────────────────────────────────────────────────────────────
+
+function NotFoundView({ slug }: { slug: string }) {
+  return (
+    <div role="main" aria-label="Repository not found">
+      <nav className="breadcrumb" aria-label="Breadcrumb">
+        <Link to="/">home</Link>
+        <span className="breadcrumb-sep" aria-hidden="true">/</span>
+        <span className="breadcrumb-cur">not found</span>
+      </nav>
+      <div className="card">
+        <div className="card-body">
+          <div className="empty-state" role="status">
+            <div style={{ marginBottom: 12, fontSize: 14, color: 'var(--bone)', fontWeight: 600 }}>
+              Repository not found
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              No registered project matches the slug <code>{slug || '(empty)'}</code>.
+            </div>
+            <Link to="/" className="btn btn--ghost btn--sm" aria-label="Back to home">
+              ← back to home
+            </Link>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Daemon status chip ───────────────────────────────────────────────────────
+
+function DaemonChip({ projectPath }: { projectPath: string }) {
+  const result = usePollingData<MaintainerStatus>(
+    projectPath ? `/api/maintainer-status?project=${encodeURIComponent(projectPath)}` : '',
+    15000,
+    { globalScope: true },
+  );
+
+  if (result.loading && !result.data) {
+    return <span className="badge idle" aria-label="Daemon status loading">…</span>;
+  }
+  if (result.error && !result.data) {
+    return <span className="badge warn" aria-label="Daemon status unavailable">unknown</span>;
+  }
+  const running = result.data?.running === true;
+  return (
+    <span
+      className={running ? 'badge ok' : 'badge idle'}
+      aria-label={running ? 'Daemon running' : 'Daemon stopped'}
+    >
+      {running ? 'RUNNING' : 'STOPPED'}
+    </span>
+  );
+}
+
+// ─── Tabs ─────────────────────────────────────────────────────────────────────
+
+type TabKey = 'overview' | 'tasks' | 'events' | 'agents';
+
+const TABS: Array<{ key: TabKey; label: string }> = [
+  { key: 'overview', label: 'Overview' },
+  { key: 'tasks',    label: 'Tasks' },
+  { key: 'events',   label: 'Events' },
+  { key: 'agents',   label: 'Agents' },
+];
+
+// ─── Reusable section helpers ─────────────────────────────────────────────────
+
+function LoadingBlock({ label }: { label: string }) {
+  return (
+    <div className="loading-row" role="status" aria-label={label}>
+      {label}
+    </div>
+  );
+}
+
+function ErrorBlock({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry?: () => void;
+}) {
+  return (
+    <div className="alert-bar alert-bar--crit" role="alert">
+      <span className="alert-dot" aria-hidden="true" />
+      <span style={{ flex: 1 }}>{message}</span>
+      {onRetry && (
+        <button
+          className="btn btn--ghost btn--sm"
+          onClick={onRetry}
+          aria-label="Retry"
+        >
+          retry
+        </button>
+      )}
+    </div>
+  );
+}
+
+function EmptyBlock({ message }: { message: string }) {
+  return (
+    <div className="empty-state" role="status">
+      {message}
+    </div>
+  );
+}
+
+// ─── Tasks data shaping ───────────────────────────────────────────────────────
+
+interface TasksShape {
+  tasks: TaskManifest[];
+}
+
+function normalizeTasks(raw: unknown): TaskManifest[] | null {
+  if (!raw) return null;
+  if (Array.isArray(raw)) return raw as TaskManifest[];
+  const maybe = raw as TasksShape;
+  if (Array.isArray(maybe.tasks)) return maybe.tasks;
   return null;
 }
 
-function computeCost(retro: TaskRetrospective): number {
-  const tum = retro.token_usage_by_model;
-  if (!tum) return 0;
-  return Object.entries(tum).reduce((sum, [model, usage]) => {
-    const rate = getRate(model);
-    if (!rate) return sum;
-    return sum + (usage.input_tokens / 1e6 * rate.in) + (usage.output_tokens / 1e6 * rate.out);
-  }, 0);
+function sortTasksByCreatedDesc(tasks: TaskManifest[]): TaskManifest[] {
+  return [...tasks].sort((a, b) => {
+    const ta = new Date(a.created_at).getTime() || 0;
+    const tb = new Date(b.created_at).getTime() || 0;
+    return tb - ta;
+  });
 }
 
-function formatCostUsd(cost: number): string {
-  return `$${cost.toFixed(4)}`;
+// ─── Stats from retrospectives ────────────────────────────────────────────────
+
+interface RetroAggregate {
+  qualityScores: number[];
+  costByTask: Map<string, number>;
+  qualityByTask: Map<string, number>;
 }
 
-function modelBreakdown(retro: TaskRetrospective): string {
-  const tum = retro.token_usage_by_model;
-  if (!tum) return "—";
-  const models = Object.keys(tum).filter((m) => getRate(m) !== null);
-  if (models.length === 0) return "—";
-  return models.join(", ");
-}
-
-// ---------------------------------------------------------------------------
-// Section heading style (reused for all 4 analytics sections)
-// ---------------------------------------------------------------------------
-
-const sectionHeadingStyle: React.CSSProperties = {
-  color: "#555",
-  fontSize: "11px",
-  fontFamily: "JetBrains Mono, monospace",
-  textTransform: "uppercase",
-  letterSpacing: "0.12em",
-  marginBottom: "12px",
-  margin: "0 0 12px",
-  fontWeight: 400,
-};
-
-// ---------------------------------------------------------------------------
-// Stage pill
-// ---------------------------------------------------------------------------
-
-const STAGE_COLORS: Record<string, string> = {
-  DONE: "#6ee7b7",
-  FAILED: "#ff6b6b",
-  CALIBRATED: "#b47aff",
-  PLANNING: "#6ea8fe",
-  EXECUTING: "#ffd166",
-  AUDITING: "#ff9f43",
-  REPAIRING: "#ff9f43",
-};
-
-function stagePillStyle(stage: string): React.CSSProperties {
-  const color = STAGE_COLORS[stage] ?? "#888";
-  return {
-    display: "inline-block",
-    padding: "2px 8px",
-    borderRadius: 9999,
-    fontSize: 10,
-    fontFamily: "JetBrains Mono, monospace",
-    letterSpacing: "0.08em",
-    textTransform: "uppercase" as const,
-    color,
-    border: `1px solid ${color}44`,
-    backgroundColor: `${color}11`,
-    whiteSpace: "nowrap" as const,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Breadcrumb
-// ---------------------------------------------------------------------------
-
-function Breadcrumb({ name }: { name: string }) {
-  return (
-    <nav aria-label="Breadcrumb" style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 13 }}>
-      <Link
-        to="/"
-        style={{ color: "#6ee7b7", textDecoration: "none" }}
-        aria-label="Back to repos list"
-      >
-        Repos
-      </Link>
-      <span style={{ color: "#888", margin: "0 6px" }} aria-hidden="true">&gt;</span>
-      <span
-        style={{
-          color: "#e5e5e5",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-          maxWidth: "min(60vw, 480px)",
-          display: "inline-block",
-          verticalAlign: "bottom",
-        }}
-        title={name}
-      >
-        {name}
-      </span>
-    </nav>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// 404 view
-// ---------------------------------------------------------------------------
-
-function NotFoundView() {
-  return (
-    <div
-      style={{
-        minHeight: "60vh",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 16,
-        fontFamily: "JetBrains Mono, monospace",
-        color: "#e5e5e5",
-        padding: "48px 24px",
-        textAlign: "center",
-      }}
-      role="main"
-      aria-label="Repo not found"
-    >
-      <div style={{ fontSize: 48, color: "#333", lineHeight: 1 }}>404</div>
-      <div style={{ fontSize: 20, color: "#e5e5e5" }}>Repo not found</div>
-      <p style={{ color: "#888", fontSize: 13, maxWidth: 360 }}>
-        This repository slug is not registered. Check the URL or return to the repos list.
-      </p>
-      <Link
-        to="/"
-        style={{
-          color: "#6ee7b7",
-          textDecoration: "none",
-          border: "1px solid #6ee7b744",
-          borderRadius: 8,
-          padding: "8px 20px",
-          fontSize: 12,
-          fontFamily: "JetBrains Mono, monospace",
-          letterSpacing: "0.08em",
-          backgroundColor: "#6ee7b711",
-        }}
-        aria-label="Go back to repos list"
-      >
-        Back to Repos
-      </Link>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Task table skeleton
-// ---------------------------------------------------------------------------
-
-function TaskTableSkeleton() {
-  return (
-    <div role="status" aria-label="Loading tasks">
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "2fr 3fr 1fr 1fr 1fr 1.2fr",
-          gap: "0 16px",
-          padding: "8px 0",
-          borderBottom: "1px solid #222",
-          marginBottom: 4,
-        }}
-      >
-        {["ID", "TITLE", "STAGE", "QUALITY", "COST", "CREATED"].map((h) => (
-          <div
-            key={h}
-            style={{
-              fontSize: 10,
-              fontFamily: "JetBrains Mono, monospace",
-              color: "#555",
-              textTransform: "uppercase",
-              letterSpacing: "0.1em",
-              padding: "4px 0",
-            }}
-          >
-            {h}
-          </div>
-        ))}
-      </div>
-      {Array.from({ length: 5 }).map((_, i) => (
-        <div
-          key={i}
-          style={{
-            display: "grid",
-            gridTemplateColumns: "2fr 3fr 1fr 1fr 1fr 1.2fr",
-            gap: "0 16px",
-            padding: "10px 0",
-            borderBottom: "1px solid #1a1a1a",
-          }}
-        >
-          <Skeleton className="h-3 bg-white/5" style={{ width: "70%" }} />
-          <Skeleton className="h-3 bg-white/5" style={{ width: "90%" }} />
-          <Skeleton className="h-3 bg-white/5" style={{ width: "60%" }} />
-          <Skeleton className="h-3 bg-white/5" style={{ width: "50%" }} />
-          <Skeleton className="h-3 bg-white/5" style={{ width: "50%" }} />
-          <Skeleton className="h-3 bg-white/5" style={{ width: "65%" }} />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// DORA metrics section
-// ---------------------------------------------------------------------------
-
-interface DoraMetricsProps {
-  loading: boolean;
-  leadTime: string;
-  cfr: string;
-  recoveryTime: string;
-}
-
-function DoraMetrics({ loading, leadTime, cfr, recoveryTime }: DoraMetricsProps) {
-  return (
-    <section aria-label="DORA metrics">
-      <h2
-        style={{
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 11,
-          color: "#555",
-          textTransform: "uppercase",
-          letterSpacing: "0.12em",
-          margin: "0 0 12px",
-        }}
-      >
-        DORA Metrics
-      </h2>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
-          gap: 12,
-        }}
-      >
-        {[
-          { label: "Lead Time", value: leadTime, detail: "Most recent DONE task" },
-          { label: "Change Failure Rate", value: cfr, detail: "As % of changes" },
-          { label: "Recovery Time", value: recoveryTime, detail: "Mean time to recover" },
-        ].map(({ label, value, detail }) => (
-          <div
-            key={label}
-            style={{
-              background: "#111",
-              border: "1px solid #222",
-              borderRadius: 12,
-              padding: "16px",
-            }}
-          >
-            <div
-              style={{
-                fontSize: 10,
-                fontFamily: "JetBrains Mono, monospace",
-                color: "#555",
-                textTransform: "uppercase",
-                letterSpacing: "0.1em",
-                marginBottom: 8,
-              }}
-            >
-              {label}
-            </div>
-            {loading ? (
-              <Skeleton className="h-6 bg-white/5" style={{ width: "60%" }} />
-            ) : (
-              <div
-                style={{
-                  fontSize: 22,
-                  fontFamily: "JetBrains Mono, monospace",
-                  color: value === "—" ? "#444" : "#6ee7b7",
-                  lineHeight: 1,
-                  marginBottom: 4,
-                }}
-                aria-label={`${label}: ${value}`}
-              >
-                {value}
-              </div>
-            )}
-            <div
-              style={{
-                fontSize: 11,
-                fontFamily: "Inter, sans-serif",
-                color: "#555",
-                marginTop: 6,
-              }}
-            >
-              {detail}
-            </div>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Project meta section (prevention rules + learned routes)
-// ---------------------------------------------------------------------------
-
-interface ProjectMetaProps {
-  preventionRuleCount: number | null;
-  learnedRoutesCount: number | null;
-}
-
-function ProjectMeta({ preventionRuleCount, learnedRoutesCount }: ProjectMetaProps) {
-  const items = [
-    {
-      label: "Prevention Rules",
-      value: preventionRuleCount !== null ? String(preventionRuleCount) : "—",
-    },
-    {
-      label: "Learned Routes",
-      value: learnedRoutesCount !== null ? String(learnedRoutesCount) : "—",
-    },
-  ];
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        gap: 12,
-        flexWrap: "wrap" as const,
-      }}
-    >
-      {items.map(({ label, value }) => (
-        <div
-          key={label}
-          style={{
-            background: "#111",
-            border: "1px solid #222",
-            borderRadius: 12,
-            padding: "12px 20px",
-            minWidth: 140,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 10,
-              fontFamily: "JetBrains Mono, monospace",
-              color: "#555",
-              textTransform: "uppercase",
-              letterSpacing: "0.1em",
-              marginBottom: 6,
-            }}
-          >
-            {label}
-          </div>
-          <div
-            style={{
-              fontSize: 20,
-              fontFamily: "JetBrains Mono, monospace",
-              color: value === "—" ? "#444" : "#e5e5e5",
-            }}
-            aria-label={`${label}: ${value}`}
-          >
-            {value}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Task table row
-// ---------------------------------------------------------------------------
-
-interface TaskRowProps {
-  task: TaskManifest;
-  slug: string;
-  retro: TaskRetrospective | undefined;
-}
-
-function TaskRow({ task, slug, retro }: TaskRowProps) {
-  const navigate = useNavigate();
-
-  function handleKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      navigate(`/repo/${slug}/task/${task.task_id}`);
+function aggregateRetros(retros: TaskRetrospective[] | null): RetroAggregate {
+  const qualityScores: number[] = [];
+  const costByTask = new Map<string, number>();
+  const qualityByTask = new Map<string, number>();
+  if (!retros) return { qualityScores, costByTask, qualityByTask };
+  for (const r of retros) {
+    if (typeof r.quality_score === 'number' && !Number.isNaN(r.quality_score)) {
+      qualityScores.push(r.quality_score);
+      qualityByTask.set(r.task_id, r.quality_score);
+    }
+    if (typeof r.cost_score === 'number' && !Number.isNaN(r.cost_score)) {
+      costByTask.set(r.task_id, r.cost_score);
     }
   }
+  return { qualityScores, costByTask, qualityByTask };
+}
 
-  const qualityDisplay = retro?.quality_score != null ? retro.quality_score.toFixed(1) : "—";
-  const costDisplay = retro != null ? formatCostUsd(computeCost(retro)) : "—";
+function average(nums: number[]): number | null {
+  if (nums.length === 0) return null;
+  const sum = nums.reduce((a, b) => a + b, 0);
+  return sum / nums.length;
+}
+
+// ─── Stats bar ────────────────────────────────────────────────────────────────
+
+interface StatsBarProps {
+  tasks: TaskManifest[] | null;
+  loading: boolean;
+  avgQuality: number | null;
+}
+
+function StatsBar({ tasks, loading, avgQuality }: StatsBarProps) {
+  const active = tasks ? tasks.filter(t => !TERMINAL_SET.has(t.stage)).length : null;
+  const done   = tasks ? tasks.filter(t => t.stage === 'DONE' || t.stage === 'CALIBRATED').length : null;
+  const failed = tasks ? tasks.filter(t => (t.stage || '').toUpperCase().includes('FAIL')).length : null;
+
+  const fmt = (n: number | null) => loading && n === null ? '…' : (n === null ? '—' : String(n));
 
   return (
-    <tr
-      style={{ cursor: "pointer" }}
-      onClick={() => navigate(`/repo/${slug}/task/${task.task_id}`)}
-      onKeyDown={handleKeyDown}
-      tabIndex={0}
-      role="row"
-      aria-label={`Task ${task.task_id}: ${task.title}, stage ${task.stage}`}
-    >
-      <td
-        style={{
-          padding: "10px 12px 10px 0",
-          borderBottom: "1px solid #1a1a1a",
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 11,
-          color: "#6ee7b7",
-          whiteSpace: "nowrap",
-          verticalAlign: "top",
-        }}
-      >
-        {task.task_id}
-      </td>
-      <td
-        style={{
-          padding: "10px 12px 10px 0",
-          borderBottom: "1px solid #1a1a1a",
-          fontFamily: "Inter, sans-serif",
-          fontSize: 13,
-          color: "#e5e5e5",
-          maxWidth: 0,
-          width: "100%",
-          verticalAlign: "top",
-        }}
-      >
-        <span
-          style={{
-            display: "block",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-          title={task.title}
+    <div className="stats-bar" role="region" aria-label="Repository stats">
+      <div className="stat-tile lime">
+        <div className="stat-label">Active Tasks</div>
+        <div className="stat-value lime" aria-label={`Active tasks: ${active ?? 'unknown'}`}>{fmt(active)}</div>
+        <div className="stat-sub">non-terminal</div>
+      </div>
+      <div className="stat-tile teal">
+        <div className="stat-label">Done Tasks</div>
+        <div className="stat-value teal" aria-label={`Done tasks: ${done ?? 'unknown'}`}>{fmt(done)}</div>
+        <div className="stat-sub">DONE + CALIBRATED</div>
+      </div>
+      <div className="stat-tile red">
+        <div className="stat-label">Failed Tasks</div>
+        <div className="stat-value red" aria-label={`Failed tasks: ${failed ?? 'unknown'}`}>{fmt(failed)}</div>
+        <div className="stat-sub">includes *FAIL*</div>
+      </div>
+      <div className="stat-tile orange">
+        <div className="stat-label">Avg Quality</div>
+        <div
+          className={
+            'stat-value ' +
+            (avgQuality === null
+              ? ''
+              : avgQuality >= 0.8 ? 'teal'
+              : avgQuality >= 0.5 ? 'orange'
+              : 'red')
+          }
+          aria-label={`Average quality: ${avgQuality === null ? 'unknown' : avgQuality.toFixed(3)}`}
         >
-          {truncateTitle(task.title)}
-        </span>
-      </td>
-      <td
-        style={{
-          padding: "10px 12px 10px 0",
-          borderBottom: "1px solid #1a1a1a",
-          verticalAlign: "top",
-          whiteSpace: "nowrap",
-        }}
-      >
-        <span style={stagePillStyle(task.stage)}>{task.stage}</span>
-      </td>
-      <td
-        style={{
-          padding: "10px 12px 10px 0",
-          borderBottom: "1px solid #1a1a1a",
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 12,
-          color: qualityDisplay === "—" ? "#888" : "#e5e5e5",
-          whiteSpace: "nowrap",
-          verticalAlign: "top",
-        }}
-        aria-label={`Quality: ${qualityDisplay}`}
-      >
-        {qualityDisplay}
-      </td>
-      <td
-        style={{
-          padding: "10px 12px 10px 0",
-          borderBottom: "1px solid #1a1a1a",
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 12,
-          color: costDisplay === "—" ? "#888" : "#e5e5e5",
-          whiteSpace: "nowrap",
-          verticalAlign: "top",
-        }}
-        aria-label={`Cost: ${costDisplay}`}
-      >
-        {costDisplay}
-      </td>
-      <td
-        style={{
-          padding: "10px 0 10px 0",
-          borderBottom: "1px solid #1a1a1a",
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 11,
-          color: "#666",
-          whiteSpace: "nowrap",
-          verticalAlign: "top",
-        }}
-      >
-        {formatDate(task.created_at)}
-      </td>
-    </tr>
+          {avgQuality === null ? '—' : avgQuality.toFixed(2)}
+        </div>
+        <div className="stat-sub">from retrospectives</div>
+      </div>
+    </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Task Timeline section
-// ---------------------------------------------------------------------------
+// ─── Overview tab ─────────────────────────────────────────────────────────────
 
-interface TaskTimelineProps {
-  tasks: TaskManifest[] | null;
-  loading: boolean;
+interface OverviewProps {
   slug: string;
-}
-
-function timelineBlockColor(stage: string): string {
-  if (stage === "DONE" || stage === "CALIBRATED") return "rgba(110,231,183,0.15)";
-  if (stage === "FAILED" || stage === "FAIL") return "rgba(255,107,107,0.15)";
-  return "rgba(255,209,102,0.15)";
-}
-
-function formatDuration(startIso: string, endIso: string): string | null {
-  try {
-    const start = new Date(startIso).getTime();
-    const end = new Date(endIso).getTime();
-    if (isNaN(start) || isNaN(end) || end < start) return null;
-    const totalSeconds = Math.round((end - start) / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-  } catch {
-    return null;
-  }
-}
-
-function TaskTimeline({ tasks, loading, slug }: TaskTimelineProps) {
-  return (
-    <section
-      aria-label="Task timeline"
-      style={{
-        background: "#111",
-        border: "1px solid #222",
-        borderRadius: 16,
-        padding: "24px",
-        marginBottom: 32,
-      }}
-    >
-      <p style={sectionHeadingStyle}>TASK TIMELINE</p>
-
-      {/* Loading state */}
-      {loading && !tasks && (
-        <div role="status" aria-label="Loading timeline" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Skeleton key={i} className="h-10 bg-white/5" style={{ width: 80, borderRadius: 6 }} />
-          ))}
-        </div>
-      )}
-
-      {/* Empty state */}
-      {!loading && tasks !== null && tasks.length === 0 && (
-        <p
-          style={{
-            fontFamily: "JetBrains Mono, monospace",
-            fontSize: 13,
-            color: "#555",
-            margin: 0,
-          }}
-        >
-          No tasks yet
-        </p>
-      )}
-
-      {/* Populated timeline — chronological (oldest first) */}
-      {tasks !== null && tasks.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {[...tasks]
-            .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-            .map((task) => {
-              const isTerminal = (TERMINAL_STAGES as readonly string[]).includes(task.stage);
-              const showDuration =
-                isTerminal &&
-                (task.stage === "DONE" || task.stage === "CALIBRATED") &&
-                task.completed_at != null;
-              const duration =
-                showDuration && task.completed_at
-                  ? formatDuration(task.created_at, task.completed_at)
-                  : null;
-
-              return (
-                <Link
-                  key={task.task_id}
-                  to={`/repo/${slug}/task/${task.task_id}`}
-                  title={task.title}
-                  aria-label={`Task ${task.task_id}: ${task.title}, stage ${task.stage}`}
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "flex-start",
-                    gap: 2,
-                    padding: "6px 10px",
-                    borderRadius: 6,
-                    backgroundColor: timelineBlockColor(task.stage),
-                    border: "1px solid transparent",
-                    textDecoration: "none",
-                    minWidth: 72,
-                    maxWidth: 140,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontFamily: "JetBrains Mono, monospace",
-                      fontSize: 10,
-                      color: "#e5e5e5",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      maxWidth: "100%",
-                    }}
-                  >
-                    {task.task_id}
-                  </span>
-                  {duration && (
-                    <span
-                      style={{
-                        fontFamily: "JetBrains Mono, monospace",
-                        fontSize: 9,
-                        color: "#888",
-                      }}
-                    >
-                      {duration}
-                    </span>
-                  )}
-                </Link>
-              );
-            })}
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Quality Trend section
-// ---------------------------------------------------------------------------
-
-interface QualityTrendProps {
-  tasks: TaskManifest[] | null;
-  retroMap: Map<string, TaskRetrospective>;
-  loading: boolean;
-}
-
-function QualityTrend({ tasks, retroMap, loading }: QualityTrendProps) {
-  const chartData = useMemo(() => {
-    if (!tasks) return null;
-    return tasks
-      .filter((t) => {
-        const retro = retroMap.get(t.task_id);
-        return retro !== undefined && typeof retro.quality_score === "number";
-      })
-      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
-      .map((t) => {
-        const retro = retroMap.get(t.task_id)!;
-        return {
-          taskId: t.task_id,
-          date: new Date(t.created_at).toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-          }),
-          score: retro.quality_score,
-        };
-      });
-  }, [tasks, retroMap]);
-
-  const hasEnoughData = chartData !== null && chartData.length >= 2;
-
-  return (
-    <section
-      aria-label="Quality trend"
-      style={{
-        background: "#111",
-        border: "1px solid #222",
-        borderRadius: 16,
-        padding: "24px",
-        marginBottom: 32,
-      }}
-    >
-      <p style={sectionHeadingStyle}>QUALITY TREND</p>
-
-      {/* Loading state */}
-      {loading && !tasks && (
-        <div role="status" aria-label="Loading quality trend">
-          <Skeleton className="h-48 bg-white/5" style={{ borderRadius: 8 }} />
-        </div>
-      )}
-
-      {/* Insufficient data */}
-      {!loading && !hasEnoughData && (
-        <p
-          style={{
-            fontFamily: "JetBrains Mono, monospace",
-            fontSize: 22,
-            color: "#555",
-            margin: 0,
-          }}
-        >
-          —
-        </p>
-      )}
-
-      {/* Chart */}
-      {hasEnoughData && chartData && (
-        <div style={{ height: 200 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1a1a1a" />
-              <XAxis
-                dataKey="date"
-                tick={{ fontFamily: "JetBrains Mono, monospace", fontSize: 10, fill: "#555" }}
-                axisLine={{ stroke: "#333" }}
-                tickLine={false}
-              />
-              <YAxis
-                domain={[0, 1]}
-                ticks={[0, 0.25, 0.5, 0.75, 1]}
-                tick={{ fontFamily: "JetBrains Mono, monospace", fontSize: 10, fill: "#555" }}
-                axisLine={{ stroke: "#333" }}
-                tickLine={false}
-                width={36}
-              />
-              <Tooltip
-                contentStyle={{
-                  background: "#111",
-                  border: "1px solid #1a1a1a",
-                  borderRadius: 8,
-                  fontFamily: "JetBrains Mono, monospace",
-                  fontSize: 11,
-                  color: "#e5e5e5",
-                }}
-                formatter={(value: number, _name: string, props: { payload?: { taskId?: string } }) => [
-                  value.toFixed(2),
-                  props.payload?.taskId ?? "score",
-                ]}
-                labelStyle={{ color: "#888" }}
-              />
-              <Line
-                type="monotone"
-                dataKey="score"
-                stroke="#6ee7b7"
-                strokeWidth={2}
-                dot={{ fill: "#6ee7b7", r: 4, strokeWidth: 0 }}
-                activeDot={{ fill: "#6ee7b7", r: 5, strokeWidth: 0 }}
-                isAnimationActive={false}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Active Task section
-// ---------------------------------------------------------------------------
-
-interface ActiveTaskSectionProps {
-  activeTask: TaskManifest;
   projectPath: string;
+  tasks: TaskManifest[] | null;
+  tasksLoading: boolean;
+  tasksError: string | null;
+  avgQuality: number | null;
+  qualityByTask: Map<string, number>;
+  retroLoading: boolean;
+  retroError: string | null;
+  events: EventsFeedEntry[] | null;
+  eventsLoading: boolean;
+  eventsError: string | null;
+  onRetryTasks: () => void;
+  onRetryEvents: () => void;
 }
 
-function ActiveTaskSection({ activeTask, projectPath }: ActiveTaskSectionProps) {
-  const logRef = useRef<HTMLDivElement>(null);
+function OverviewTab(p: OverviewProps) {
+  const total  = p.tasks?.length ?? 0;
+  const active = p.tasks ? p.tasks.filter(t => !TERMINAL_SET.has(t.stage)).length : 0;
+  const done   = p.tasks ? p.tasks.filter(t => t.stage === 'DONE' || t.stage === 'CALIBRATED').length : 0;
+  const failed = p.tasks ? p.tasks.filter(t => (t.stage || '').toUpperCase().includes('FAIL')).length : 0;
+  const lastUpdated = p.tasks && p.tasks.length
+    ? sortTasksByCreatedDesc(p.tasks)[0].created_at
+    : null;
+  const recent = p.tasks ? sortTasksByCreatedDesc(p.tasks).slice(0, RECENT_TASKS_LIMIT) : null;
+  const trustScore = p.avgQuality;
 
-  const logUrl = `/api/tasks/${activeTask.task_id}/execution-log?project=${encodeURIComponent(projectPath)}&tail=50`;
-
-  const logResult = useAutoRefresh<ExecutionLogResponse>(
-    logUrl,
-    activeTask.stage,
-    3000,
-  );
-
-  const logData = logResult.data;
-
-  // Auto-scroll to bottom on lines change
-  useEffect(() => {
-    if (logRef.current) {
-      logRef.current.scrollTop = logRef.current.scrollHeight;
-    }
-  }, [logData?.lines]);
+  const healthCls = healthFillColor(active, failed, total);
+  const healthPct = healthFillPercent(done, total);
 
   return (
-    <section
-      aria-label="Active task progress"
-      style={{
-        background: "#111",
-        border: "1px solid #222",
-        borderRadius: 16,
-        padding: "24px",
-        marginBottom: 32,
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-        <p style={{ ...sectionHeadingStyle, marginBottom: 0 }}>ACTIVE TASK</p>
-        <span style={stagePillStyle(activeTask.stage)}>{activeTask.stage}</span>
-      </div>
-
-      <p
-        style={{
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 11,
-          color: "#888",
-          margin: "0 0 12px",
-          wordBreak: "break-word",
-        }}
-      >
-        {activeTask.task_id}
-      </p>
-
-      {/* Log pane */}
-      <div
-        ref={logRef}
-        style={{
-          background: "#0a0a0a",
-          border: "1px solid #1a1a1a",
-          borderRadius: 8,
-          fontFamily: "JetBrains Mono, monospace",
-          fontSize: 11,
-          color: "#e5e5e5",
-          maxHeight: 280,
-          overflowY: "auto",
-          padding: "12px 16px",
-        }}
-        aria-label="Execution log"
-        role="log"
-        aria-live="polite"
-      >
-        {/* Loading state */}
-        {logResult.loading && !logData && (
-          <p style={{ color: "#555", margin: 0 }}>Loading...</p>
-        )}
-
-        {/* Error state */}
-        {logResult.error && !logData && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <p style={{ color: "#ff6b6b", margin: 0 }}>{logResult.error}</p>
-            <button
-              onClick={logResult.refetch}
-              style={{
-                alignSelf: "flex-start",
-                background: "transparent",
-                border: "1px solid #333",
-                borderRadius: 6,
-                padding: "4px 12px",
-                fontFamily: "JetBrains Mono, monospace",
-                fontSize: 10,
-                color: "#888",
-                cursor: "pointer",
-                letterSpacing: "0.08em",
-              }}
-              aria-label="Retry loading execution log"
-            >
-              Retry
-            </button>
-          </div>
-        )}
-
-        {/* Log lines */}
-        {logData && logData.lines.map((line, i) => (
-          <div key={i} style={{ lineHeight: 1.6 }}>
-            {line}
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Cost Breakdown section
-// ---------------------------------------------------------------------------
-
-interface CostBreakdownProps {
-  retros: TaskRetrospective[] | null;
-  loading: boolean;
-  slug: string;
-}
-
-function CostBreakdown({ retros, loading, slug }: CostBreakdownProps) {
-  const costRows = useMemo(() => {
-    if (!retros) return null;
-    return retros
-      .map((r) => ({
-        task_id: r.task_id,
-        cost: computeCost(r),
-        modelBreakdown: modelBreakdown(r),
-      }))
-      .sort((a, b) => b.cost - a.cost);
-  }, [retros]);
-
-  const totalCost = useMemo(() => {
-    if (!costRows) return null;
-    return costRows.reduce((sum, r) => sum + r.cost, 0);
-  }, [costRows]);
-
-  const hasData = costRows !== null && costRows.length > 0;
-
-  return (
-    <section
-      aria-label="Cost breakdown"
-      style={{
-        background: "#111",
-        border: "1px solid #222",
-        borderRadius: 16,
-        padding: "24px",
-        marginBottom: 32,
-      }}
-    >
-      <p style={sectionHeadingStyle}>COST BREAKDOWN</p>
-
-      {/* Loading state */}
-      {loading && !retros && (
-        <div role="status" aria-label="Loading cost breakdown">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} style={{ marginBottom: 8 }}>
-              <Skeleton className="h-4 bg-white/5" style={{ width: `${70 + i * 10}%`, borderRadius: 4 }} />
+    <>
+      {/* Repo summary */}
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">Repo Summary</span>
+        </div>
+        <div className="card-body">
+          {/* health bar */}
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+              <span className="stat-label" style={{ marginBottom: 0 }}>Health</span>
+              <span className="stat-sub" style={{ marginTop: 0 }}>
+                {done}/{total} done · {failed} failed
+              </span>
             </div>
-          ))}
+            <div className="health-track" aria-label={`Health ${healthPct}%`}>
+              <div
+                className={`health-fill ${healthCls}`}
+                style={{ width: `${healthPct}%` }}
+                role="progressbar"
+                aria-valuenow={healthPct}
+                aria-valuemin={0}
+                aria-valuemax={100}
+              />
+            </div>
+          </div>
+
+          {/* kv grid */}
+          <div className="kv">
+            <div className="kv-key">Path</div>
+            <div className="kv-val" title={p.projectPath}>{shortPath(p.projectPath)}</div>
+            <div className="kv-key">Active tasks</div>
+            <div className="kv-val">{p.tasksLoading && !p.tasks ? '…' : active}</div>
+            <div className="kv-key">Last updated</div>
+            <div className="kv-val">{formatRelative(lastUpdated)}</div>
+            <div className="kv-key">Trust score</div>
+            <div className="kv-val">
+              {p.retroLoading && trustScore === null
+                ? '…'
+                : trustScore === null
+                ? '—'
+                : formatQuality(trustScore)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Recent tasks */}
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">Recent Tasks</span>
+        </div>
+        {p.tasksLoading && !p.tasks && (
+          <div className="card-body"><LoadingBlock label="Loading tasks…" /></div>
+        )}
+        {p.tasksError && !p.tasks && (
+          <div className="card-body">
+            <ErrorBlock
+              message={`Failed to load tasks: ${p.tasksError}.`}
+              onRetry={p.onRetryTasks}
+            />
+          </div>
+        )}
+        {recent && recent.length === 0 && (
+          <div className="card-body"><EmptyBlock message="No tasks yet for this repository." /></div>
+        )}
+        {recent && recent.length > 0 && (
+          <div className="card-body--flush">
+            <div className="table-wrap">
+              <table className="dt" aria-label="Recent tasks">
+                <thead>
+                  <tr>
+                    <th scope="col">Task ID</th>
+                    <th scope="col">Title</th>
+                    <th scope="col">Stage</th>
+                    <th scope="col">Quality</th>
+                    <th scope="col">Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recent.map(task => {
+                    const q = p.qualityByTask.get(task.task_id);
+                    return (
+                      <tr key={task.task_id}>
+                        <td className="col-id">
+                          <Link to={`/repo/${slugUriPart(p.slug)}/task/${task.task_id}`}>
+                            {task.task_id}
+                          </Link>
+                        </td>
+                        <td className="col-bone" title={task.title}>
+                          {truncate(task.title, TITLE_TRUNCATE_MAX)}
+                        </td>
+                        <td><span className={stageBadgeClass(task.stage)}>{task.stage}</span></td>
+                        <td className="col-mono col-dim">{formatQuality(q)}</td>
+                        <td className="col-mono col-dim">{formatRelative(task.created_at)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Recent events */}
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">Recent Events</span>
+        </div>
+        {p.eventsLoading && !p.events && (
+          <div className="card-body"><LoadingBlock label="Loading events…" /></div>
+        )}
+        {p.eventsError && !p.events && (
+          <div className="card-body">
+            <ErrorBlock
+              message={`Failed to load events: ${p.eventsError}.`}
+              onRetry={p.onRetryEvents}
+            />
+          </div>
+        )}
+        {p.events && p.events.length === 0 && (
+          <div className="card-body"><EmptyBlock message="No recent events for this repository." /></div>
+        )}
+        {p.events && p.events.length > 0 && (
+          <div className="card-body--flush">
+            <div className="table-wrap">
+              <table className="dt" aria-label="Recent events">
+                <thead>
+                  <tr>
+                    <th scope="col">Time</th>
+                    <th scope="col">Type</th>
+                    <th scope="col">Event</th>
+                    <th scope="col">Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {p.events.slice(0, RECENT_EVENTS_LIMIT).map((ev, i) => (
+                    <tr key={`${ev.ts}-${i}`}>
+                      <td className="col-mono col-dim">{formatDateShort(ev.ts)}</td>
+                      <td><span className={eventChipClass(ev.event)}>{eventChipLabel(ev.event)}</span></td>
+                      <td className="col-mono col-bone" title={ev.event}>
+                        {truncate(ev.event, 40)}
+                      </td>
+                      <td className="col-mono col-dim" title={summarizeEventDetail(ev)}>
+                        {truncate(summarizeEventDetail(ev), DETAIL_TRUNCATE_MAX)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function summarizeEventDetail(ev: EventsFeedEntry): string {
+  // pick a few common payload fields without exposing huge JSON
+  const keys = ['stage', 'task_id', 'agent', 'role', 'reason', 'path', 'mode', 'status'];
+  const parts: string[] = [];
+  for (const k of keys) {
+    const v = ev[k];
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      parts.push(`${k}=${String(v)}`);
+    }
+  }
+  return parts.length ? parts.join(' · ') : '—';
+}
+
+// Encode the slug for URL inclusion only — keep it stable across links.
+function slugUriPart(slug: string): string {
+  return encodeURIComponent(slug);
+}
+
+// ─── Tasks tab ────────────────────────────────────────────────────────────────
+
+interface TasksTabProps {
+  slug: string;
+  tasks: TaskManifest[] | null;
+  loading: boolean;
+  error: string | null;
+  costByTask: Map<string, number>;
+  qualityByTask: Map<string, number>;
+  onRetry: () => void;
+}
+
+function TasksTab(p: TasksTabProps) {
+  const [stageFilter, setStageFilter] = useState<string>('');
+  const [search, setSearch] = useState<string>('');
+
+  const stageOptions = p.tasks
+    ? Array.from(new Set(p.tasks.map(t => t.stage))).filter(Boolean).sort()
+    : [];
+
+  const filtered = (() => {
+    if (!p.tasks) return null;
+    let list = p.tasks;
+    if (stageFilter) list = list.filter(t => t.stage === stageFilter);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(t =>
+        (t.task_id || '').toLowerCase().includes(q) ||
+        (t.title || '').toLowerCase().includes(q),
+      );
+    }
+    return sortTasksByCreatedDesc(list);
+  })();
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">
+          Tasks{filtered !== null ? ` (${filtered.length})` : ''}
+        </span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <select
+            className="search-input"
+            style={{ width: 160, paddingLeft: 14 }}
+            value={stageFilter}
+            onChange={e => setStageFilter(e.target.value)}
+            aria-label="Filter by stage"
+          >
+            <option value="">All stages</option>
+            {stageOptions.map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          <div className="search-box">
+            <span className="search-icon" aria-hidden="true">⌕</span>
+            <input
+              className="search-input"
+              placeholder="Search tasks…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              aria-label="Search tasks"
+            />
+          </div>
+        </div>
+      </div>
+
+      {p.loading && !p.tasks && (
+        <div className="card-body"><LoadingBlock label="Loading tasks…" /></div>
+      )}
+      {p.error && !p.tasks && (
+        <div className="card-body">
+          <ErrorBlock message={`Failed to load tasks: ${p.error}.`} onRetry={p.onRetry} />
         </div>
       )}
-
-      {/* Empty state */}
-      {!loading && retros !== null && retros.length === 0 && (
-        <p
-          style={{
-            fontFamily: "JetBrains Mono, monospace",
-            fontSize: 13,
-            color: "#555",
-            margin: 0,
-          }}
-        >
-          No cost data available
-        </p>
+      {filtered && filtered.length === 0 && (
+        <div className="card-body">
+          <EmptyBlock
+            message={
+              stageFilter || search
+                ? `No tasks match the current filter.`
+                : 'No tasks yet for this repository.'
+            }
+          />
+        </div>
       )}
-
-      {/* Populated */}
-      {hasData && costRows && totalCost !== null && (
-        <>
-          {/* Total cost */}
-          <div
-            style={{
-              fontFamily: "JetBrains Mono, monospace",
-              fontSize: 22,
-              color: "#6ee7b7",
-              marginBottom: 20,
-            }}
-            aria-label={`Total cost: ${formatCostUsd(totalCost)}`}
-          >
-            {formatCostUsd(totalCost)}
-          </div>
-
-          {/* Cost table */}
-          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-            <table
-              style={{ width: "100%", borderCollapse: "collapse", tableLayout: "auto" }}
-              role="table"
-              aria-label="Cost breakdown by task"
-            >
+      {filtered && filtered.length > 0 && (
+        <div className="card-body--flush">
+          <div className="table-wrap">
+            <table className="dt" aria-label="Tasks">
               <thead>
-                <tr role="row">
-                  {["Task ID", "Cost USD", "Model Breakdown"].map((h) => (
-                    <th
-                      key={h}
-                      scope="col"
-                      style={{
-                        textAlign: "left",
-                        fontFamily: "JetBrains Mono, monospace",
-                        fontSize: 10,
-                        color: "#555",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.1em",
-                        padding: "6px 12px 6px 0",
-                        borderBottom: "1px solid #222",
-                        fontWeight: 400,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {h}
-                    </th>
-                  ))}
+                <tr>
+                  <th scope="col">Task ID</th>
+                  <th scope="col">Title</th>
+                  <th scope="col">Stage</th>
+                  <th scope="col">Quality</th>
+                  <th scope="col">Est. Cost</th>
+                  <th scope="col">Created</th>
                 </tr>
               </thead>
               <tbody>
-                {costRows.map((row) => (
-                  <tr key={row.task_id} role="row">
-                    <td
-                      style={{
-                        padding: "8px 12px 8px 0",
-                        borderBottom: "1px solid #1a1a1a",
-                        fontFamily: "JetBrains Mono, monospace",
-                        fontSize: 11,
-                        whiteSpace: "nowrap",
-                        verticalAlign: "top",
-                      }}
-                    >
-                      <Link
-                        to={`/repo/${slug}/task/${row.task_id}`}
-                        style={{
-                          color: "#6ee7b7",
-                          textDecoration: "none",
-                        }}
-                        aria-label={`View task ${row.task_id}`}
-                      >
-                        {row.task_id}
-                      </Link>
+                {filtered.map(task => {
+                  const q = p.qualityByTask.get(task.task_id);
+                  const c = p.costByTask.get(task.task_id);
+                  return (
+                    <tr key={task.task_id}>
+                      <td className="col-id">
+                        <Link
+                          to={`/repo/${slugUriPart(p.slug)}/task/${task.task_id}`}
+                          aria-label={`View task ${task.task_id}`}
+                        >
+                          {task.task_id}
+                        </Link>
+                      </td>
+                      <td className="col-bone" title={task.title}>
+                        {truncate(task.title, TITLE_TRUNCATE_MAX)}
+                      </td>
+                      <td><span className={stageBadgeClass(task.stage)}>{task.stage}</span></td>
+                      <td className="col-mono col-dim">{formatQuality(q)}</td>
+                      <td className="col-mono">
+                        {c === undefined
+                          ? <span className="col-dim">—</span>
+                          : <span className="cost-val">{formatCost(c)}</span>}
+                      </td>
+                      <td className="col-mono col-dim">{formatDateShort(task.created_at)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Events tab ───────────────────────────────────────────────────────────────
+
+interface EventsTabProps {
+  slug: string;
+  projectPath: string;
+}
+
+interface EventsResp { events: EventsFeedEntry[]; }
+
+function EventsTab({ slug, projectPath }: EventsTabProps) {
+  const result = usePollingData<EventsResp>(
+    projectPath
+      ? `/api/events-feed?limit=${EVENTS_TAB_LIMIT}&project=${encodeURIComponent(projectPath)}`
+      : '',
+    10000,
+    { globalScope: true },
+  );
+
+  const events: EventsFeedEntry[] | null = (() => {
+    const raw = result.data;
+    if (!raw) return null;
+    if (Array.isArray(raw)) return raw as unknown as EventsFeedEntry[];
+    if (Array.isArray(raw.events)) return raw.events;
+    return null;
+  })();
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">
+          Events{events !== null ? ` (${events.length})` : ''}
+        </span>
+      </div>
+      {result.loading && !events && (
+        <div className="card-body"><LoadingBlock label="Loading events…" /></div>
+      )}
+      {result.error && !events && (
+        <div className="card-body">
+          <ErrorBlock message={`Failed to load events: ${result.error}.`} onRetry={result.refetch} />
+        </div>
+      )}
+      {events && events.length === 0 && (
+        <div className="card-body"><EmptyBlock message="No recent events for this repository." /></div>
+      )}
+      {events && events.length > 0 && (
+        <div className="card-body--flush">
+          <div className="table-wrap">
+            <table className="dt" aria-label="Events">
+              <thead>
+                <tr>
+                  <th scope="col">Time</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Event</th>
+                  <th scope="col">Repo</th>
+                  <th scope="col">Detail</th>
+                </tr>
+              </thead>
+              <tbody>
+                {events.map((ev, i) => (
+                  <tr key={`${ev.ts}-${i}`}>
+                    <td className="col-mono col-dim">{formatDateShort(ev.ts)}</td>
+                    <td><span className={eventChipClass(ev.event)}>{eventChipLabel(ev.event)}</span></td>
+                    <td className="col-mono col-bone" title={ev.event}>
+                      {ev.task_id
+                        ? <Link to={`/repo/${slugUriPart(slug)}/task/${ev.task_id}`}>{truncate(ev.event, 40)}</Link>
+                        : truncate(ev.event, 40)}
                     </td>
-                    <td
-                      style={{
-                        padding: "8px 12px 8px 0",
-                        borderBottom: "1px solid #1a1a1a",
-                        fontFamily: "JetBrains Mono, monospace",
-                        fontSize: 11,
-                        color: "#e5e5e5",
-                        whiteSpace: "nowrap",
-                        verticalAlign: "top",
-                      }}
-                    >
-                      {formatCostUsd(row.cost)}
+                    <td className="col-mono col-dim" title={ev.repo_slug}>
+                      {truncate(ev.repo_slug, 32)}
                     </td>
-                    <td
-                      style={{
-                        padding: "8px 0 8px 0",
-                        borderBottom: "1px solid #1a1a1a",
-                        fontFamily: "JetBrains Mono, monospace",
-                        fontSize: 11,
-                        color: "#e5e5e5",
-                        verticalAlign: "top",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {row.modelBreakdown}
+                    <td className="col-mono col-dim" title={summarizeEventDetail(ev)}>
+                      {truncate(summarizeEventDetail(ev), DETAIL_TRUNCATE_MAX)}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        </>
+        </div>
       )}
-    </section>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Inner page — rendered once project is confirmed to exist
-// ---------------------------------------------------------------------------
-
-interface RepoPageInnerProps {
-  slug: string;
-  name: string;
-  projectPath: string;
-  preventionRuleCount: number | null;
-  learnedRoutesCount: number | null;
-}
-
-function RepoPageInner({
-  slug,
-  name,
-  projectPath,
-  preventionRuleCount,
-  learnedRoutesCount,
-}: RepoPageInnerProps) {
-  // Task list — usePollingData appends &project=<context> automatically;
-  // the explicit project param in the URL ensures correct scoping regardless.
-  const tasksResult = usePollingData<TaskManifest[]>(
-    `/api/tasks?project=${encodeURIComponent(projectPath)}`,
-  );
-
-  const tasks = tasksResult.data;
-
-  // All retrospectives for this project — single call, reused by QualityTrend and CostBreakdown.
-  const retrosResult = usePollingData<TaskRetrospective[]>(`/api/retrospectives?project=${encodeURIComponent(projectPath)}`);
-
-  // O(1) lookup map: task_id → retrospective
-  const retroMap = useMemo(() => {
-    const map = new Map<string, TaskRetrospective>();
-    if (retrosResult.data) {
-      for (const r of retrosResult.data) {
-        map.set(r.task_id, r);
-      }
-    }
-    return map;
-  }, [retrosResult.data]);
-
-  // Sort newest-first; memoized to avoid re-sort on every render.
-  const sortedTasks = useMemo(() => {
-    if (!tasks) return null;
-    return [...tasks].sort(
-      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-    );
-  }, [tasks]);
-
-  // Active task: first task whose stage is not terminal.
-  const activeTask = useMemo(
-    () => tasks?.find((t) => !(TERMINAL_STAGES as readonly string[]).includes(t.stage)) ?? null,
-    [tasks],
-  );
-
-  // Most recently completed task — used for DORA metrics.
-  const mostRecentDoneTask = useMemo(() => {
-    if (!tasks) return null;
-    const done = tasks.filter((t) => t.stage === "DONE");
-    if (done.length === 0) return null;
-    return done.reduce((latest, t) => {
-      const latestTime = new Date(latest.completed_at ?? latest.created_at).getTime();
-      const tTime = new Date(t.completed_at ?? t.created_at).getTime();
-      return tTime > latestTime ? t : latest;
-    });
-  }, [tasks]);
-
-  // DORA: fetch retrospective for the most recently done task only.
-  // Fall back to a sentinel URL that will 404 gracefully when there's no done task.
-  const retroUrl = mostRecentDoneTask
-    ? `/api/tasks/${encodeURIComponent(mostRecentDoneTask.task_id)}/retrospective?project=${encodeURIComponent(projectPath)}`
-    : `/api/tasks/__none__/retrospective?project=${encodeURIComponent(projectPath)}`;
-
-  const retroResult = usePollingData<TaskRetrospective>(retroUrl);
-
-  const retro = mostRecentDoneTask ? retroResult.data : null;
-
-  const doraValues = {
-    leadTime: formatLeadTime(retro?.lead_time_seconds),
-    cfr: formatChangeFailureRate(retro?.change_failure_rate),
-    recoveryTime: formatRecoveryTime(retro?.recovery_time_seconds),
-  };
-
-  const doraLoading = Boolean(mostRecentDoneTask) && retroResult.loading;
-
-  return (
-    <div
-      style={{
-        background: "#0a0a0a",
-        minHeight: "100vh",
-        padding: "32px 24px",
-        maxWidth: 1200,
-        margin: "0 auto",
-      }}
-    >
-      {/* Header */}
-      <div style={{ marginBottom: 24 }}>
-        <Breadcrumb name={name} />
-        <h1
-          style={{
-            fontFamily: "Inter, sans-serif",
-            fontSize: "clamp(22px, 5vw, 32px)",
-            fontWeight: 600,
-            color: "#e5e5e5",
-            margin: "16px 0 0",
-            lineHeight: 1.2,
-            wordBreak: "break-word",
-          }}
-        >
-          {name}
-        </h1>
-      </div>
-
-      {/* Project meta: prevention rules + learned routes */}
-      <div style={{ marginBottom: 32 }}>
-        <ProjectMeta
-          preventionRuleCount={preventionRuleCount}
-          learnedRoutesCount={learnedRoutesCount}
-        />
-      </div>
-
-      {/* Active Task — only present when a non-terminal task exists */}
-      {activeTask && (
-        <ActiveTaskSection activeTask={activeTask} projectPath={projectPath} />
-      )}
-
-      {/* DORA metrics */}
-      <div
-        style={{
-          background: "#111",
-          border: "1px solid #222",
-          borderRadius: 16,
-          padding: "24px",
-          marginBottom: 32,
-        }}
-      >
-        <DoraMetrics
-          loading={doraLoading}
-          leadTime={doraValues.leadTime}
-          cfr={doraValues.cfr}
-          recoveryTime={doraValues.recoveryTime}
-        />
-      </div>
-
-      {/* Task Timeline */}
-      <TaskTimeline
-        tasks={sortedTasks}
-        loading={tasksResult.loading}
-        slug={slug}
-      />
-
-      {/* Quality Trend */}
-      <QualityTrend
-        tasks={tasks}
-        retroMap={retroMap}
-        loading={tasksResult.loading || retrosResult.loading}
-      />
-
-      {/* Cost Breakdown */}
-      <CostBreakdown
-        retros={retrosResult.data}
-        loading={retrosResult.loading}
-        slug={slug}
-      />
-
-      {/* Task list */}
-      <section aria-label="Task list">
-        <h2
-          style={{
-            fontFamily: "JetBrains Mono, monospace",
-            fontSize: 11,
-            color: "#555",
-            textTransform: "uppercase",
-            letterSpacing: "0.12em",
-            margin: "0 0 12px",
-          }}
-        >
-          Tasks
-          {sortedTasks !== null && (
-            <span
-              style={{
-                marginLeft: 8,
-                color: "#444",
-                fontFamily: "JetBrains Mono, monospace",
-                fontSize: 11,
-              }}
-            >
-              ({sortedTasks.length})
-            </span>
-          )}
-        </h2>
-
-        {/* Loading state */}
-        {tasksResult.loading && !tasks && <TaskTableSkeleton />}
-
-        {/* Error state */}
-        {tasksResult.error && !tasks && (
-          <div
-            style={{
-              background: "#111",
-              border: "1px solid #2a1a1a",
-              borderRadius: 12,
-              padding: 24,
-              display: "flex",
-              flexDirection: "column" as const,
-              gap: 12,
-            }}
-            role="alert"
-          >
-            <p
-              style={{
-                fontFamily: "Inter, sans-serif",
-                fontSize: 14,
-                color: "#e5e5e5",
-                margin: 0,
-              }}
-            >
-              Failed to load tasks
-            </p>
-            <p
-              style={{
-                fontFamily: "Inter, sans-serif",
-                fontSize: 12,
-                color: "#888",
-                margin: 0,
-              }}
-            >
-              {tasksResult.error}
-            </p>
-            <button
-              onClick={tasksResult.refetch}
-              style={{
-                alignSelf: "flex-start",
-                background: "#6ee7b711",
-                border: "1px solid #6ee7b744",
-                borderRadius: 8,
-                padding: "6px 16px",
-                fontFamily: "JetBrains Mono, monospace",
-                fontSize: 11,
-                color: "#6ee7b7",
-                cursor: "pointer",
-                letterSpacing: "0.08em",
-              }}
-              aria-label="Retry loading tasks"
-            >
-              Retry
-            </button>
-          </div>
-        )}
-
-        {/* Empty state */}
-        {!tasksResult.loading && !tasksResult.error && sortedTasks !== null && sortedTasks.length === 0 && (
-          <div
-            style={{
-              background: "#111",
-              border: "1px solid #222",
-              borderRadius: 12,
-              padding: "48px 24px",
-              textAlign: "center",
-            }}
-            role="status"
-            aria-label="No tasks"
-          >
-            <p
-              style={{
-                fontFamily: "Inter, sans-serif",
-                fontSize: 14,
-                color: "#666",
-                margin: 0,
-              }}
-            >
-              No tasks yet
-            </p>
-            <p
-              style={{
-                fontFamily: "Inter, sans-serif",
-                fontSize: 12,
-                color: "#444",
-                margin: "8px 0 0",
-              }}
-            >
-              Tasks will appear here once work is queued for this project.
-            </p>
-          </div>
-        )}
-
-        {/* Populated task table */}
-        {sortedTasks !== null && sortedTasks.length > 0 && (
-          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-            <table
-              style={{
-                width: "100%",
-                borderCollapse: "collapse",
-                tableLayout: "fixed",
-              }}
-              role="table"
-              aria-label="Task list"
-            >
-              <thead>
-                <tr role="row">
-                  {[
-                    { label: "ID", style: { width: "14%" } },
-                    { label: "Title", style: { width: "auto" } },
-                    { label: "Stage", style: { width: "10%" } },
-                    { label: "Quality", style: { width: "8%" } },
-                    { label: "Cost", style: { width: "8%" } },
-                    { label: "Created", style: { width: "12%" } },
-                  ].map(({ label, style }) => (
-                    <th
-                      key={label}
-                      scope="col"
-                      style={{
-                        ...style,
-                        textAlign: "left",
-                        fontFamily: "JetBrains Mono, monospace",
-                        fontSize: 10,
-                        color: "#555",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.1em",
-                        padding: "8px 12px 8px 0",
-                        borderBottom: "1px solid #222",
-                        fontWeight: 400,
-                      }}
-                    >
-                      {label}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sortedTasks.map((task) => (
-                  <TaskRow key={task.task_id} task={task} slug={slug} retro={retroMap.get(task.task_id)} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// RepoPage — top-level; resolves slug → project, then delegates
-// ---------------------------------------------------------------------------
+// ─── Agents tab ───────────────────────────────────────────────────────────────
 
-export default function RepoPage() {
-  const { slug } = useParams<{ slug: string }>();
-  const projects = useProjectsSummary();
+function AgentsTab({ projectPath }: { projectPath: string }) {
+  const result = usePollingData<LearnedAgent[]>(
+    projectPath ? `/api/agents?project=${encodeURIComponent(projectPath)}` : '',
+    15000,
+    { globalScope: true },
+  );
 
-  // Loading state: waiting for projects list
-  if (projects.loading && !projects.data) {
-    return (
-      <div
-        style={{
-          background: "#0a0a0a",
-          minHeight: "100vh",
-          padding: "32px 24px",
-          maxWidth: 1200,
-          margin: "0 auto",
-        }}
-        role="status"
-        aria-label="Loading project"
-      >
-        {/* Breadcrumb skeleton */}
-        <Skeleton className="h-4 bg-white/5" style={{ width: 180, marginBottom: 20 }} />
-        {/* Heading skeleton */}
-        <Skeleton className="h-8 bg-white/5" style={{ width: 320, marginBottom: 32 }} />
-        {/* Meta cards skeleton */}
-        <div style={{ display: "flex", gap: 12, marginBottom: 32 }}>
-          <Skeleton className="h-16 bg-white/5" style={{ width: 140, borderRadius: 12 }} />
-          <Skeleton className="h-16 bg-white/5" style={{ width: 140, borderRadius: 12 }} />
+  const agents: LearnedAgent[] | null = Array.isArray(result.data) ? result.data : null;
+
+  const sorted = agents
+    ? [...agents].sort((a, b) =>
+        (b.benchmark_summary?.mean_composite ?? -Infinity) -
+        (a.benchmark_summary?.mean_composite ?? -Infinity))
+    : null;
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-title">
+          Learned Agents{sorted !== null ? ` (${sorted.length})` : ''}
+        </span>
+      </div>
+      {result.loading && !agents && (
+        <div className="card-body"><LoadingBlock label="Loading agents…" /></div>
+      )}
+      {result.error && !agents && (
+        <div className="card-body">
+          <ErrorBlock message={`Failed to load agents: ${result.error}.`} onRetry={result.refetch} />
         </div>
-        {/* DORA skeleton */}
-        <div
+      )}
+      {sorted && sorted.length === 0 && (
+        <div className="card-body">
+          <EmptyBlock message="No learned agents registered for this repository." />
+        </div>
+      )}
+      {sorted && sorted.length > 0 && (
+        <div className="card-body--flush">
+          <div className="table-wrap">
+            <table className="dt" aria-label="Learned agents">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Role</th>
+                  <th scope="col">Score</th>
+                  <th scope="col">Benchmark</th>
+                  <th scope="col">Last Eval</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map(agent => {
+                  const score = agent.benchmark_summary?.mean_composite;
+                  const samples = agent.benchmark_summary?.sample_count;
+                  const evalAt = agent.last_evaluation?.evaluated_at;
+                  const scoreCls =
+                    score === undefined || score === null ? 'col-dim'
+                    : score >= 0.8 ? ''
+                    : score >= 0.5 ? ''
+                    : '';
+                  return (
+                    <tr key={`${agent.agent_name}:${agent.task_type}`}>
+                      <td className="col-mono col-bone" title={agent.agent_name}>
+                        {truncate(agent.agent_name, 40)}
+                      </td>
+                      <td className="col-dim">{agent.role || '—'}</td>
+                      <td className={`col-mono ${scoreCls}`}>
+                        {score !== undefined && score !== null ? score.toFixed(3) : '—'}
+                      </td>
+                      <td className="col-mono col-dim">
+                        {samples !== undefined ? `${samples} runs` : '—'}
+                      </td>
+                      <td className="col-mono col-dim">{formatRelative(evalAt)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Inner page ───────────────────────────────────────────────────────────────
+
+interface InnerProps {
+  slug: string;
+  projectPath: string;
+}
+
+function RepoPageInner({ slug, projectPath }: InnerProps) {
+  const [tab, setTab] = useState<TabKey>('overview');
+
+  // Top-level tasks fetch — shared across stats bar, alert bar, overview, tasks
+  const tasksResult = usePollingData<TasksShape>(
+    projectPath ? `/api/tasks?project=${encodeURIComponent(projectPath)}` : '',
+    10000,
+    { globalScope: true },
+  );
+
+  // Retrospectives — for avg quality + per-task quality/cost overlay
+  const retrosResult = usePollingData<TaskRetrospective[]>(
+    projectPath ? `/api/retrospectives?project=${encodeURIComponent(projectPath)}` : '',
+    30000,
+    { globalScope: true },
+  );
+
+  // Recent events — used by overview tab
+  const eventsResult = usePollingData<EventsResp>(
+    projectPath
+      ? `/api/events-feed?limit=${RECENT_EVENTS_LIMIT}&project=${encodeURIComponent(projectPath)}`
+      : '',
+    10000,
+    { globalScope: true },
+  );
+
+  const tasks = normalizeTasks(tasksResult.data);
+  const stalled = tasks ? stalledTaskCount(tasks) : 0;
+
+  const retros = Array.isArray(retrosResult.data) ? retrosResult.data : null;
+  const aggregate = aggregateRetros(retros);
+  const avgQuality = average(aggregate.qualityScores);
+
+  const events: EventsFeedEntry[] | null = (() => {
+    const raw = eventsResult.data;
+    if (!raw) return null;
+    if (Array.isArray(raw)) return raw as unknown as EventsFeedEntry[];
+    if (Array.isArray(raw.events)) return raw.events;
+    return null;
+  })();
+
+  const handleRefreshAll = () => {
+    tasksResult.refetch();
+    retrosResult.refetch();
+    eventsResult.refetch();
+  };
+
+  const display = shortName(slug);
+
+  return (
+    <div role="main" aria-label={`Repository ${display}`}>
+      {/* Breadcrumb */}
+      <nav className="breadcrumb" aria-label="Breadcrumb">
+        <Link to="/">home</Link>
+        <span className="breadcrumb-sep" aria-hidden="true">/</span>
+        <span
+          className="breadcrumb-cur"
+          title={slug}
           style={{
-            background: "#111",
-            border: "1px solid #222",
-            borderRadius: 16,
-            padding: 24,
-            marginBottom: 32,
-            display: "grid",
-            gridTemplateColumns: "repeat(3, 1fr)",
-            gap: 12,
+            maxWidth: 'min(60vw, 480px)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            display: 'inline-block',
+            verticalAlign: 'bottom',
           }}
         >
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} style={{ padding: 16, border: "1px solid #222", borderRadius: 12 }}>
-              <Skeleton className="h-3 bg-white/5" style={{ width: "60%", marginBottom: 12 }} />
-              <Skeleton className="h-6 bg-white/5" style={{ width: "50%" }} />
-            </div>
-          ))}
+          {display}
+        </span>
+      </nav>
+
+      {/* Header */}
+      <div className="page-header">
+        <div className="page-header-left">
+          <div className="page-eyebrow">Repository</div>
+          <h1
+            className="page-title"
+            title={slug}
+            style={{
+              maxWidth: 'min(70vw, 720px)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {display}
+          </h1>
         </div>
-        {/* Table skeleton */}
-        <TaskTableSkeleton />
+        <div className="page-header-actions">
+          <DaemonChip projectPath={projectPath} />
+          <button
+            className="btn btn--ghost btn--sm"
+            onClick={handleRefreshAll}
+            disabled={tasksResult.loading && !tasks}
+            aria-label="Refresh repository data"
+          >
+            {tasksResult.loading && !tasks ? 'refreshing…' : '↺ refresh'}
+          </button>
+        </div>
+      </div>
+
+      {/* Stats bar */}
+      <StatsBar
+        tasks={tasks}
+        loading={tasksResult.loading}
+        avgQuality={avgQuality}
+      />
+
+      {/* Stall alert */}
+      {stalled > 0 && (
+        <div className="alert-bar alert-bar--warn" role="alert" aria-live="polite">
+          <span className="alert-dot" aria-hidden="true" />
+          <span>
+            {stalled} task{stalled !== 1 ? 's' : ''} may be stalled — non-terminal for over 2 hours.
+          </span>
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="page-tabs" role="tablist" aria-label="Repository sections">
+        {TABS.map(t => (
+          <button
+            key={t.key}
+            role="tab"
+            aria-selected={tab === t.key}
+            aria-controls={`panel-${t.key}`}
+            id={`tab-${t.key}`}
+            className={`page-tab${tab === t.key ? ' active' : ''}`}
+            onClick={() => setTab(t.key)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab panels */}
+      <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
+        {tab === 'overview' && (
+          <OverviewTab
+            slug={slug}
+            projectPath={projectPath}
+            tasks={tasks}
+            tasksLoading={tasksResult.loading}
+            tasksError={tasksResult.error}
+            avgQuality={avgQuality}
+            qualityByTask={aggregate.qualityByTask}
+            retroLoading={retrosResult.loading}
+            retroError={retrosResult.error}
+            events={events}
+            eventsLoading={eventsResult.loading}
+            eventsError={eventsResult.error}
+            onRetryTasks={tasksResult.refetch}
+            onRetryEvents={eventsResult.refetch}
+          />
+        )}
+        {tab === 'tasks' && (
+          <TasksTab
+            slug={slug}
+            tasks={tasks}
+            loading={tasksResult.loading}
+            error={tasksResult.error}
+            costByTask={aggregate.costByTask}
+            qualityByTask={aggregate.qualityByTask}
+            onRetry={tasksResult.refetch}
+          />
+        )}
+        {tab === 'events' && (
+          <EventsTab slug={slug} projectPath={projectPath} />
+        )}
+        {tab === 'agents' && (
+          <AgentsTab projectPath={projectPath} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Top-level export ─────────────────────────────────────────────────────────
+
+export default function RepoPage() {
+  const { slug: rawSlug } = useParams<{ slug: string }>();
+  const slug = rawSlug ?? '';
+  const projects = useProjectsSummary();
+
+  // Initial registry load
+  if (projects.loading && !projects.data) {
+    return (
+      <div role="main" aria-label="Loading repository">
+        <nav className="breadcrumb" aria-label="Breadcrumb">
+          <Link to="/">home</Link>
+          <span className="breadcrumb-sep" aria-hidden="true">/</span>
+          <span className="breadcrumb-cur">{shortName(slug) || '…'}</span>
+        </nav>
+        <div className="card">
+          <div className="card-body">
+            <LoadingBlock label="Loading repository…" />
+          </div>
+        </div>
       </div>
     );
   }
 
-  // Projects fetch error (with no prior data) — still attempt slug match
-  // but if we have no data at all, show a generic error
+  // Registry fetch failed and no cached data
   if (projects.error && !projects.data) {
     return (
-      <div
-        style={{
-          minHeight: "60vh",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 16,
-          padding: "48px 24px",
-          textAlign: "center",
-        }}
-        role="alert"
-        aria-label="Projects failed to load"
-      >
-        <p
-          style={{
-            fontFamily: "Inter, sans-serif",
-            fontSize: 14,
-            color: "#e5e5e5",
-          }}
-        >
-          Unable to load project data
-        </p>
-        <p
-          style={{
-            fontFamily: "Inter, sans-serif",
-            fontSize: 12,
-            color: "#888",
-            maxWidth: 360,
-          }}
-        >
-          {projects.error}
-        </p>
-        <div style={{ display: "flex", gap: 12 }}>
-          <button
-            onClick={projects.refetch}
-            style={{
-              background: "#6ee7b711",
-              border: "1px solid #6ee7b744",
-              borderRadius: 8,
-              padding: "8px 20px",
-              fontFamily: "JetBrains Mono, monospace",
-              fontSize: 11,
-              color: "#6ee7b7",
-              cursor: "pointer",
-              letterSpacing: "0.08em",
-            }}
-            aria-label="Retry loading project"
-          >
-            Retry
-          </button>
-          <Link
-            to="/"
-            style={{
-              color: "#888",
-              textDecoration: "none",
-              border: "1px solid #333",
-              borderRadius: 8,
-              padding: "8px 20px",
-              fontSize: 12,
-              fontFamily: "JetBrains Mono, monospace",
-              letterSpacing: "0.08em",
-            }}
-            aria-label="Back to repos list"
-          >
-            Back to Repos
+      <div role="main" aria-label="Error loading repository">
+        <nav className="breadcrumb" aria-label="Breadcrumb">
+          <Link to="/">home</Link>
+          <span className="breadcrumb-sep" aria-hidden="true">/</span>
+          <span className="breadcrumb-cur">error</span>
+        </nav>
+        <ErrorBlock
+          message={`Unable to load project registry: ${projects.error}.`}
+          onRetry={projects.refetch}
+        />
+        <div style={{ marginTop: 12 }}>
+          <Link to="/" className="btn btn--ghost btn--sm" aria-label="Back to home">
+            ← back to home
           </Link>
         </div>
       </div>
     );
   }
 
-  // Slug resolution: find project in the fetched list
-  const project = (projects.data ?? []).find((p) => p.slug === slug);
-
-  // 404: data loaded but slug not matched
+  // Resolve slug → project entry
+  const project = (projects.data ?? []).find(p => p.slug === slug);
   if (!project) {
-    return <NotFoundView />;
+    return <NotFoundView slug={slug} />;
   }
 
-  return (
-    <RepoPageInner
-      slug={slug!}
-      name={project.name}
-      projectPath={project.path}
-      preventionRuleCount={project.prevention_rule_count}
-      learnedRoutesCount={project.learned_routes_count}
-    />
-  );
+  return <RepoPageInner slug={slug} projectPath={project.path} />;
 }

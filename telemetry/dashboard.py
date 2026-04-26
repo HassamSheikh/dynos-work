@@ -5,9 +5,12 @@ from __future__ import annotations
 import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent)); _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent / "hooks"))
 
 import argparse
+import heapq
 import json
 import os
 import re
+import time
+from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer, HTTPStatus
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -111,15 +114,21 @@ def collect_from_all_projects(collector):
         return []
 
 
-def reconcile_stage(task_dir: Path, manifest: dict) -> dict:
-    """Reconcile manifest stage with execution log."""
+def reconcile_stage(task_dir: Path, manifest: dict, cached_log: str | None = None) -> dict:
+    """Reconcile manifest stage with execution log.
+
+    cached_log: pre-read content of execution-log.md; avoids a redundant disk
+    read when the caller already holds the file text.
+    """
     stage = manifest.get("stage", "")
     if stage == "DONE" or (isinstance(stage, str) and "FAIL" in stage):
         return manifest
 
     try:
-        log_path = task_dir / "execution-log.md"
-        log_content = log_path.read_text()
+        if cached_log is None:
+            log_content = (task_dir / "execution-log.md").read_text()
+        else:
+            log_content = cached_log
         if any(marker in log_content for marker in (
             "\u2192 DONE", "[ADVANCE] EXECUTION \u2192 DONE", "[ADVANCE] AUDITING \u2192 DONE",
         )):
@@ -151,6 +160,123 @@ def collect_retrospectives_for_project(project_path: str) -> list[dict]:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
     return results
+
+
+# ---------------------------------------------------------------------------
+# Operator-dashboard helpers (AC 4-8)
+# ---------------------------------------------------------------------------
+
+# Parse "2026-04-25T03:49:54Z [STAGE] → SPEC_NORMALIZATION"
+# or       "2026-04-25T04:26:54Z [ADVANCE] PLAN_AUDIT → PRE_EXECUTION_SNAPSHOT"
+# Anchored, possessive-friendly. The arrow is unicode "→" (U+2192).
+# Source: telemetry/dashboard.py reconcile_stage() format observed in
+#         .dynos/<task>/execution-log.md.
+_STAGE_LOG_LINE_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+\[(?:STAGE|ADVANCE)\][^\n→]*→\s*(?P<stage>\S+)"
+)
+
+# Stage gates that require a human-approval-<stage>.json receipt per AC 5.
+# Source: spec.md AC 45 + assumption #5 (lines 220-225 of spec.md).
+GATE_STAGES = ("SPEC_REVIEW", "PLAN_REVIEW", "PLAN_AUDIT", "FINAL_AUDIT")
+
+# Numeric ordering used to determine which gates a task has progressed past.
+# Source: STAGE_ORDER above (deduplicated for clarity).
+_STAGE_NUMERIC = STAGE_ORDER
+
+
+def _parse_iso_z(s: str) -> datetime | None:
+    """Parse a 'YYYY-MM-DDTHH:MM:SSZ' or ISO 8601 timestamp. Returns None on failure."""
+    if not isinstance(s, str) or not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _stage_last_change(task_dir: Path, manifest: dict, cached_log: str | None = None) -> tuple[str, datetime | None]:
+    """Return (current_stage, last_stage_change_dt). Falls back to created_at when log missing.
+
+    Source: .dynos/<task>/execution-log.md  → last [STAGE] or [ADVANCE] line ts;
+            falls back to manifest.json field `created_at` when log is unavailable.
+
+    cached_log: pre-read content of execution-log.md; avoids a redundant disk
+    read when the caller already holds the file text.
+    """
+    stage = ""
+    if isinstance(manifest, dict):
+        v = manifest.get("stage", "")
+        if isinstance(v, str):
+            stage = v
+
+    last_change: datetime | None = None
+    try:
+        raw = cached_log if cached_log is not None else (task_dir / "execution-log.md").read_text()
+        # Walk lines bottom-up to find the most recent stage-change marker.
+        for line in reversed(raw.split("\n")):
+            m = _STAGE_LOG_LINE_RE.match(line.strip())
+            if m:
+                last_change = _parse_iso_z(m.group("ts"))
+                # Prefer log stage when manifest is silent.
+                if not stage:
+                    stage = m.group("stage")
+                break
+    except (OSError, UnicodeDecodeError):
+        pass
+
+    if last_change is None and isinstance(manifest, dict):
+        last_change = _parse_iso_z(manifest.get("created_at", ""))
+
+    return (stage, last_change)
+
+
+def _iter_jsonl_events(path: Path):
+    """Yield parsed JSON dicts from a .jsonl file. Silently skips bad lines."""
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        yield obj
+                except json.JSONDecodeError:
+                    continue
+    except (FileNotFoundError, OSError):
+        return
+
+
+def _read_global_events(project_path: str):
+    """Yield events from <project>/.dynos/events.jsonl."""
+    yield from _iter_jsonl_events(local_dynos_dir(project_path) / "events.jsonl")
+
+
+def _read_task_events(project_path: str, task_id: str):
+    """Yield events from <project>/.dynos/<task>/events.jsonl."""
+    yield from _iter_jsonl_events(local_dynos_dir(project_path) / task_id / "events.jsonl")
+
+
+def _expected_gates_for_stage(stage: str) -> list[str]:
+    """Return the gate stages a task at `stage` should have passed.
+
+    Source: STAGE_ORDER. A task at stage X should have approval receipts for
+    every GATE_STAGES entry whose ordinal <= ordinal(X), unless the task is
+    currently AT that gate stage (the gate itself is in-progress).
+    """
+    if not isinstance(stage, str) or stage not in _STAGE_NUMERIC:
+        return []
+    cur = _STAGE_NUMERIC[stage]
+    out = []
+    for g in GATE_STAGES:
+        g_ord = _STAGE_NUMERIC.get(g)
+        if g_ord is None:
+            continue
+        # Strictly past: g_ord < cur. AT the gate: g_ord == cur (still pending).
+        if g_ord < cur:
+            out.append(g)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +787,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     dist_dir: str = ""
 
     def do_GET(self) -> None:
+        # SEC-OPUS-002: reject DNS-rebinding attempts via Host header.
+        if not self._check_host():
+            self.send_error(HTTPStatus.FORBIDDEN, "Forbidden: invalid Host header")
+            return
+
         parsed = urlparse(self.path)
         pathname = parsed.path
         query = parse_qs(parsed.query)
@@ -672,6 +803,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self._serve_static(pathname)
 
     def do_POST(self) -> None:
+        # SEC-OPUS-002: reject DNS-rebinding attempts via Host header.
+        if not self._check_host():
+            self.send_error(HTTPStatus.FORBIDDEN, "Forbidden: invalid Host header")
+            return
+        # SEC-OPUS-001: reject cross-origin writes (CSRF / DNS rebinding).
+        if not self._check_origin():
+            self.send_error(HTTPStatus.FORBIDDEN, "Forbidden: cross-origin request rejected")
+            return
+
         parsed = urlparse(self.path)
         pathname = parsed.path
         query = parse_qs(parsed.query)
@@ -684,6 +824,58 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         pass
+
+    # ---------------------------------------------------------------
+    # Security: Host / Origin validation (DNS rebinding + CSRF defense)
+    # ---------------------------------------------------------------
+
+    def _check_host(self) -> bool:
+        """Return True iff the Host header points at a localhost address.
+
+        Browsers always send a Host header. Legitimate operator traffic
+        will have Host: localhost:<port> or 127.0.0.1:<port>. Anything
+        else (e.g. attacker.com via DNS rebinding) is rejected.
+        Missing Host is allowed for non-browser tools (curl --http1.0).
+        """
+        host_header = self.headers.get("Host", "")
+        if not host_header:
+            return True
+        # Strip optional :port suffix; handle IPv6 bracketed form too.
+        host = host_header.strip().lower()
+        if host.startswith("["):
+            # IPv6 literal: [::1]:port -> ::1
+            end = host.find("]")
+            if end == -1:
+                return False
+            hostname = host[1:end]
+        else:
+            hostname = host.split(":", 1)[0]
+        return hostname in ("localhost", "127.0.0.1", "::1")
+
+    def _check_origin(self) -> bool:
+        """Return True iff the Origin header is absent or points at localhost.
+
+        Used to defend mutating endpoints from CSRF / DNS-rebinding writes.
+        Same-origin XHR/fetch from the dashboard SPA will set Origin to
+        http://localhost:<port> or http://127.0.0.1:<port>. Cross-origin
+        requests from another website will carry that other origin and
+        are rejected.
+        """
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return True  # same-origin form post or non-browser client
+        try:
+            port = self.server.server_port
+        except AttributeError:
+            port = None
+        allowed = {
+            "http://localhost",
+            "http://127.0.0.1",
+        }
+        if port is not None:
+            allowed.add(f"http://localhost:{port}")
+            allowed.add(f"http://127.0.0.1:{port}")
+        return origin in allowed
 
     # ---------------------------------------------------------------
     # Static file serving
@@ -923,6 +1115,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         "recent_findings_by_category": raw_state.get("recent_findings_by_category", None),
                         "blocked_reason": raw_state.get("blocked_reason", None),
                     })
+                return
+
+            # ---- Operator-dashboard aggregation endpoints (AC 4-8, 13) ----
+            # Routed before the task-specific regex per AC 13.
+            if pathname == "/api/machine-summary":
+                self._handle_machine_summary(query)
+                return
+            if pathname == "/api/trust-summary":
+                self._handle_trust_summary(query)
+                return
+            if pathname == "/api/events-feed":
+                self._handle_events_feed(query)
+                return
+            if pathname == "/api/cross-repo-timeline":
+                self._handle_cross_repo_timeline(query)
+                return
+            if pathname == "/api/palette-index":
+                self._handle_palette_index(query)
                 return
 
             # ---- Task-specific endpoints: /api/tasks/:taskId/... ----
@@ -1480,6 +1690,802 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return [build_project_stats(project_path)]
         except Exception:
             return []
+
+    # ---------------------------------------------------------------
+    # Operator-dashboard aggregation handlers (AC 4-8)
+    # ---------------------------------------------------------------
+
+    def _get_all_projects(self, query: dict) -> list[tuple[str, str]]:
+        """Return [(project_path, slug), ...] either scoped to ?project= or all registered.
+
+        AC 11: when ?project=<absolute-path> is supplied and resolves, scope to
+        that single repo. The caller is expected to have already validated the
+        project param via _resolve_project; this method just shapes the list.
+        """
+        project_param = query.get("project", [None])[0]
+        if project_param and project_param != "__global__":
+            # Already validated by _resolve_project at handler entry.
+            pp = os.path.realpath(project_param)
+            return [(pp, compute_slug(pp))]
+        # Otherwise: every registered project.
+        try:
+            registry = get_registry()
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return []
+        out = []
+        for proj in registry.get("projects", []) if isinstance(registry, dict) else []:
+            if not isinstance(proj, dict):
+                continue
+            pp = proj.get("path", "")
+            if not isinstance(pp, str) or not pp:
+                continue
+            out.append((pp, compute_slug(pp)))
+        return out
+
+    def _handle_machine_summary(self, query: dict) -> None:
+        """AC 4: machine-wide aggregation with 2-second budget (AC 10) and per-repo
+        try/except (AC 9). Source files per metric:
+
+          - active_repos: registry.json `projects` length
+          - active_tasks/active_agents: per-task manifest.json `stage` not in TERMINAL_STAGES
+          - token_burn_rate_per_min: per-repo .dynos/events.jsonl `tokens` field within last 60s
+          - current_cost_by_model: per-task .dynos/<task>/token-usage.json `by_model`
+          - error_rate: per-task manifest.json `stage` containing 'FAIL' over tasks created in last 24h
+          - stalled_agents: per-task .dynos/<task>/execution-log.md last [STAGE]/[ADVANCE] ts (>30min)
+          - orphan_token_events: per-repo .dynos/events.jsonl `tokens` field with no executor receipt
+          - receipt_failures: per-repo .dynos/events.jsonl events containing 'validate_receipts' fail
+          - stage_lag: same as stalled_agents but >60min
+          - queue_depth: per-task manifest.json `stage` in {PLANNING, SPEC_NORMALIZATION}
+          - retry_rate: per-task manifest.json any value of `retry_counts` > 0
+          - top_failing_repos: error_rate>0 sorted desc, top 5
+          - top_expensive_repos: sum(by_model.estimated_usd) per repo, top 5
+          - top_expensive_tasks: per-task token-usage.json total_tokens, top 10
+        """
+        budget_start = time.monotonic()
+        BUDGET_SECONDS = 2.0
+        STALLED_THRESHOLD_S = 30 * 60  # 30 minutes per spec
+        STAGE_LAG_THRESHOLD_S = 60 * 60  # 1 hour per spec
+
+        now = datetime.now(timezone.utc)
+        cutoff_24h = now - timedelta(hours=24)
+        cutoff_60s = now - timedelta(seconds=60)
+
+        all_projects = self._get_all_projects(query)
+        active_repos = len(all_projects)
+
+        active_tasks = 0
+        token_burn_rate_per_min = 0
+        by_model_agg: dict[str, dict] = {}
+        failed_24h = 0
+        created_24h = 0
+        stalled_agents: list[dict] = []
+        orphan_token_events = 0
+        receipt_failures = 0
+        stage_lag: list[dict] = []
+        queue_depth = 0
+        retry_with_count = 0
+        total_tasks_count = 0
+        repo_error_rates: list[tuple[str, float]] = []
+        repo_costs: list[tuple[str, float]] = []
+        per_task_costs: list[dict] = []
+        repos_failed: list[dict] = []
+        repos_skipped: list[str] = []
+        degraded = False
+
+        for idx, (pp, slug) in enumerate(all_projects):
+            if (time.monotonic() - budget_start) > BUDGET_SECONDS:
+                degraded = True
+                repos_skipped.extend(s for _p, s in all_projects[idx:])
+                break
+
+            try:
+                # ---- per-repo events.jsonl scan: token burn + receipt failures ----
+                # Source: <repo>/.dynos/events.jsonl
+                repo_token_burn = 0
+                repo_receipt_failures = 0
+                # Track tokens-event task_ids → cross-check executor receipts
+                token_event_tasks: list[tuple[str, str]] = []  # (task_id, agent or '')
+                for evt in _read_global_events(pp):
+                    ev_name = evt.get("event", "")
+                    ev_ts = _parse_iso_z(evt.get("ts", ""))
+                    tokens = evt.get("tokens")
+                    # token burn: any event with a numeric tokens field in last 60s
+                    if isinstance(tokens, (int, float)) and ev_ts and ev_ts >= cutoff_60s:
+                        repo_token_burn += int(tokens)
+                    # orphan-token bookkeeping: any event with tokens field
+                    if isinstance(tokens, (int, float)):
+                        tid = evt.get("task", "") if isinstance(evt.get("task"), str) else ""
+                        agent = evt.get("agent", "") if isinstance(evt.get("agent"), str) else ""
+                        if tid:
+                            token_event_tasks.append((tid, agent))
+                    # receipt_failures: validate_receipts_failed-style events in last 24h
+                    if (
+                        isinstance(ev_name, str)
+                        and ("validate_receipts_failed" in ev_name or ev_name == "receipt_validation_failed")
+                        and ev_ts and ev_ts >= cutoff_24h
+                    ):
+                        repo_receipt_failures += 1
+                token_burn_rate_per_min += repo_token_burn
+                receipt_failures += repo_receipt_failures
+
+                # ---- per-task scan: tasks, costs, stages, stalled/lag, retries ----
+                task_dirs = list_task_dirs(pp)
+                # Pre-build set of task_ids that have an executor receipt for orphan check.
+                # Source: <repo>/.dynos/<task>/receipts/executor-*.json
+                tasks_with_executor_receipt: set[str] = set()
+                repo_total_usd = 0.0
+                repo_total_tasks = 0
+                repo_failed_tasks = 0
+
+                for td in task_dirs:
+                    # PERF-002: task-level budget check — bail early before more I/O
+                    if (time.monotonic() - budget_start) > BUDGET_SECONDS:
+                        degraded = True
+                        break
+
+                    task_path = local_dynos_dir(pp) / td
+
+                    # PERF-002: read execution-log.md ONCE per task and reuse for
+                    # both reconcile_stage and _stage_last_change to halve file I/O.
+                    try:
+                        _log_text: str | None = (task_path / "execution-log.md").read_text()
+                    except (OSError, UnicodeDecodeError):
+                        _log_text = None
+
+                    # manifest read
+                    try:
+                        manifest = read_json_file(task_path / "manifest.json")
+                    except (FileNotFoundError, json.JSONDecodeError, OSError):
+                        manifest = {}
+                    if not isinstance(manifest, dict):
+                        manifest = {}
+                    manifest = reconcile_stage(task_path, manifest, cached_log=_log_text)
+                    stage = manifest.get("stage", "")
+                    if not isinstance(stage, str):
+                        stage = ""
+
+                    repo_total_tasks += 1
+                    total_tasks_count += 1
+
+                    # active counters
+                    if stage and stage not in TERMINAL_STAGES:
+                        active_tasks += 1
+
+                    # queue depth
+                    if stage in ("PLANNING", "SPEC_NORMALIZATION"):
+                        queue_depth += 1
+
+                    # error/created in last 24h
+                    created_dt = _parse_iso_z(manifest.get("created_at", ""))
+                    if created_dt and created_dt >= cutoff_24h:
+                        created_24h += 1
+                        if "FAIL" in stage:
+                            failed_24h += 1
+                    if "FAIL" in stage:
+                        repo_failed_tasks += 1
+
+                    # retry rate
+                    rc = manifest.get("retry_counts", {})
+                    if isinstance(rc, dict) and any(
+                        isinstance(v, (int, float)) and v > 0 for v in rc.values()
+                    ):
+                        retry_with_count += 1
+
+                    # stalled / stage-lag (only meaningful for non-terminal tasks)
+                    if stage and stage not in TERMINAL_STAGES:
+                        _, last_change = _stage_last_change(task_path, manifest, cached_log=_log_text)
+                        if last_change is not None:
+                            age_s = int((now - last_change).total_seconds())
+                            if age_s > STALLED_THRESHOLD_S:
+                                stalled_agents.append({
+                                    "task_id": td,
+                                    "repo_slug": slug,
+                                    "stage": stage,
+                                    "stage_age_seconds": age_s,
+                                })
+                            if age_s > STAGE_LAG_THRESHOLD_S:
+                                stage_lag.append({
+                                    "task_id": td,
+                                    "repo_slug": slug,
+                                    "stage": stage,
+                                    "last_change_at": last_change.isoformat(),
+                                })
+
+                    # cost per task: token-usage.json
+                    try:
+                        usage = read_json_file(task_path / "token-usage.json")
+                    except (FileNotFoundError, json.JSONDecodeError, OSError):
+                        usage = None
+                    task_total_tokens = 0
+                    task_total_usd = 0.0
+                    if isinstance(usage, dict):
+                        models = usage.get("by_model", {})
+                        if isinstance(models, dict):
+                            for model, info in models.items():
+                                if not isinstance(info, dict):
+                                    continue
+                                inp = info.get("input_tokens", 0)
+                                outp = info.get("output_tokens", 0)
+                                if not isinstance(inp, (int, float)):
+                                    inp = 0
+                                if not isinstance(outp, (int, float)):
+                                    outp = 0
+                                key = model.lower() if isinstance(model, str) else "unknown"
+                                rates = RATES_PER_MILLION.get(key, {"input": 3.00, "output": 15.00})
+                                cost = (inp / 1_000_000) * rates["input"] + (outp / 1_000_000) * rates["output"]
+                                task_total_usd += cost
+                                # roll into machine-wide cost by model
+                                bucket = by_model_agg.setdefault(key, {
+                                    "input_tokens": 0,
+                                    "output_tokens": 0,
+                                    "estimated_usd": 0.0,
+                                })
+                                bucket["input_tokens"] += int(inp)
+                                bucket["output_tokens"] += int(outp)
+                                bucket["estimated_usd"] += cost
+                        tt = usage.get("total_tokens")
+                        if not isinstance(tt, (int, float)):
+                            tt = 0
+                            agents_obj = usage.get("agents", {})
+                            if isinstance(agents_obj, dict):
+                                for v in agents_obj.values():
+                                    if isinstance(v, (int, float)):
+                                        tt += int(v)
+                        task_total_tokens = int(tt)
+
+                    repo_total_usd += task_total_usd
+                    per_task_costs.append({
+                        "task_id": td,
+                        "repo_slug": slug,
+                        "total_tokens": task_total_tokens,
+                        "estimated_usd": round(task_total_usd, 4),
+                    })
+
+                    # executor-receipt presence for orphan check
+                    # Source: <repo>/.dynos/<task>/receipts/executor-*.json
+                    try:
+                        for entry in os.listdir(task_path / "receipts"):
+                            if entry.startswith("executor-") and entry.endswith(".json"):
+                                tasks_with_executor_receipt.add(td)
+                                break
+                    except OSError:
+                        pass
+
+                # orphan_token_events: token events whose task has no executor receipt
+                # Source: counted from token_event_tasks built from <repo>/.dynos/events.jsonl
+                for tid, _agent in token_event_tasks:
+                    if tid not in tasks_with_executor_receipt:
+                        orphan_token_events += 1
+
+                # repo error rate (over all tasks in repo, not just last 24h)
+                if repo_total_tasks > 0:
+                    er = repo_failed_tasks / repo_total_tasks
+                    if er > 0:
+                        repo_error_rates.append((slug, round(er, 4)))
+                if repo_total_usd > 0:
+                    repo_costs.append((slug, round(repo_total_usd, 4)))
+            except Exception as exc:
+                # AC 9: never propagate, never 500
+                repos_failed.append({"slug": slug, "reason": str(exc)[:200]})
+                continue
+
+        # Round per-model usd for stable JSON
+        for key in by_model_agg:
+            by_model_agg[key]["estimated_usd"] = round(by_model_agg[key]["estimated_usd"], 4)
+
+        # Top-N rankings
+        repo_error_rates.sort(key=lambda x: x[1], reverse=True)
+        top_failing_repos = [
+            {"slug": s, "error_rate": e} for (s, e) in repo_error_rates[:5]
+        ]
+        repo_costs.sort(key=lambda x: x[1], reverse=True)
+        top_expensive_repos = [
+            {"slug": s, "total_estimated_usd": c} for (s, c) in repo_costs[:5]
+        ]
+        per_task_costs.sort(key=lambda x: x["total_tokens"], reverse=True)
+        top_expensive_tasks = per_task_costs[:10]
+
+        error_rate = (
+            round(failed_24h / created_24h, 4) if created_24h > 0 else None
+        )
+        retry_rate = (
+            round(retry_with_count / total_tasks_count, 4)
+            if total_tasks_count > 0 else None
+        )
+
+        active_agents = active_tasks  # AC 4: same as active_tasks
+
+        payload = {
+            "active_repos": active_repos,
+            "active_tasks": active_tasks,
+            "active_agents": active_agents,
+            "token_burn_rate_per_min": int(token_burn_rate_per_min),
+            "current_cost_by_model": by_model_agg,
+            "error_rate": error_rate,
+            "stalled_agents": stalled_agents,
+            "orphan_token_events": orphan_token_events,
+            "receipt_failures": receipt_failures,
+            "stage_lag": stage_lag,
+            "queue_depth": queue_depth,
+            "retry_rate": retry_rate,
+            "top_failing_repos": top_failing_repos,
+            "top_expensive_repos": top_expensive_repos,
+            "top_expensive_tasks": top_expensive_tasks,
+            "repos_failed": repos_failed,
+            "degraded": degraded,
+            "repos_skipped": repos_skipped,
+            "computed_at": now.isoformat(),
+        }
+        self._json_response(200, payload)
+
+    def _handle_trust_summary(self, query: dict) -> None:
+        """AC 5: trust-substrate aggregation. Per-repo try/except (AC 9), 2-second
+        budget (AC 10). Sources:
+
+          - deterministic_ops: stage_transition events with forced!=true from
+            <repo>/.dynos/events.jsonl AND <repo>/.dynos/<task>/events.jsonl
+          - prompt_owned_ops: events whose name contains 'agent' or 'spawn' with
+            no matching <repo>/.dynos/<task>/receipts/executor-*.json receipt
+          - missing_receipts: per task that has progressed past a gate stage,
+            check <repo>/.dynos/<task>/receipts/human-approval-<gate>.json
+          - skipped_gates: same source — when manifest stage > gate but no
+            receipt is present
+          - unverifiable_transitions: per task, count receipts/ entries vs
+            expected gates; gaps reported as reason strings
+        """
+        budget_start = time.monotonic()
+        BUDGET_SECONDS = 2.0
+        now = datetime.now(timezone.utc)
+
+        all_projects = self._get_all_projects(query)
+
+        deterministic_ops = 0
+        prompt_owned_ops = 0
+        missing_receipts: list[dict] = []
+        skipped_gates: list[dict] = []
+        unverifiable_transitions: list[dict] = []
+        repos_skipped: list[str] = []
+        degraded = False
+
+        # PERF-007: request-local cache so the same task's manifest isn't
+        # re-read if other handlers in the same request touch it. Keyed by
+        # absolute task_dir path. Lives only for this handler invocation.
+        _manifest_cache: dict[str, dict] = {}
+
+        for idx, (pp, slug) in enumerate(all_projects):
+            if (time.monotonic() - budget_start) > BUDGET_SECONDS:
+                degraded = True
+                repos_skipped.extend(s for _p, s in all_projects[idx:])
+                break
+            try:
+                # Global events for this repo
+                # Source: <repo>/.dynos/events.jsonl
+                for evt in _read_global_events(pp):
+                    ev_name = evt.get("event", "")
+                    if not isinstance(ev_name, str):
+                        continue
+                    if ev_name == "stage_transition":
+                        forced = evt.get("forced", False)
+                        if not forced:
+                            deterministic_ops += 1
+
+                # Per-task scan
+                for td in list_task_dirs(pp):
+                    # PERF-003/PERF-004: task-level budget check — N+1 file I/O
+                    # (manifest.json + receipts dir + per-task events.jsonl)
+                    # otherwise blows past the budget on large repos.
+                    if (time.monotonic() - budget_start) > BUDGET_SECONDS:
+                        degraded = True
+                        break
+
+                    task_path = local_dynos_dir(pp) / td
+                    cache_key = str(task_path)
+
+                    # PERF-007: manifest cache — avoid re-reading manifest.json
+                    # if this task was already touched in this request.
+                    cached_manifest = _manifest_cache.get(cache_key)
+                    if cached_manifest is not None:
+                        manifest = cached_manifest
+                    else:
+                        try:
+                            manifest = read_json_file(task_path / "manifest.json")
+                        except (FileNotFoundError, json.JSONDecodeError, OSError):
+                            manifest = {}
+                        if not isinstance(manifest, dict):
+                            manifest = {}
+
+                    # PERF-009: read execution-log.md once and pass it into
+                    # reconcile_stage rather than letting reconcile re-read it.
+                    try:
+                        _log_text: str | None = (task_path / "execution-log.md").read_text()
+                    except (OSError, UnicodeDecodeError):
+                        _log_text = None
+                    manifest = reconcile_stage(task_path, manifest, cached_log=_log_text)
+                    _manifest_cache[cache_key] = manifest
+                    stage = manifest.get("stage", "")
+                    if not isinstance(stage, str):
+                        stage = ""
+
+                    # Build set of present receipts for this task
+                    # Source: <repo>/.dynos/<task>/receipts/*.json
+                    present_receipts: set[str] = set()
+                    has_executor_receipt = False
+                    try:
+                        for entry in os.listdir(task_path / "receipts"):
+                            if not entry.endswith(".json"):
+                                continue
+                            present_receipts.add(entry)
+                            if entry.startswith("executor-"):
+                                has_executor_receipt = True
+                    except OSError:
+                        pass
+
+                    # Per-task events
+                    # Source: <repo>/.dynos/<task>/events.jsonl
+                    for evt in _read_task_events(pp, td):
+                        ev_name = evt.get("event", "")
+                        if not isinstance(ev_name, str):
+                            continue
+                        if ev_name == "stage_transition":
+                            forced = evt.get("forced", False)
+                            if not forced:
+                                deterministic_ops += 1
+                        # prompt_owned_ops: events implying agent execution
+                        # without an executor receipt to anchor them.
+                        if ("agent" in ev_name or "spawn" in ev_name):
+                            if not has_executor_receipt:
+                                prompt_owned_ops += 1
+
+                    # missing_receipts + skipped_gates: per gate the task
+                    # has progressed strictly past.
+                    expected_gates = _expected_gates_for_stage(stage)
+                    for gate in expected_gates:
+                        receipt_name = f"human-approval-{gate}.json"
+                        if receipt_name not in present_receipts:
+                            missing_receipts.append({
+                                "task_id": td,
+                                "repo_slug": slug,
+                                "receipt_name": receipt_name,
+                            })
+                            skipped_gates.append({
+                                "task_id": td,
+                                "repo_slug": slug,
+                                "stage": gate,
+                            })
+
+                    # unverifiable_transitions: detect manifest.stage that is
+                    # past at least one gate but the task has zero receipts at
+                    # all (chain has no anchor).
+                    if expected_gates and not present_receipts:
+                        unverifiable_transitions.append({
+                            "task_id": td,
+                            "repo_slug": slug,
+                            "reason": "no receipts present despite stage progression past gate(s)",
+                        })
+            except Exception:
+                # AC 9: per-repo isolation. TrustSummary type has no
+                # repos_failed slot; the failure is silent in the schema.
+                continue
+
+        payload = {
+            "deterministic_ops": deterministic_ops,
+            "prompt_owned_ops": prompt_owned_ops,
+            "missing_receipts": missing_receipts,
+            "skipped_gates": skipped_gates,
+            "stale_skill_installs": None,  # AC 5: literal null, untracked
+            "unverifiable_transitions": unverifiable_transitions,
+            "computed_at": now.isoformat(),
+            "data_source_caveats": [
+                "stale_skill_installs is not tracked — skill version history is not stored on disk",
+            ],
+            "degraded": degraded,
+            "repos_skipped": repos_skipped,
+        }
+        self._json_response(200, payload)
+
+    def _handle_events_feed(self, query: dict) -> None:
+        """AC 6: cross-repo events feed.
+
+        Source: <repo>/.dynos/events.jsonl  AND  <repo>/.dynos/<task>/events.jsonl
+
+        Uses a min-heap of size `limit` to maintain the top-N events by ts
+        descending without accumulating all events into memory first.
+        A 2-second wall-clock budget stops repo iteration early so the handler
+        always returns within the budget; partial results are returned normally
+        (no degraded flag for this endpoint).
+        """
+        # Limit parsing
+        limit_raw = query.get("limit", ["100"])[0]
+        try:
+            limit = int(limit_raw)
+        except (ValueError, TypeError):
+            limit = 100
+        limit = max(1, min(500, limit))
+
+        all_projects = self._get_all_projects(query)
+
+        # Min-heap: each entry is (ts_str, tie_breaker, event_dict).
+        # Keeping only the `limit` largest ts values means we heappop the
+        # *smallest* ts when the heap is full — standard top-N pattern.
+        heap: list[tuple[str, int, dict]] = []
+        counter = 0  # stable tie-breaker so dict comparison is never reached
+        budget_start = time.monotonic()
+
+        for pp, slug in all_projects:
+            if time.monotonic() - budget_start > 2.0:
+                break
+            try:
+                # Global events
+                for evt in _read_global_events(pp):
+                    if self._events_feed_match(evt):
+                        aug = self._augment_event(evt, slug)
+                        ts = aug.get("ts", "")
+                        if not isinstance(ts, str):
+                            ts = ""
+                        heapq.heappush(heap, (ts, counter, aug))
+                        counter += 1
+                        if len(heap) > limit:
+                            heapq.heappop(heap)  # drop smallest ts
+
+                # Per-task events
+                for td in list_task_dirs(pp):
+                    if time.monotonic() - budget_start > 2.0:
+                        break
+                    for evt in _read_task_events(pp, td):
+                        if self._events_feed_match(evt):
+                            aug = self._augment_event(evt, slug)
+                            # Prefer task_id from path when event lacks `task`
+                            if "task_id" not in aug or not aug["task_id"]:
+                                aug["task_id"] = td
+                            ts = aug.get("ts", "")
+                            if not isinstance(ts, str):
+                                ts = ""
+                            heapq.heappush(heap, (ts, counter, aug))
+                            counter += 1
+                            if len(heap) > limit:
+                                heapq.heappop(heap)  # drop smallest ts
+            except Exception:
+                # AC 9: never propagate
+                continue
+
+        # Drain heap and sort descending by ts.
+        events = [e for _ts, _i, e in sorted(heap, key=lambda x: x[0], reverse=True)]
+        self._json_response(200, {"events": events})
+
+    @staticmethod
+    def _events_feed_match(evt: dict) -> bool:
+        """AC 6 filter."""
+        ev = evt.get("event", "")
+        if not isinstance(ev, str):
+            return False
+        if ev == "write_policy_denied":
+            return True
+        if ev == "stage_transition" and evt.get("forced") is True:
+            return True
+        if ev.startswith("repair_"):
+            return True
+        if ev.startswith("postmortem_"):
+            return True
+        return False
+
+    @staticmethod
+    def _augment_event(evt: dict, slug: str) -> dict:
+        """Add repo_slug and surface task_id (already on evt['task'] often)."""
+        out = dict(evt)
+        out["repo_slug"] = slug
+        # Promote 'task' → 'task_id' for the typed contract.
+        if "task_id" not in out:
+            t = evt.get("task", "")
+            if isinstance(t, str) and t:
+                out["task_id"] = t
+        return out
+
+    def _handle_cross_repo_timeline(self, query: dict) -> None:
+        """AC 7: non-terminal task timeline.
+
+        Source: <repo>/.dynos/<task>/manifest.json  +  execution-log.md
+        """
+        # PERF-017/PERF-018: cross-repo timeline previously had no wall-clock
+        # budget; on a registry with many repos and per-task execution logs
+        # this could pin the dashboard process for tens of seconds.
+        budget_start = time.monotonic()
+        BUDGET_SECONDS = 2.0
+        # PERF-005: read only the tail of execution-log.md to extract the
+        # last dated line. The newest stage/advance line is always near EOF;
+        # reading the entire file (often megabytes after long runs) wastes IO.
+        LOG_TAIL_BYTES = 64 * 1024  # 64 KiB tail is enough for ~500 stage lines
+
+        # PERF-007: request-local manifest cache. Keyed by absolute task_dir
+        # path. Scoped to this handler invocation only.
+        _manifest_cache: dict[str, dict] = {}
+
+        all_projects = self._get_all_projects(query)
+        entries: list[dict] = []
+
+        for pp, slug in all_projects:
+            # PERF-017: repo-level budget check.
+            if time.monotonic() - budget_start > BUDGET_SECONDS:
+                break
+            try:
+                for td in list_task_dirs(pp):
+                    # PERF-005: per-task budget check — bail before more I/O.
+                    if time.monotonic() - budget_start > BUDGET_SECONDS:
+                        break
+
+                    task_path = local_dynos_dir(pp) / td
+                    cache_key = str(task_path)
+
+                    # PERF-007: manifest cache.
+                    cached_manifest = _manifest_cache.get(cache_key)
+                    if cached_manifest is not None:
+                        manifest = cached_manifest
+                    else:
+                        try:
+                            manifest = read_json_file(task_path / "manifest.json")
+                        except (FileNotFoundError, json.JSONDecodeError, OSError):
+                            continue
+                        if not isinstance(manifest, dict):
+                            continue
+
+                    # PERF-005/PERF-009: read only the LAST 64 KiB of the
+                    # execution log and pass it into reconcile_stage so the
+                    # function does not re-read from disk.
+                    raw: str | None = None
+                    try:
+                        log_path = task_path / "execution-log.md"
+                        with open(log_path, "rb") as _fh:
+                            try:
+                                _fh.seek(0, os.SEEK_END)
+                                size = _fh.tell()
+                                start = max(0, size - LOG_TAIL_BYTES)
+                                _fh.seek(start)
+                                _data = _fh.read()
+                            except OSError:
+                                _data = b""
+                        try:
+                            raw = _data.decode("utf-8", errors="replace")
+                        except Exception:
+                            raw = None
+                    except (OSError, FileNotFoundError):
+                        raw = None
+
+                    manifest = reconcile_stage(task_path, manifest, cached_log=raw)
+                    _manifest_cache[cache_key] = manifest
+                    stage = manifest.get("stage", "")
+                    if not isinstance(stage, str) or stage in TERMINAL_STAGES:
+                        continue
+                    created_at = manifest.get("created_at", "")
+                    title = manifest.get("title", "")
+                    if not isinstance(created_at, str):
+                        created_at = ""
+                    if not isinstance(title, str):
+                        title = ""
+
+                    # updated_at: most recent [STAGE]/[ADVANCE]/[DONE] line ts
+                    # Source: tail of <repo>/.dynos/<task>/execution-log.md
+                    updated_at = created_at
+                    if raw:
+                        # Walk reverse to find most recent dated line
+                        for line in reversed(raw.split("\n")):
+                            line = line.strip()
+                            if not line:
+                                continue
+                            # Any line matching ISO-Z prefix
+                            if len(line) >= 20 and line[4] == "-" and line[10] == "T" and line[19] == "Z":
+                                ts_candidate = line[:20]
+                                if _parse_iso_z(ts_candidate):
+                                    updated_at = ts_candidate
+                                    break
+
+                    entries.append({
+                        "task_id": td,
+                        "repo_slug": slug,
+                        "title": title,
+                        "stage": stage,
+                        "created_at": created_at,
+                        "updated_at": updated_at,
+                    })
+            except Exception:
+                continue
+
+        entries.sort(key=lambda e: e.get("created_at", ""))
+        self._json_response(200, entries)
+
+    def _handle_palette_index(self, query: dict) -> None:
+        """AC 8: command-palette index. AC 12: ignores ?project= entirely.
+
+        Source: registry.json  +  per-task <repo>/.dynos/<task>/manifest.json
+        """
+        # AC 12: do not honour ?project=. Always machine-wide.
+        try:
+            registry = get_registry()
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            registry = {"projects": []}
+
+        projects = registry.get("projects", []) if isinstance(registry, dict) else []
+        if not isinstance(projects, list):
+            projects = []
+
+        repos_out: list[dict] = []
+        all_pairs: list[tuple[str, str]] = []
+        for proj in projects:
+            if not isinstance(proj, dict):
+                continue
+            pp = proj.get("path", "")
+            if not isinstance(pp, str) or not pp:
+                continue
+            slug = compute_slug(pp)
+            name = os.path.basename(pp) if pp else ""
+            repos_out.append({"slug": slug, "name": name})
+            all_pairs.append((pp, slug))
+
+        # PERF-018: previously unbounded over all repos/tasks. Add a 2-second
+        # wall-clock budget so the palette endpoint cannot pin the process.
+        budget_start = time.monotonic()
+        BUDGET_SECONDS = 2.0
+        # PERF-006: cap at 2000 tasks but exit early — do not materialize all
+        # tasks into memory only to slice the head off.
+        TASK_CAP = 2000
+
+        # PERF-007: request-local manifest cache.
+        _manifest_cache: dict[str, dict] = {}
+
+        tasks_with_meta: list[tuple[str, dict]] = []  # (created_at, task entry)
+        _hit_cap = False
+        for pp, slug in all_pairs:
+            # PERF-018: repo-level budget + cap check.
+            if _hit_cap or time.monotonic() - budget_start > BUDGET_SECONDS:
+                break
+            try:
+                for td in list_task_dirs(pp):
+                    # PERF-006: early exit once we've collected TASK_CAP tasks.
+                    if len(tasks_with_meta) >= TASK_CAP:
+                        _hit_cap = True
+                        break
+                    # PERF-018: per-task budget check.
+                    if time.monotonic() - budget_start > BUDGET_SECONDS:
+                        break
+
+                    task_path = local_dynos_dir(pp) / td
+                    cache_key = str(task_path)
+
+                    # PERF-007: manifest cache.
+                    cached_manifest = _manifest_cache.get(cache_key)
+                    if cached_manifest is not None:
+                        manifest = cached_manifest
+                    else:
+                        try:
+                            manifest = read_json_file(task_path / "manifest.json")
+                        except (FileNotFoundError, json.JSONDecodeError, OSError):
+                            continue
+                        if not isinstance(manifest, dict):
+                            continue
+                        _manifest_cache[cache_key] = manifest
+
+                    title = manifest.get("title", "")
+                    stage = manifest.get("stage", "")
+                    created_at = manifest.get("created_at", "")
+                    if not isinstance(title, str):
+                        title = ""
+                    if not isinstance(stage, str):
+                        stage = ""
+                    if not isinstance(created_at, str):
+                        created_at = ""
+                    tasks_with_meta.append((created_at, {
+                        "task_id": td,
+                        "title": title,
+                        "repo_slug": slug,
+                        "stage": stage,
+                    }))
+            except Exception:
+                continue
+
+        # Sort by created_at desc; cap at TASK_CAP (already enforced by early
+        # exit, but keep the slice as a defensive guard).
+        tasks_with_meta.sort(key=lambda x: x[0], reverse=True)
+        tasks_out = [t for (_c, t) in tasks_with_meta[:TASK_CAP]]
+
+        self._json_response(200, {"repos": repos_out, "tasks": tasks_out})
 
     # ---------------------------------------------------------------
     # API POST routing

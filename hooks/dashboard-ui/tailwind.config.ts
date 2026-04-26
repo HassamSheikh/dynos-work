@@ -5,12 +5,21 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        "bg-base": "#090909",
-        "bg-surface": "#111",
-        "border-ui": "#1a1a1a",
-        "text-accent": "#6ee7b7",
-        "text-primary": "#e5e5e5",
-        "text-muted": "#888",
+        graphite: "#0f0e0c",
+        iron: "#171411",
+        "iron-light": "#2a241f",
+        sand: "#b6a690",
+        ash: "#ece1d2",
+        rust: "#b85c2e",
+        amber: "#d49a3a",
+        red: "#ef4444",
+        green: "#22c55e",
+        steel: "#d7b070",
+        "steel-dark": "#4f3216",
+      },
+      fontFamily: {
+        mono: ['"IBM Plex Mono"', "monospace"],
+        sans: ['"IBM Plex Sans"', "sans-serif"],
       },
     },
   },

@@ -6,10 +6,10 @@ import { router } from "./routes";
 export default function App() {
     return (_jsxs(ProjectProvider, { children: [_jsx(RouterProvider, { router: router }), _jsx(Toaster, { theme: "dark", toastOptions: {
                     style: {
-                        background: "#0D1321",
-                        border: "1px solid rgba(0, 229, 255, 0.15)",
-                        color: "#E2E8F0",
-                        fontFamily: "'JetBrains Mono', monospace",
+                        background: "#1e1e1e",
+                        border: "1px solid #2a2a2a",
+                        color: "#c8c4bc",
+                        fontFamily: "'IBM Plex Mono', monospace",
                         fontSize: "0.75rem",
                     },
                 } })] }));
