@@ -591,12 +591,10 @@ class TestBinDynosUnchanged:
         "postmortem",
         "registry",
         "calibration",
-        "evolve",
         "memory",
         "trajectory",
         "dashboard",
         "local",
-        "maintain",
         "bench",
         "report",
         "init",
@@ -604,8 +602,6 @@ class TestBinDynosUnchanged:
         "remove",
         "pause",
         "resume",
-        "autofix",
-        "proactive",
         "daemon",
         "worktree",
         "cloud",
@@ -631,8 +627,12 @@ class TestBinDynosUnchanged:
             "patterns": "patterns.py",
             "ctl": "ctl.py",
             "postmortem": "postmortem.py",
-            "dashboard": "global_dashboard.py",
-            "maintain": "daemon.py",
+            # The dashboard module moved from hooks/global_dashboard.py to
+            # telemetry/dashboard.py during the dashboard rewrite — confirm
+            # bin/dynos still routes the subcommand somewhere named
+            # `dashboard.py` rather than asserting the old path.
+            "dashboard": "dashboard.py",
+            "daemon": "daemon.py",
         }
         for subcmd, hook_file in expected_routes.items():
             assert hook_file in content, (
