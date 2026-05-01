@@ -749,6 +749,82 @@ def validate_retrospective(task_dir: Path) -> list[str]:
 RISK_BUDGETS: dict[str, int] = {"low": 8000, "medium": 12000, "high": 18000, "critical": 25000}
 
 
+def compute_pipeline_budget(task_dir: Path) -> dict:
+    """Compute audit-phase latency / token KPIs from token-usage events.
+
+    Surfaces the metrics that the latency investigation
+    (/tmp/bug_report.json recommendation #5) names as the missing signal:
+    without these, every well-meaning "perf:" or "fix:" commit can
+    silently grow the audit phase and no regression alarm fires.
+
+    Returns a dict with at minimum:
+      - audit_phase_llm_calls: count of token-usage events whose
+        phase=='audit' AND type=='spawn'. This is the cascade
+        multiplication factor: under haiku→sonnet→opus, a single auditor
+        role can fan out into 3 of these.
+      - audit_phase_input_tokens: sum of input_tokens across audit-phase
+        events. Pre-loaded prompt context (CG-013) shows up here.
+      - audit_phase_output_tokens: sum of output_tokens across audit-phase
+        events.
+      - audit_phase_total_tokens: convenience sum.
+
+    Graceful degradation: missing token-usage.json or empty events list
+    returns zeros for all fields. Malformed events (non-dicts, missing
+    keys) are skipped silently — token-usage.json is append-only telemetry
+    and unrelated parser bugs upstream should not corrupt the budget.
+
+    Audit-only by intent. Execution and planning have different latency
+    shapes; the bug investigation specifically named the audit phase as
+    the regression hotspot, so the KPI is targeted there.
+    """
+    usage_path = Path(task_dir) / "token-usage.json"
+    if not usage_path.is_file():
+        return {
+            "audit_phase_llm_calls": 0,
+            "audit_phase_input_tokens": 0,
+            "audit_phase_output_tokens": 0,
+            "audit_phase_total_tokens": 0,
+        }
+    try:
+        data = load_json(usage_path)
+    except (json.JSONDecodeError, OSError):
+        return {
+            "audit_phase_llm_calls": 0,
+            "audit_phase_input_tokens": 0,
+            "audit_phase_output_tokens": 0,
+            "audit_phase_total_tokens": 0,
+        }
+    events = data.get("events", []) if isinstance(data, dict) else []
+    if not isinstance(events, list):
+        events = []
+
+    llm_calls = 0
+    input_tokens = 0
+    output_tokens = 0
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        if e.get("phase") != "audit":
+            continue
+        try:
+            input_tokens += int(e.get("input_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            output_tokens += int(e.get("output_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+        if e.get("type") == "spawn":
+            llm_calls += 1
+
+    return {
+        "audit_phase_llm_calls": llm_calls,
+        "audit_phase_input_tokens": input_tokens,
+        "audit_phase_output_tokens": output_tokens,
+        "audit_phase_total_tokens": input_tokens + output_tokens,
+    }
+
+
 def compute_reward(task_dir: Path) -> dict:
     """Deterministically compute reward scores from task artifacts.
 
@@ -1272,6 +1348,7 @@ def compute_reward(task_dir: Path) -> dict:
         "lead_time_seconds": lead_time_seconds,
         "change_failure": change_failure,
         "recovery_time_seconds": recovery_time_seconds,
+        "pipeline_budget": compute_pipeline_budget(task_dir),
     }
 
 

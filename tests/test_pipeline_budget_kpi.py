@@ -108,12 +108,17 @@ def test_compute_pipeline_budget_empty_or_missing_returns_zeros(tmp_path: Path):
 def test_compute_pipeline_budget_tolerates_malformed_events(tmp_path: Path):
     from lib_validate import compute_pipeline_budget
     td = _make_task_dir(tmp_path)
-    _write_token_usage(td, [
-        {"phase": "audit", "type": "spawn", "input_tokens": 1000, "output_tokens": 500},
-        {"phase": "audit", "type": "spawn"},  # missing tokens
-        "not-a-dict",  # malformed
-        {},  # empty event
-    ])
+    # Write directly — _write_token_usage's helper sums fields and would
+    # itself crash on the malformed entry, which is unrelated to what we're
+    # testing here.
+    (td / "token-usage.json").write_text(json.dumps({
+        "events": [
+            {"phase": "audit", "type": "spawn", "input_tokens": 1000, "output_tokens": 500},
+            {"phase": "audit", "type": "spawn"},  # missing tokens
+            "not-a-dict",  # malformed
+            {},  # empty event
+        ],
+    }))
     pb = compute_pipeline_budget(td)
     assert pb["audit_phase_llm_calls"] == 2  # both audit+spawn entries count
     assert pb["audit_phase_input_tokens"] == 1000
