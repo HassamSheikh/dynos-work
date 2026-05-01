@@ -29,11 +29,11 @@ _EXECUTOR_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "ml-executor", "db-executor", "refactor-executor", "docs-executor",
     "planning", "execute-inline", "repair-coordinator",
     "audit-spec-completion", "audit-security", "audit-code-quality",
-    "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui",
+    "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui", "audit-claude-md",
 })
 
 # ---------------------------------------------------------------------------
-# Module-level imports for write_policy and lib_log.
+# Module-level imports for write_policy, read_policy, and lib_log.
 # These are resolved lazily at first-use inside main() so the hook can still
 # run when the hooks directory is not yet on sys.path (the path is added at
 # the start of main()). The module-level names are set to None initially and
@@ -43,6 +43,9 @@ _EXECUTOR_ROLE_ALLOWLIST: frozenset[str] = frozenset({
 decide_write = None  # type: ignore[assignment]
 _emit_policy_event = None  # type: ignore[assignment]
 WriteAttempt = None  # type: ignore[assignment]
+decide_read = None  # type: ignore[assignment]
+ReadAttempt_RP = None  # type: ignore[assignment]
+_emit_read_policy_event = None  # type: ignore[assignment]
 log_event = None  # type: ignore[assignment]
 
 
@@ -105,9 +108,9 @@ def _resolve_path(raw: str, cwd: Path) -> Path:
 
 def main() -> int:
     """Main entry point. Returns exit code."""
-    global decide_write, _emit_policy_event, WriteAttempt, log_event
+    global decide_write, _emit_policy_event, WriteAttempt, decide_read, ReadAttempt_RP, _emit_read_policy_event, log_event
 
-    # Add hooks directory to sys.path so we can import write_policy and lib_log
+    # Add hooks directory to sys.path so we can import write_policy, read_policy, and lib_log
     script_dir = Path(__file__).resolve().parent
     if str(script_dir) not in sys.path:
         sys.path.insert(0, str(script_dir))
@@ -155,6 +158,21 @@ def main() -> int:
             return 1
         # If decide_write was pre-populated (test context), proceed without
         # write_policy — WriteAttempt and _emit_policy_event may be None
+
+    # Import read_policy -- failure is non-fatal if decide_read was pre-populated
+    try:
+        import read_policy as _rp
+        if decide_read is None:
+            decide_read = _rp.decide_read
+        if ReadAttempt_RP is None:
+            ReadAttempt_RP = _rp.ReadAttempt
+        if _emit_read_policy_event is None:
+            _emit_read_policy_event = _rp._emit_read_policy_event
+    except ImportError as exc:
+        # Only fatal if decide_read itself is not yet available
+        if decide_read is None:
+            print(f"pre-tool-use: cannot import read_policy: {exc}", file=sys.stderr)
+            return 1
 
     # Import lib_log -- failure is non-fatal (event logging is optional)
     if log_event is None:
@@ -368,6 +386,130 @@ def main() -> int:
                 print(f"write-policy: {decision.reason}", file=sys.stderr)
                 return 2
 
+        return 0
+
+    # -----------------------------------------------------------------
+    # Handle Read, Grep, Glob tools: enforce read policy for audit roles
+    # -----------------------------------------------------------------
+    if tool_name in ("Read", "Grep", "Glob"):
+        # AC 16: non-audit roles bypass read-policy enforcement entirely.
+        if not role.startswith("audit-"):
+            return 0
+
+        # No task_dir: cannot enforce stage/diff scope; passthrough.
+        if task_dir is None:
+            return 0
+
+        # AC 15: stage guard. Read manifest.json; on any read/parse exception
+        # (including FileNotFoundError when the file is missing), fail-closed.
+        # Permitted stages source: spec.md AC 15 (PLAN_AUDIT, CHECKPOINT_AUDIT,
+        # FINAL_AUDIT, REPAIR_PLANNING, REPAIR_EXECUTION).
+        permitted_stages = {
+            "PLAN_AUDIT", "CHECKPOINT_AUDIT", "FINAL_AUDIT",
+            "REPAIR_PLANNING", "REPAIR_EXECUTION",
+        }
+        try:
+            manifest_data = json.loads((task_dir / "manifest.json").read_text())
+            stage = manifest_data.get("stage", "")
+        except Exception:
+            print(
+                "read-policy: manifest unreadable; denying audit-* tool call",
+                file=sys.stderr,
+            )
+            return 2
+        if stage not in permitted_stages:
+            print(
+                f"read-policy: audit role not permitted at stage {stage}",
+                file=sys.stderr,
+            )
+            return 2
+
+        # AC 13/14: load audit-plan.json with distinct missing/invalid events.
+        audit_plan = None
+        audit_plan_path = task_dir / "audit-plan.json"
+        if not audit_plan_path.exists():
+            # Missing: emit pre_tool_use_audit_plan_missing
+            try:
+                if log_event is not None:
+                    log_event(
+                        task_dir.parent.parent,
+                        "pre_tool_use_audit_plan_missing",
+                        task=task_dir.name,
+                        tool_name=tool_name,
+                    )
+            except Exception:
+                pass
+        else:
+            # Exists: parse and validate. Any failure → audit_plan=None +
+            # pre_tool_use_audit_plan_invalid.
+            invalid = False
+            try:
+                parsed = json.loads(audit_plan_path.read_text())
+                if isinstance(parsed, dict) and isinstance(parsed.get("diff_files"), list):
+                    audit_plan = parsed
+                else:
+                    invalid = True
+            except Exception:
+                invalid = True
+            if invalid:
+                audit_plan = None
+                try:
+                    if log_event is not None:
+                        log_event(
+                            task_dir.parent.parent,
+                            "pre_tool_use_audit_plan_invalid",
+                            task=task_dir.name,
+                            tool_name=tool_name,
+                        )
+                except Exception:
+                    pass
+
+        # AC 3: extract target per tool. tool_input must be a dict.
+        if not isinstance(tool_input, dict):
+            print(f"pre-tool-use: {tool_name} tool_input is not a dict", file=sys.stderr)
+            return 1
+
+        raw_pattern: str | None = None
+        if tool_name == "Read":
+            raw_path = tool_input.get("file_path") or tool_input.get("path") or ""
+            if not raw_path:
+                print("pre-tool-use: Read has no file_path in tool_input", file=sys.stderr)
+                return 1
+            target = _resolve_path(raw_path, cwd)
+        elif tool_name == "Grep":
+            # CRITICAL: Grep target is `path` (search root), NOT `pattern` (regex).
+            raw_path = tool_input.get("path", "")
+            if not raw_path:
+                # No explicit search root: fall back to cwd. This still allows
+                # decide_read to apply the diff/task_dir allowlist on cwd.
+                raw_path = str(cwd)
+            target = _resolve_path(raw_path, cwd)
+        else:  # Glob
+            pattern = tool_input.get("pattern", "")
+            if not pattern:
+                print("pre-tool-use: Glob has no pattern in tool_input", file=sys.stderr)
+                return 1
+            raw_pattern = pattern
+            # Best-effort: resolve pattern as a path so prefix checks see
+            # an absolute string. The original pattern is preserved in raw_pattern.
+            target = _resolve_path(pattern, cwd)
+
+        attempt = ReadAttempt_RP(
+            role=role,
+            task_dir=task_dir,
+            target=target,
+            tool_name=tool_name,
+            raw_pattern=raw_pattern,
+        )
+        decision = decide_read(attempt, audit_plan=audit_plan)
+        try:
+            _emit_read_policy_event(attempt, decision)
+        except Exception:
+            pass
+
+        if not decision.allowed:
+            print(f"read-policy: {decision.reason}", file=sys.stderr)
+            return 2
         return 0
 
     # Unknown tool name -- pass without policy check
