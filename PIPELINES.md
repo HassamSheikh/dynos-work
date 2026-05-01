@@ -161,6 +161,18 @@ repair-log.json            repair batches and executor assignments
 task-retrospective.json    outcomes, scoring, reward vector
 ```
 
+### Retire-or-Condition Rule (audit-phase gate budget)
+
+Every PR that adds a new mandatory blocking gate, auditor, receipt, or retroactive validation step in the audit phase MUST satisfy at least one of these conditions in the same commit:
+
+1. **Retire** an existing gate of equivalent scope. The aggregate gate count cannot grow indefinitely.
+2. **Condition** the new gate on `risk_level` (only fires for `high`/`critical`) or on a diff-membership predicate (e.g., file-pattern check). Unconditional gates are the failure mode the 2026-04-30 latency investigation identified.
+3. **Budget** — attach a measured pipeline-budget delta showing `audit_phase_llm_calls` and `audit_phase_input_tokens` (from `task-retrospective.json::pipeline_budget`) do not regress beyond the tier ceilings. Suggested ceilings: low risk ≤ 3 audit LLM calls, medium ≤ 4, high ≤ 6, critical ≤ 9. Adjust when the data warrants but document the move.
+
+Reviewers should reject PRs that add a mandatory step without one of the three. The rule exists because individually-justified hardening commits stack into a serial pipeline that grows monotonically — claude-md-auditor (third mandatory blocking auditor, 2026-04-30) was the canonical example, and the haiku→sonnet→opus cascade combined with pre-loaded diff context (CG-013) made the cumulative cost super-linear in diff size.
+
+The companion measurement KPI is `pipeline_budget` in every retrospective (computed by `lib_validate.compute_pipeline_budget`). The learn pipeline can use it to spot regressions across consecutive tasks.
+
 ---
 
 ## 2. Learn Pipeline
