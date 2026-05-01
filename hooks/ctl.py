@@ -2153,17 +2153,12 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
         from router import build_audit_plan  # noqa: PLC0415
 
         root = _root_for_task_dir(task_dir)
-        plan = build_audit_plan(
-            root,
-            str(task_type),
-            [str(d) for d in domains],
-            fast_track=fast_track,
-            risk_level=risk_level,
-            task_id=derived_task_id,
-        )
-        audit_plan_path = task_dir / "audit-plan.json"
-        audit_plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
 
+        # Compute diff scope BEFORE building the audit plan so the
+        # claude-md-auditor risk gate can decide based on actual diff
+        # contents (task-20260430-007). When diff_base is unavailable or
+        # git diff fails, diff_files stays empty and we pass None to
+        # build_audit_plan to fail-open: the auditor still runs.
         snapshot = manifest.get("snapshot")
         head_sha = snapshot.get("head_sha") if isinstance(snapshot, dict) else None
 
@@ -2189,6 +2184,18 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
                 diff_files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
             else:
                 diff_error = (result.stderr or result.stdout or f"git diff failed with {result.returncode}").strip()
+
+        plan = build_audit_plan(
+            root,
+            str(task_type),
+            [str(d) for d in domains],
+            fast_track=fast_track,
+            risk_level=risk_level,
+            task_id=derived_task_id,
+            diff_files=diff_files if (diff_base is not None and diff_error is None) else None,
+        )
+        audit_plan_path = task_dir / "audit-plan.json"
+        audit_plan_path.write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
 
         print(json.dumps({
             "status": "audit_setup_ready",

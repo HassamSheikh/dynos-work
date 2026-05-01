@@ -159,6 +159,12 @@ DEFAULT_EPSILON = 0.1  # 10% exploration rate
 
 SECURITY_FLOOR_MODEL = "opus"
 DEFAULT_MODEL = _DEFAULT_MODEL_CONST  # "sonnet" — from lib_defaults.py
+
+# PRO-006: non-blocking inject-prompt size guardrail. Both
+# cmd_planner_inject_prompt and cmd_audit_inject_prompt emit a
+# planner_prompt_oversize event when stdin exceeds this threshold; the
+# sidecar is still written and the command still exits 0.
+_MAX_INJECTED_PROMPT_BYTES: int = 100_000
 ROLE_DEFAULT_MODELS: dict[str, str] = {
     "planning": "sonnet",
     "spec-writer": "sonnet",
@@ -841,6 +847,38 @@ def _load_ensemble_config(config: dict) -> tuple[set[str], list[str], str]:
     return auditors, models, escalation
 
 
+def _claude_md_risk_gate_skip(
+    risk_level: str, diff_files: list[str] | None
+) -> tuple[bool, str]:
+    """Decide whether claude-md-auditor can be skipped on perf grounds.
+
+    Returns (should_skip, reason). The auditor was introduced on 2026-04-30
+    as a third mandatory blocking auditor with a "cannot be skipped"
+    directive. Per the latency investigation, it is the largest single
+    driver of audit-phase slowdown when applied to low/medium-risk tasks
+    that do not touch CLAUDE.md — the auditor exists to catch drift
+    between code and project rules; if neither is plausibly in scope the
+    cost is wasted.
+
+    Skip iff: risk_level in {low, medium} AND CLAUDE.md is not in the
+    diff. Otherwise run. Fail-open when diff_files is None: partial
+    information must not silently skip a blocking auditor.
+    """
+    if diff_files is None:
+        return False, "diff_files unavailable; fail-open and run auditor"
+    if risk_level in {"high", "critical"}:
+        return False, f"risk_level={risk_level} requires the auditor"
+    # Match CLAUDE.md at any path depth (root or nested), case-sensitive.
+    for f in diff_files:
+        if f == "CLAUDE.md" or f.endswith("/CLAUDE.md"):
+            return False, f"CLAUDE.md in diff ({f})"
+    return (
+        True,
+        f"risk_level={risk_level} and CLAUDE.md not in diff "
+        f"({len(diff_files)} files); skipping perf-non-essential auditor",
+    )
+
+
 def build_audit_plan(
     root: Path,
     task_type: str,
@@ -850,6 +888,7 @@ def build_audit_plan(
     risk_level: str = "medium",
     task_id: str = "",
     ctx: RouterContext | None = None,
+    diff_files: list[str] | None = None,
 ) -> dict:
     """Build a complete, deterministic audit spawn plan.
 
@@ -894,6 +933,20 @@ def build_audit_plan(
                     eligible.append(auditor)
 
     for auditor in eligible:
+        # Perf risk gate for claude-md-auditor (task-20260430-007). Runs
+        # before the regular skip check because SKIP_EXEMPT would otherwise
+        # force-include this auditor on every task.
+        if auditor == "claude-md-auditor":
+            should_skip, gate_reason = _claude_md_risk_gate_skip(risk_level, diff_files)
+            if should_skip:
+                plan["auditors"].append({
+                    "name": auditor,
+                    "action": "skip",
+                    "reason": f"claude-md risk-gate: {gate_reason}",
+                    "streak": 0,
+                    "threshold": 0,
+                })
+                continue
         # Skip check (uses cached retrospectives via ctx)
         skip_decision = resolve_skip(root, auditor, task_type, ctx=ctx)
         if skip_decision["skip"]:
@@ -1289,9 +1342,43 @@ def _read_executor_plan_cache(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_diff_files(root: Path, args: argparse.Namespace) -> list[str] | None:
+    """Resolve diff_files for the audit plan from CLI args.
+
+    --diff-files takes precedence (explicit comma-separated list).
+    --diff-base SHA falls back to `git diff --name-only <SHA>`.
+    Returns None on both-absent or git-failure (fail-open).
+    """
+    explicit = getattr(args, "diff_files", "") or ""
+    if explicit:
+        files = [s.strip() for s in explicit.split(",") if s.strip()]
+        return files if files else None
+
+    base = getattr(args, "diff_base", "") or ""
+    if not base:
+        return None
+
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "--name-only", base],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+
+
 def cmd_audit_plan(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     domains = [d.strip() for d in args.domains.split(",") if d.strip()] if args.domains else []
+    diff_files = _resolve_diff_files(root, args)
     plan = build_audit_plan(
         root,
         args.task_type,
@@ -1299,6 +1386,7 @@ def cmd_audit_plan(args: argparse.Namespace) -> int:
         fast_track=args.fast_track,
         risk_level=getattr(args, "risk_level", "medium"),
         task_id=getattr(args, "task_id", ""),
+        diff_files=diff_files,
     )
     print(json.dumps(plan, indent=2))
     return 0
@@ -1689,6 +1777,23 @@ def cmd_audit_inject_prompt(args: argparse.Namespace) -> int:
         }))
         return 1
 
+    # PRO-006: non-blocking size guardrail. Threshold sourced from
+    # hooks/router.py::_MAX_INJECTED_PROMPT_BYTES (module-level constant,
+    # 100_000 bytes). base_prompt is read as text via _sys.stdin.read(),
+    # so encode("utf-8") to measure byte length. Sidecar is still
+    # written and exit 0 regardless.
+    _prompt_bytes_len = len(base_prompt.encode("utf-8"))
+    if _prompt_bytes_len > _MAX_INJECTED_PROMPT_BYTES:
+        log_event(
+            root,
+            "planner_prompt_oversize",
+            task_id=task_dir.name,
+            size_bytes=_prompt_bytes_len,
+            threshold_bytes=_MAX_INJECTED_PROMPT_BYTES,
+            phase="auditor",
+            auditor_name=args.auditor_name,
+        )
+
     # Per-model disambiguation for ensemble auditors. Falls back to the
     # literal "default" sentinel when --model is unspecified or empty.
     model_label = args.model if args.model else "default"
@@ -1763,6 +1868,20 @@ def cmd_planner_inject_prompt(args: argparse.Namespace) -> int:
         return 1
 
     root = Path(args.root).resolve()
+
+    # PRO-006: non-blocking size guardrail. Threshold sourced from
+    # hooks/router.py::_MAX_INJECTED_PROMPT_BYTES (module-level constant,
+    # 100_000 bytes). Sidecar is still written and exit 0 regardless.
+    if len(stdin_bytes) > _MAX_INJECTED_PROMPT_BYTES:
+        log_event(
+            root,
+            "planner_prompt_oversize",
+            task_id=args.task_id,
+            size_bytes=len(stdin_bytes),
+            threshold_bytes=_MAX_INJECTED_PROMPT_BYTES,
+            phase="planner",
+        )
+
     sidecar_dir = (
         root / ".dynos" / args.task_id / "receipts"
         / INJECTED_PLANNER_PROMPTS_DIR
@@ -1873,6 +1992,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Task risk level; controls ensemble sampling gates")
     ap.add_argument("--task-id", dest="task_id", default="",
                     help="Task ID for deterministic CRC32 ensemble sampling")
+    ap.add_argument("--diff-base", dest="diff_base", default="",
+                    help="Git base SHA; computes diff_files via "
+                         "`git diff --name-only <SHA>` for the claude-md "
+                         "risk gate. Optional — fail-open without it.")
+    ap.add_argument("--diff-files", dest="diff_files", default="",
+                    help="Comma-separated explicit diff_files (overrides "
+                         "--diff-base). Mainly for tests.")
     ap.set_defaults(func=cmd_audit_plan)
 
     ep = subparsers.add_parser("executor-plan", help="Build deterministic executor spawn plan")
