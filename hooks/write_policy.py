@@ -78,6 +78,7 @@ _CONTROL_PLANE_EXACT = frozenset({
     "external-solution-gate.json",
     "token-usage.json",
     "events.jsonl",
+    "spawn-log.jsonl",
 })
 
 _WRAPPER_REQUIRED = {
@@ -198,6 +199,22 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
         if attempt.role in {"eventbus", "system"}:
             return WriteDecision(True, "events.jsonl is eventbus/system-owned log state", "direct")
         return WriteDecision(False, "events.jsonl is code-owned control-plane state", "deny")
+
+    if rel_posix == "spawn-log.jsonl":
+        # spawn-log.jsonl is hook-owned. The agent-spawn-log hook subprocess
+        # appends to it directly via Python file I/O (bypassing this policy
+        # entirely because hook subprocesses do not invoke harness tools).
+        # No agent role can claim it via Write/Edit/MultiEdit/Bash — those
+        # paths all flow through this policy and are denied here. This is the
+        # mechanical defense against the audit-chain forgery pattern: the
+        # orchestrator cannot fabricate spawn-log entries because it has no
+        # write path to the file.
+        return WriteDecision(
+            False,
+            "spawn-log.jsonl is hook-owned harness telemetry; only the "
+            "agent-spawn-log hook subprocess may append to it",
+            "deny",
+        )
 
     if rel_posix is not None and rel_posix.startswith("receipts/"):
         if attempt.role == "receipt-writer":
