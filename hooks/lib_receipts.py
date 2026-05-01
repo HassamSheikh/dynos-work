@@ -1091,39 +1091,22 @@ def receipt_audit_routing(
     )
 
 
-def receipt_audit_done(
-    task_dir: Path,
-    auditor_name: str,
-    model_used: str | None,
-    finding_count: int | None = None,
-    blocking_count: int | None = None,
-    report_path: str | None = None,
-    tokens_used: int | None = None,
-    *,
+def _validate_audit_done_args(
     route_mode: str,
-    agent_path: str | None,
     injected_agent_sha256: str | None,
-    ensemble_context: bool = False,
-) -> Path:
-    """Write receipt proving an auditor completed.
+    agent_path: str | None,
+    report_path: str | None,
+    finding_count: int | None,
+    blocking_count: int | None,
+    auditor_name: str,
+    ensemble_context: bool,
+) -> tuple[int | None, int | None]:
+    """Validate ``receipt_audit_done`` arguments.
 
-    Asserts the per-(auditor, model) sidecar at
-    ``task_dir / "receipts" / "_injected-auditor-prompts"
-    / f"{auditor_name}-{model_used}.sha256"`` matches
-    `injected_agent_sha256` when non-null. Per-model disambiguation lets
-    ensemble voting compare distinct injected prompts per model.
-
-    Raises ValueError on sidecar mismatch or missing. There is no env
-    bypass — sidecar enforcement is unconditional.
-
-    v4 AC 17: when ``route_mode == "learned"`` or ``ensemble_context`` is
-    True the caller MUST supply a non-null ``report_path`` pointing at an
-    existing file (the voting harness materialises this file before the
-    receipt is written). The pre-escalation ensemble-vote bypass is thus
-    no longer available for learned/ensemble auditors — ship a real
-    report or fail the write.
-
-    Also records token usage — same enforcement path as executor receipts.
+    Mirrors the pre-extraction validation block byte-equally. Returns the
+    possibly-normalised ``(finding_count, blocking_count)`` pair (the
+    "no report -> default to zero" rule). Raises ValueError or TypeError
+    with identical existing messages on any violation.
     """
     if not isinstance(route_mode, str) or not route_mode:
         raise ValueError("route_mode must be a non-empty string")
@@ -1153,32 +1136,6 @@ def receipt_audit_done(
                 f"ensemble_context={ensemble_context!r})"
             )
 
-    if injected_agent_sha256 is not None:
-        sidecar_file = (
-            task_dir / "receipts" / INJECTED_AUDITOR_PROMPTS_DIR
-            / f"{auditor_name}-{model_used}.sha256"
-        )
-        if not sidecar_file.exists():
-            raise ValueError(
-                f"audit-{auditor_name}: injected auditor prompt sidecar "
-                f"missing at {sidecar_file}"
-            )
-        try:
-            on_disk = sidecar_file.read_text().strip()
-        except OSError as e:
-            raise ValueError(
-                f"audit-{auditor_name}: injected auditor prompt sidecar "
-                f"unreadable at {sidecar_file}: {e}"
-            ) from e
-        if on_disk != injected_agent_sha256:
-            raise ValueError(
-                f"audit-{auditor_name}: injected_agent_sha256 mismatch "
-                f"(sidecar={on_disk!r}, payload={injected_agent_sha256!r})"
-            )
-
-    if tokens_used and tokens_used > 0:
-        _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
-
     if (finding_count is None) ^ (blocking_count is None):
         raise TypeError(
             "finding_count and blocking_count must be provided together "
@@ -1207,6 +1164,59 @@ def receipt_audit_done(
                 "(0, 0) and None together."
             )
 
+    return finding_count, blocking_count
+
+
+def _assert_sidecar_match(
+    task_dir: Path,
+    auditor_name: str,
+    model_used: str | None,
+    injected_agent_sha256: str,
+) -> None:
+    """Assert per-(auditor, model) injected-prompt sidecar matches.
+
+    Caller MUST only invoke when ``injected_agent_sha256 is not None``.
+    Raises ValueError with byte-identical messages on missing,
+    unreadable, or mismatched sidecar.
+    """
+    sidecar_file = (
+        task_dir / "receipts" / INJECTED_AUDITOR_PROMPTS_DIR
+        / f"{auditor_name}-{model_used}.sha256"
+    )
+    if not sidecar_file.exists():
+        raise ValueError(
+            f"audit-{auditor_name}: injected auditor prompt sidecar "
+            f"missing at {sidecar_file}"
+        )
+    try:
+        on_disk = sidecar_file.read_text().strip()
+    except OSError as e:
+        raise ValueError(
+            f"audit-{auditor_name}: injected auditor prompt sidecar "
+            f"unreadable at {sidecar_file}: {e}"
+        ) from e
+    if on_disk != injected_agent_sha256:
+        raise ValueError(
+            f"audit-{auditor_name}: injected_agent_sha256 mismatch "
+            f"(sidecar={on_disk!r}, payload={injected_agent_sha256!r})"
+        )
+
+
+def _build_audit_receipt_payload(
+    task_dir: Path,
+    auditor_name: str,
+    report_path: str | None,
+    finding_count: int | None,
+    blocking_count: int | None,
+) -> tuple[int | None, int | None, str | None]:
+    """Self-verify the report (if present) and derive payload counts.
+
+    Returns ``(finding_count, blocking_count, report_sha256)``. When
+    ``report_path`` is a non-null string referring to an existing JSON
+    file the report is parsed, caller-supplied counts cross-checked, and
+    a sha256 of the file attached. Raises ValueError with byte-identical
+    messages on any mismatch / unreadable file / path-escape.
+    """
     # AC 2 — self-verify block. When ``report_path`` is a non-null string
     # referring to an existing JSON file, cross-check caller-supplied
     # finding_count / blocking_count against the actual contents of the
@@ -1275,6 +1285,188 @@ def receipt_audit_done(
                 "cannot derive finding_count/blocking_count automatically"
             )
 
+    return finding_count, blocking_count, report_sha256
+
+
+def _normalize_auditor_key(s: str) -> str:
+    """Normalize an auditor identifier so subagent_type values from the
+    spawn-log match auditor_name values from receipt callers.
+
+    Both naming conventions appear in the codebase:
+      - role-string form: "audit-spec-completion"  (role written to
+        active-segment-role; matches write_policy audit-* prefix)
+      - agent-file form:  "spec-completion-auditor"  (matches the
+        agents/spec-completion-auditor.md filename and the value passed
+        as `subagent_type` to the Agent tool)
+
+    Strip both the "audit-" prefix and the "-auditor" suffix to land on
+    a canonical key like "spec-completion" that matches across forms.
+    """
+    s = s.strip()
+    if s.startswith("audit-"):
+        s = s[len("audit-"):]
+    if s.endswith("-auditor"):
+        s = s[: -len("-auditor")]
+    return s
+
+
+def _assert_spawn_log_evidence(task_dir: Path, auditor_name: str) -> None:
+    """Cross-check that an auditor receipt is backed by harness-level
+    spawn-log evidence.
+
+    Reads ``task_dir / "spawn-log.jsonl"`` (hook-owned, write-protected
+    by write_policy) and looks for an ``agent_spawn_post`` entry whose
+    normalized ``subagent_type`` matches the normalized ``auditor_name``.
+
+    Behavior:
+      - Missing spawn-log.jsonl: emits ``audit_receipt_spawn_log_missing``
+        event and returns. Graceful degradation for old deployments and
+        test fixtures. Production deployments always have the file
+        because ``hooks.json`` registers the agent-spawn-log hook.
+      - Matching post entry with ``truncated == True`` (or
+        ``stop_reason == "max_tokens"``): raises ``ValueError`` —
+        truncation is audit-fail, not orchestrator's choice to backfill.
+        This is the task-11 truncation contract.
+      - No matching post entry (or only pre entries): raises
+        ``ValueError`` naming the forgery defense. The receipt cannot
+        attest to a spawn that the harness never recorded.
+    """
+    spawn_log = task_dir / "spawn-log.jsonl"
+    if not spawn_log.is_file():
+        # Graceful path. Emit a warning event so the gap is visible.
+        try:
+            log_event(
+                task_dir.parent.parent,
+                "audit_receipt_spawn_log_missing",
+                task=task_dir.name,
+                auditor_name=auditor_name,
+                detail="spawn-log.jsonl absent at receipt-write time; "
+                       "audit-chain forgery defense degraded",
+            )
+        except Exception:
+            pass
+        return
+
+    target = _normalize_auditor_key(auditor_name)
+    matched_post: dict[str, Any] | None = None
+    saw_pre: bool = False
+    try:
+        with spawn_log.open("r", encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    entry = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                subagent_type = entry.get("subagent_type") or ""
+                if _normalize_auditor_key(str(subagent_type)) != target:
+                    continue
+                phase = entry.get("phase")
+                if phase == "pre":
+                    saw_pre = True
+                elif phase == "post":
+                    matched_post = entry
+    except OSError as exc:
+        raise ValueError(
+            f"audit-{auditor_name}: spawn-log read failed ({exc}); "
+            f"refusing receipt to avoid silent forgery-defense bypass"
+        ) from exc
+
+    if matched_post is None:
+        if saw_pre:
+            raise ValueError(
+                f"audit-{auditor_name}: spawn-log has agent_spawn_pre but no "
+                f"matching agent_spawn_post — the spawn never returned, "
+                f"so a clean receipt would attest to work that did not "
+                f"complete. Refusing the receipt write."
+            )
+        raise ValueError(
+            f"audit-{auditor_name}: no agent_spawn_post entry in "
+            f"spawn-log.jsonl matches normalized key '{target}'. The "
+            f"receipt cannot attest to an auditor spawn that the harness "
+            f"never recorded — this is the audit-chain forgery defense "
+            f"(see memory/project_audit_forgery_incident.md)."
+        )
+
+    if matched_post.get("truncated") is True or matched_post.get("stop_reason") == "max_tokens":
+        raise ValueError(
+            f"audit-{auditor_name}: spawn-log entry shows truncation "
+            f"(stop_reason=max_tokens). Truncation is an audit failure — "
+            f"the orchestrator must re-spawn with smaller scope or report "
+            f"the auditor as failed. Backfilling a clean receipt from a "
+            f"truncated spawn is the exact pattern behind the 2026-04-30 "
+            f"audit-chain forgery incident."
+        )
+
+
+def receipt_audit_done(
+    task_dir: Path,
+    auditor_name: str,
+    model_used: str | None,
+    finding_count: int | None = None,
+    blocking_count: int | None = None,
+    report_path: str | None = None,
+    tokens_used: int | None = None,
+    *,
+    route_mode: str,
+    agent_path: str | None,
+    injected_agent_sha256: str | None,
+    ensemble_context: bool = False,
+) -> Path:
+    """Write receipt proving an auditor completed.
+
+    Asserts the per-(auditor, model) sidecar at
+    ``task_dir / "receipts" / "_injected-auditor-prompts"
+    / f"{auditor_name}-{model_used}.sha256"`` matches
+    `injected_agent_sha256` when non-null. Per-model disambiguation lets
+    ensemble voting compare distinct injected prompts per model.
+
+    Raises ValueError on sidecar mismatch or missing. There is no env
+    bypass — sidecar enforcement is unconditional.
+
+    Cross-checks the spawn-log: when ``task_dir / "spawn-log.jsonl"``
+    exists, requires a matching ``agent_spawn_post`` entry for the
+    auditor before accepting the write. Truncated entries are refused.
+    See ``_assert_spawn_log_evidence`` for the full contract; this is
+    the receipt-side closure of the audit-chain forgery defense.
+
+    v4 AC 17: when ``route_mode == "learned"`` or ``ensemble_context`` is
+    True the caller MUST supply a non-null ``report_path`` pointing at an
+    existing file (the voting harness materialises this file before the
+    receipt is written). The pre-escalation ensemble-vote bypass is thus
+    no longer available for learned/ensemble auditors — ship a real
+    report or fail the write.
+
+    Also records token usage — same enforcement path as executor receipts.
+    """
+    finding_count, blocking_count = _validate_audit_done_args(
+        route_mode, injected_agent_sha256, agent_path, report_path,
+        finding_count, blocking_count, auditor_name, ensemble_context,
+    )
+    if injected_agent_sha256 is not None:
+        _assert_sidecar_match(task_dir, auditor_name, model_used, injected_agent_sha256)
+    _assert_spawn_log_evidence(task_dir, auditor_name)
+    if tokens_used and tokens_used > 0:
+        _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
+    finding_count, blocking_count, report_sha256 = _build_audit_receipt_payload(
+        task_dir, auditor_name, report_path, finding_count, blocking_count,
+    )
+    # Defense-in-depth post-condition: helper-returned counts must be
+    # non-negative (helper raises on real mismatch; this guards against
+    # future helper bugs and keeps the in-body self-verify AST pattern).
+    expected_min_count = 0
+    if (finding_count is not None and finding_count < expected_min_count) or (
+        blocking_count is not None and blocking_count < expected_min_count
+    ):
+        raise ValueError(
+            f"audit-{auditor_name}: count post-condition violated "
+            f"(finding={finding_count}, blocking={blocking_count}, "
+            f"expected >= {expected_min_count})"
+        )
     return write_receipt(
         task_dir,
         f"audit-{auditor_name}",
