@@ -1286,6 +1286,7 @@ def test_run_audit_finish_writes_completion_and_transitions_done(tmp_path) -> No
     receipt_audit_routing(task_dir, [
         {"name": "spec-completion-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
         {"name": "security-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
+        {"name": "claude-md-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
         {"name": "code-quality-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
         {"name": "dead-code-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
         {"name": "performance-auditor", "action": "skip", "reason": "fixture", "route_mode": "generic", "agent_path": None},
