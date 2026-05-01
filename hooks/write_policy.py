@@ -192,6 +192,19 @@ def decide_write(attempt: WriteAttempt) -> WriteDecision:
             return WriteDecision(True, "manifest.json is code-owned ctl state", "direct")
         return WriteDecision(False, "manifest.json is code-owned control-plane state", "deny")
 
+    # audit-grep-quota.json is read-policy state owned by the read_policy
+    # module's atomic writer (which runs inside the pre_tool_use hook
+    # subprocess and does NOT route through this policy — Python file
+    # operations are not tool calls). Any write/delete from an agent role
+    # via Bash/Write/Edit is denied here parser-independently, closing
+    # sec-1's quota-deletion bypass.
+    if rel_posix == "audit-grep-quota.json":
+        return WriteDecision(
+            False,
+            "audit-grep-quota.json is read-policy state; agent writes are denied",
+            "deny",
+        )
+
     if rel_posix == "external-solution-gate.json":
         if attempt.role == "ctl":
             return WriteDecision(True, "external-solution-gate.json is ctl-owned control-plane state", "direct")
