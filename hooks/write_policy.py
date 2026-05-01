@@ -85,6 +85,13 @@ _WRAPPER_REQUIRED = {
     "execution-graph.json": "python3 hooks/ctl.py write-execution-graph <task_dir> --from <json>",
     "repair-log.json": "python3 hooks/ctl.py write-repair-log <task_dir> --from <json>",
     "classification.json": "python3 hooks/ctl.py write-classification <task_dir> --from <json>",
+    # active-segment-role gates which role write_policy resolves on the next
+    # pre_tool_use call. If an agent could write it directly, it could elevate
+    # itself to audit-* and unlock audit-reports/ writes, which is exactly the
+    # primitive the 2026-04-30 audit-chain forgery incident exploited. The
+    # stamp-role wrapper enforces an executor-role allowlist (audit-* roles
+    # cannot be stamped — auditors must come from a real Agent-tool spawn).
+    "active-segment-role": "python3 hooks/ctl.py stamp-role <task_dir> --role <role>",
 }
 
 

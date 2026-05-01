@@ -149,13 +149,13 @@ If the injected prompt is weak, strengthen the base prompt before spawning. Do n
 
 If `inject-prompt` fails or is unavailable, stop and fix the deterministic routing path. Do NOT manually read `agent_path` or hand-build the learned-agent prompt.
 
-**Role stamping (MANDATORY — BEFORE every Agent tool spawn):** Write the executor role string to `.dynos/task-{id}/active-segment-role` immediately before spawning each executor subagent. This file is read by `hooks/pre_tool_use.py` to resolve the acting role when `DYNOS_ROLE` is not set in the environment.
+**Role stamping (MANDATORY — BEFORE every Agent tool spawn):** Stamp the executor role via the deterministic ctl wrapper immediately before spawning each executor subagent. The wrapper enforces the executor-role allowlist (audit-* roles cannot be stamped — auditors run as subagents whose role is established at spawn time, not via orchestrator-stamped role files; this closes the self-elevation primitive behind the 2026-04-30 audit-chain forgery incident). Direct writes to `active-segment-role` are denied by `write_policy.py` and surface a wrapper hint to the model.
 
 ```bash
-printf '%s' "{executor-role}" > .dynos/task-{id}/active-segment-role
+python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "{executor-role}"
 ```
 
-Where `{executor-role}` is the exact role string from the executor plan (e.g. `backend-executor`, `ui-executor`, `integration-executor`). The write MUST use truncate/overwrite semantics (not append). The write MUST complete before the Agent tool invocation that spawns the subagent — this is a sequential constraint, not a timing one.
+Where `{executor-role}` is the exact role string from the executor plan (e.g. `backend-executor`, `ui-executor`, `integration-executor`). The write MUST complete (exit 0) before the Agent tool invocation that spawns the subagent — this is a sequential constraint, not a timing one. Exit 1 means the wrapper refused; the stderr names the cause (audit-* refusal, role outside allowlist, missing task dir).
 
 **Model selection:** Pass the `model` field from the executor plan as the model parameter when spawning the agent. If `model` is null, use default (omit the model parameter).
 
@@ -201,7 +201,7 @@ This command deterministically:
 - writes `receipt_executor_done(...)`
 - updates `manifest.json.execution_progress` from deterministic execution state
 
-**Role file cleanup (MANDATORY — AFTER `run-execution-segment-done` writes the receipt):** Delete `.dynos/task-{id}/active-segment-role` immediately after the segment receipt is written. This prevents the completed segment's role from leaking into any subsequent segment's execution context.
+**Role file cleanup (MANDATORY — AFTER `run-execution-segment-done` writes the receipt):** Delete `.dynos/task-{id}/active-segment-role` immediately after the segment receipt is written. This prevents the completed segment's role from leaking into any subsequent segment's execution context. (Deletion is permitted by write_policy as a benign cleanup; only the *write* path is wrapper-required.)
 
 ```bash
 rm -f .dynos/task-{id}/active-segment-role

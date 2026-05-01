@@ -1122,6 +1122,67 @@ def cmd_write_classification(args: argparse.Namespace) -> int:
     return 0
 
 
+# Executor roles that may legitimately be stamped to active-segment-role.
+# Subset of pre_tool_use._EXECUTOR_ROLE_ALLOWLIST — audit-* roles are
+# excluded because auditors run as subagents whose role is established at
+# spawn time, not by orchestrator-stamped role files. Allowing audit-* here
+# would re-open the self-elevation primitive that enabled the 2026-04-30
+# audit-chain forgery incident.
+_STAMP_ROLE_ALLOWLIST: frozenset[str] = frozenset({
+    "backend-executor", "ui-executor", "testing-executor", "integration-executor",
+    "ml-executor", "db-executor", "refactor-executor", "docs-executor",
+    "planning", "execute-inline", "repair-coordinator",
+})
+
+
+def cmd_stamp_role(args: argparse.Namespace) -> int:
+    """Write the executor role to active-segment-role under role=ctl.
+
+    Replaces the legacy `printf '%s' "{role}" > active-segment-role` pattern.
+    Refuses audit-* roles and any role outside the executor allowlist —
+    auditor roles must come from a real Agent-tool spawn (caught by the
+    spawn-log hook), not from orchestrator self-stamping.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    if not task_dir.is_dir():
+        print(f"stamp-role: task_dir does not exist: {task_dir}", file=sys.stderr)
+        return 1
+
+    role = (args.role or "").strip()
+    if not role:
+        print("stamp-role: --role is required and must be non-empty", file=sys.stderr)
+        return 1
+
+    if role.startswith("audit-"):
+        print(
+            f"stamp-role: refused — audit-* roles cannot be stamped; "
+            f"auditor roles must come from a real Agent-tool spawn (the "
+            f"spawn-log hook records the evidence). Stamping {role!r} would "
+            f"re-open the self-elevation primitive behind the 2026-04-30 "
+            f"audit-chain forgery incident.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if role not in _STAMP_ROLE_ALLOWLIST:
+        print(
+            f"stamp-role: refused — role {role!r} is not in the executor "
+            f"allowlist; permitted values: {sorted(_STAMP_ROLE_ALLOWLIST)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    role_file = task_dir / "active-segment-role"
+    try:
+        role_file.write_text(role, encoding="utf-8")
+    except OSError as exc:
+        print(f"stamp-role: failed to write {role_file}: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps({"status": "role_stamped", "path": str(role_file), "role": role}, indent=2))
+    return 0
+
+
 def cmd_audit_receipt(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
@@ -4030,6 +4091,14 @@ def build_parser() -> argparse.ArgumentParser:
     classification_write_parser.add_argument("task_dir")
     classification_write_parser.add_argument("--from", dest="from_path", required=True)
     classification_write_parser.set_defaults(func=cmd_write_classification)
+
+    stamp_role_parser = subparsers.add_parser(
+        "stamp-role",
+        help="Stamp the active-segment-role file under role=ctl (refuses audit-* roles)",
+    )
+    stamp_role_parser.add_argument("task_dir")
+    stamp_role_parser.add_argument("--role", required=True, help="Executor role to stamp (allowlist enforced)")
+    stamp_role_parser.set_defaults(func=cmd_stamp_role)
 
     audit_receipt_parser = subparsers.add_parser(
         "audit-receipt",
