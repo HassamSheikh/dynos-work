@@ -2185,13 +2185,13 @@ def _flush_and_record_transition(
         pass  # Never block a stage transition for a logging failure
 
 
-def _fire_done_pipeline(task_dir: Path, manifest: dict) -> None:
+def _fire_done_pipeline(task_dir: Path, next_stage: str) -> None:
     """Fire the post-completion pipeline on DONE — emits the synchronous
     event and dispatches the detached drain. No-op on non-DONE
     transitions. Errors are swallowed: post-completion observability
     must never block a completed transition.
     """
-    if manifest.get("stage") != "DONE":
+    if next_stage != "DONE":
         return
     try:
         _fire_task_completed(task_dir)
@@ -2239,7 +2239,7 @@ def transition_task(
         )
 
     _flush_and_record_transition(task_dir, manifest, next_stage)
-    _fire_done_pipeline(task_dir, manifest)
+    _fire_done_pipeline(task_dir, next_stage)
 
     return current_stage, manifest
 
