@@ -92,6 +92,15 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # writer. Emitted when an auditor's spawn-log.jsonl is missing during
     # receipt write; observability only, no gate blocks on it.
     "audit_receipt_spawn_log_missing",
+    # Defense-in-depth content pairing (task-20260430-021). Emitted when
+    # both spawn-log post entry AND on-disk audit-report file are present
+    # at receipt time, recording the report file's sha256 alongside the
+    # post entry's result_sha256 + result_excerpt_match flag. A reviewer
+    # can spot mismatches forensically. Observability only — the binding
+    # is intentionally not enforced because agent return text is prose
+    # with JSON embedded; strict sha256 equality between the two would
+    # always fail.
+    "audit_receipt_content_paired",
 })
 
 

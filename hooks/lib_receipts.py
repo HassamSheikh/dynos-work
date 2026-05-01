@@ -1403,6 +1403,91 @@ def _assert_spawn_log_evidence(task_dir: Path, auditor_name: str) -> None:
         )
 
 
+def _emit_content_pairing_event(
+    task_dir: Path, auditor_name: str, report_path: str | None
+) -> None:
+    """Emit `audit_receipt_content_paired` when both a matching spawn-log
+    post entry AND the on-disk audit-report file are present at receipt-write
+    time.
+
+    Defense-in-depth on top of `_assert_spawn_log_evidence`: that function
+    enforces the presence of harness-level proof of spawn; this function
+    captures the file's content sha256 alongside the post entry's
+    result_sha256 so a forensic reviewer can later spot mismatches between
+    "what the agent returned" and "what landed on disk." Implemented as
+    telemetry, not enforcement: the agent's return text is prose with JSON
+    embedded; the on-disk file is the extracted JSON. A strict sha256
+    equality would always fail; the event-based pairing creates the paper
+    trail without breaking the legitimate write path.
+
+    Silent no-op when:
+      - report_path is None (no file to bind to)
+      - report file does not exist
+      - spawn-log.jsonl is absent
+      - no matching post entry can be found
+
+    None of these are errors at this layer — they are handled (or
+    intentionally tolerated) by `_assert_spawn_log_evidence` and the
+    receipt's own report-existence checks.
+    """
+    if not report_path:
+        return
+    report_p = Path(report_path)
+    if not report_p.is_file():
+        return
+    spawn_log = task_dir / "spawn-log.jsonl"
+    if not spawn_log.is_file():
+        return
+    target = _normalize_auditor_key(auditor_name)
+    matched_post: dict[str, Any] | None = None
+    try:
+        with spawn_log.open("r", encoding="utf-8") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    entry = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("phase") != "post":
+                    continue
+                subagent_type = entry.get("subagent_type") or ""
+                if _normalize_auditor_key(str(subagent_type)) != target:
+                    continue
+                matched_post = entry
+    except OSError:
+        return
+    if matched_post is None:
+        return
+
+    try:
+        report_bytes = report_p.read_bytes()
+        report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    except OSError:
+        return
+
+    try:
+        log_event(
+            task_dir.parent.parent,
+            "audit_receipt_content_paired",
+            task=task_dir.name,
+            auditor_name=auditor_name,
+            report_path=str(report_p),
+            report_sha256=report_sha256,
+            result_sha256=str(matched_post.get("result_sha256") or ""),
+            result_excerpt_match=(
+                report_sha256 in str(matched_post.get("result_excerpt") or "")
+            ),
+        )
+    except Exception:
+        # Telemetry failure must not break receipt write — content pairing
+        # is observability, the receipt itself is what gates the pipeline.
+        pass
+
+
 def receipt_audit_done(
     task_dir: Path,
     auditor_name: str,
@@ -1450,6 +1535,7 @@ def receipt_audit_done(
     if injected_agent_sha256 is not None:
         _assert_sidecar_match(task_dir, auditor_name, model_used, injected_agent_sha256)
     _assert_spawn_log_evidence(task_dir, auditor_name)
+    _emit_content_pairing_event(task_dir, auditor_name, report_path)
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
     finding_count, blocking_count, report_sha256 = _build_audit_receipt_payload(

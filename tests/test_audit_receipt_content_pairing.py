@@ -67,19 +67,21 @@ def _ts() -> str:
 
 
 def _read_events(td: Path) -> list[dict]:
-    root = td.parent.parent
-    events_path = root / ".dynos" / "events.jsonl"
-    if not events_path.is_file():
-        return []
+    """Read events from BOTH task-scoped and global event logs.
+    log_event prefers task-scoped when task=<id> is passed and the task
+    dir exists; otherwise it falls back to the global log."""
     out: list[dict] = []
-    for ln in events_path.read_text().splitlines():
-        ln = ln.strip()
-        if not ln:
+    for candidate in (td / "events.jsonl", td.parent.parent / ".dynos" / "events.jsonl"):
+        if not candidate.is_file():
             continue
-        try:
-            out.append(json.loads(ln))
-        except json.JSONDecodeError:
-            continue
+        for ln in candidate.read_text().splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except json.JSONDecodeError:
+                continue
     return out
 
 
