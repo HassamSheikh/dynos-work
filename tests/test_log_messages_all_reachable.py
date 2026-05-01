@@ -62,6 +62,7 @@ def test_every_log_message_key_has_writer():
         "calibration-applied": "receipt_calibration_applied",
         "calibration-noop": "receipt_calibration_noop",
         "rules-check-passed": "receipt_rules_check_passed",
+        "search-conducted": "receipt_search_conducted",
     }
     # Dynamic writers — match by prefix.
     dynamic_prefixes = {
