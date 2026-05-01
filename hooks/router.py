@@ -807,6 +807,17 @@ def load_prevention_rules(root: Path) -> list[dict]:
 # Ensemble voting defaults — overridable via .dynos/config/policy.json
 ENSEMBLE_SAMPLE_RATE: float = 0.20
 _DEFAULT_ENSEMBLE_AUDITORS = {"security-auditor", "db-schema-auditor"}
+
+# Auditors whose verdict comes from deterministic analysis (AST, glob,
+# rule lookup, structured JSON) rather than from LLM judgment that varies
+# across model tiers. Running the haiku→sonnet→opus cascade against
+# deterministic input is pure waste — the second and third spawns see the
+# same evidence and produce the same verdict. These auditors are pinned
+# to ensemble=false regardless of risk_level, sampling roll, or any
+# user-provided ensemble_auditors override (task-20260430-008).
+_DETERMINISTIC_FIRST_AUDITORS: frozenset[str] = frozenset({
+    "claude-md-auditor",
+})
 _DEFAULT_ENSEMBLE_VOTING_MODELS = ["haiku", "sonnet"]
 _DEFAULT_ENSEMBLE_ESCALATION_MODEL = "opus"
 
@@ -982,7 +993,13 @@ def build_audit_plan(
         }
 
         # Ensemble sampling — risk_level-gated with deterministic CRC32 tie-break
-        if auditor in ensemble_auditors:
+        if auditor in _DETERMINISTIC_FIRST_AUDITORS:
+            # Pinned off: deterministic-first auditors don't benefit from
+            # the haiku→sonnet→opus cascade. See _DETERMINISTIC_FIRST_AUDITORS
+            # comment for rationale.
+            entry["ensemble"] = False
+            reason = "deterministic_first_auditor"
+        elif auditor in ensemble_auditors:
             # Baseline ensemble auditors always run ensemble
             entry["ensemble"] = True
             reason = "always_ensemble_auditor"
