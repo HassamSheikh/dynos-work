@@ -82,6 +82,11 @@ _BASH_WRITE_PATTERNS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"\brsync\s+(?:\S+\s+)+([^\s;|&]+)"), 1),
     # install: install [-m MODE] [opts] src dst
     (re.compile(r"\binstall\s+(?:-[a-zA-Z]+\s+(?:\S+\s+)?)?(?:\S+\s+)+([^\s;|&]+)"), 1),
+    # rm: rm [opts] file — sec-1 fix: deletion of audit-grep-quota.json
+    # was the quota-bypass primitive. Each non-flag argument is checked.
+    (re.compile(r"\brm\s+(?:-[a-zA-Z]+\s+)*([^\s;|&]+)"), 1),
+    # unlink: unlink file
+    (re.compile(r"\bunlink\s+([^\s;|&]+)"), 1),
 ]
 
 

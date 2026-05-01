@@ -648,13 +648,17 @@ def validate_repair_log(task_dir: Path) -> list[str]:
                     f"repair-log={auditor!r} audit-report={live_finding.get('_auditor_name')!r}"
                 )
             severity = task.get("severity")
+            _SEV_ALIASES = {"major": "high", "minor": "low"}
+            severity = _SEV_ALIASES.get(severity, severity) if severity is not None else None
+            live_sev = live_finding.get("severity") if live_finding is not None else None
+            live_sev_norm = _SEV_ALIASES.get(live_sev, live_sev) if isinstance(live_sev, str) else live_sev
             if severity is not None and severity not in {"critical", "high", "medium", "low"}:
                 errors.append(f"{batch_id}: invalid severity {severity!r}")
             elif (
                 severity is not None
                 and live_finding is not None
                 and isinstance(live_finding.get("severity"), str)
-                and severity != live_finding.get("severity")
+                and severity != live_sev_norm
             ):
                 errors.append(
                     f"{batch_id}: severity mismatch for {finding_id}: "

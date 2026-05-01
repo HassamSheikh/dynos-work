@@ -57,13 +57,36 @@ def decide_read(attempt: ReadAttempt, *, audit_plan: dict | None) -> ReadDecisio
     if not attempt.role.startswith("audit-"):
         return ReadDecision(allowed=True, reason="non-audit role", quota_used=None)
 
-    # Decision tree step 2: CLAUDE.md carve-out for audit-claude-md only
-    if attempt.role == "audit-claude-md" and attempt.target.name == "CLAUDE.md":
-        return ReadDecision(
-            allowed=True,
-            reason="audit-claude-md CLAUDE.md carve-out",
-            quota_used=None,
-        )
+    # Decision tree step 2: CLAUDE.md carve-out for audit-claude-md only.
+    # Restricted to repo root, ~/.claude/, ~/.config/claude/ (sec-4 fix —
+    # an unrestricted basename match allowed prompt-injection via attacker-
+    # planted /tmp/evil/CLAUDE.md). Read-tool only — Globs/Greps don't
+    # benefit from the basename match.
+    if (
+        attempt.role == "audit-claude-md"
+        and attempt.tool_name == "Read"
+        and attempt.target.name == "CLAUDE.md"
+        and attempt.task_dir is not None
+    ):
+        try:
+            target_resolved = attempt.target.resolve()
+            allowed_roots = [
+                attempt.task_dir.parent.parent.resolve(),
+                (Path.home() / ".claude").resolve(),
+                (Path.home() / ".config" / "claude").resolve(),
+            ]
+            for root in allowed_roots:
+                try:
+                    target_resolved.relative_to(root)
+                    return ReadDecision(
+                        allowed=True,
+                        reason="audit-claude-md CLAUDE.md carve-out",
+                        quota_used=None,
+                    )
+                except ValueError:
+                    continue
+        except Exception:
+            pass
 
     # Decision tree step 3: task_dir allowlist
     if attempt.task_dir is not None:
@@ -97,7 +120,9 @@ def decide_read(attempt: ReadAttempt, *, audit_plan: dict | None) -> ReadDecisio
             try:
                 task_dir_str = str(attempt.task_dir.resolve())
                 norm_str = normalized
-                if norm_str.startswith(task_dir_str):
+                # sec-2 fix: enforce directory boundary so task-XX-evil/* doesn't
+                # match the prefix of task-XX/.
+                if norm_str == task_dir_str or norm_str.startswith(task_dir_str + os.sep):
                     return ReadDecision(allowed=True, reason="glob task_dir prefix", quota_used=None)
             except Exception:
                 pass
@@ -166,9 +191,15 @@ def _handle_dead_code_grep_quota(attempt: ReadAttempt) -> ReadDecision:
             # Atomic replace
             os.replace(tmp_path, quota_file)
         except Exception:
-            # If we can't write, still allow this call but don't track it
-            # (this matches the "silently swallow exceptions" pattern)
-            pass
+            # sec-3 / cq-001 fix: write failure must fail-closed, not silently
+            # allow. The quota state is corrupt (slot consumed but not
+            # persisted); subsequent calls would re-read the old count and
+            # over-grant. Spec AC 9 mandates fail-closed on quota corruption.
+            return ReadDecision(
+                allowed=False,
+                reason="read-policy: quota state unwritable; denying repo-wide grep",
+                quota_used=None,
+            )
 
         return ReadDecision(
             allowed=True,
