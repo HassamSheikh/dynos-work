@@ -151,17 +151,49 @@ def main() -> None:
     parser.add_argument("files", nargs="*", help="File paths to pre-load")
     parser.add_argument("--root", default=".", help="Repo root (default: cwd)")
     parser.add_argument("--diff", metavar="SHA", help="Pre-load files changed since this git SHA")
+    parser.add_argument(
+        "--sidecar",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Write context to PATH instead of stdout. Stdout receives a "
+            "short pointer line referencing the path. The audit-skill "
+            "orchestrator should use this so the auditor's base prompt "
+            "carries the path (~80 bytes) instead of the full 150K-char "
+            "blob, and each auditor reads the file with one Read call. "
+            "Stops the (auditors x cascade-models x context-size) "
+            "input-token multiplication that the 2026-04-30 latency "
+            "investigation flagged."
+        ),
+    )
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
 
     if args.diff:
-        print(build_diff_context(args.diff, root))
+        content = build_diff_context(args.diff, root)
     elif args.files:
-        print(build_file_context(args.files, root))
+        content = build_file_context(args.files, root)
     else:
         parser.print_help()
         sys.exit(1)
+
+    if args.sidecar:
+        sidecar_path = Path(args.sidecar)
+        try:
+            sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+            # Match stdout-mode trailing newline so sidecar content is
+            # byte-identical to what `python3 build_prompt_context.py ...`
+            # would have printed without --sidecar.
+            sidecar_path.write_text(content + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"build_prompt_context: failed to write sidecar {sidecar_path}: {exc}", file=sys.stderr)
+            sys.exit(1)
+        # Emit a minimal pointer so callers can pipe stdout into a prompt
+        # without dragging the full content along.
+        print(f"Context written to {sidecar_path}. Read it once at the start of your work.")
+    else:
+        print(content)
 
 
 if __name__ == "__main__":
