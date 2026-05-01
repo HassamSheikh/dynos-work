@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# PreToolUse + PostToolUse hook for the Agent tool.
+# First arg is the phase: "pre" or "post".
+# Delegates to Python which reads stdin and appends to spawn-log.jsonl.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "${SCRIPT_DIR}/agent_spawn_log.py" "$@"
