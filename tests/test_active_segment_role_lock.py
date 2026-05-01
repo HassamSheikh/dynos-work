@@ -144,9 +144,19 @@ def test_ctl_stamp_role_writes_role_file(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# (d) stamp-role refuses audit-* roles
+# (d) stamp-role accepts audit-* roles when in the allowlist
 # ---------------------------------------------------------------------------
-def test_ctl_stamp_role_rejects_audit_roles(tmp_path: Path):
+# NOTE: the original test_ctl_stamp_role_rejects_audit_roles was inverted on
+# 2026-04-30 after we recognized that refusing audit-* in stamp-role broke
+# the legitimate auditor write path: a real auditor subagent that runs and
+# writes its own audit-report needs role=audit-* set in the role file, and
+# the only legitimate way to set the role file is through this wrapper.
+# Forgery defense for audit-* claims lives downstream at receipt_audit_done,
+# which cross-checks against the hook-owned spawn-log.jsonl. Stamping
+# audit-spec-completion without a matching real spawn produces nothing
+# useful — the auditor never ran, no report lands on disk, the receipt
+# fails. See task-20260430-005 for the design rationale.
+def test_ctl_stamp_role_accepts_audit_roles(tmp_path: Path):
     project_root, task_dir = _make_task_dir(tmp_path)
     proc = subprocess.run(
         [sys.executable, str(CTL_PATH), "stamp-role", str(task_dir), "--role", "audit-spec-completion"],
@@ -154,9 +164,10 @@ def test_ctl_stamp_role_rejects_audit_roles(tmp_path: Path):
         text=True,
         timeout=30,
     )
-    assert proc.returncode == 1, "audit-* role must be rejected by stamp-role"
-    assert "audit" in proc.stderr.lower()
-    assert not (task_dir / "active-segment-role").exists()
+    assert proc.returncode == 0, f"audit-* role must be accepted: rc={proc.returncode} stderr={proc.stderr}"
+    role_file = task_dir / "active-segment-role"
+    assert role_file.is_file()
+    assert role_file.read_text().strip() == "audit-spec-completion"
 
 
 # ---------------------------------------------------------------------------

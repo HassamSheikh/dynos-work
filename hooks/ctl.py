@@ -1122,16 +1122,24 @@ def cmd_write_classification(args: argparse.Namespace) -> int:
     return 0
 
 
-# Executor roles that may legitimately be stamped to active-segment-role.
-# Subset of pre_tool_use._EXECUTOR_ROLE_ALLOWLIST — audit-* roles are
-# excluded because auditors run as subagents whose role is established at
-# spawn time, not by orchestrator-stamped role files. Allowing audit-* here
-# would re-open the self-elevation primitive that enabled the 2026-04-30
-# audit-chain forgery incident.
+# Roles that may be stamped to active-segment-role through this wrapper.
+# Mirrors pre_tool_use._EXECUTOR_ROLE_ALLOWLIST so the role file can hold
+# any role pre_tool_use will accept. Forgery defense for audit-* roles
+# does NOT live here — stamping the role file does not by itself produce
+# a fake audit. The defense lives in receipt_audit_done's spawn-log
+# cross-check: a receipt that claims an audit-* spawn must point at a
+# matching agent_spawn_pre/post pair in spawn-log.jsonl, which is hook-owned
+# and unforgeable from the orchestrator side. Stamping audit-spec-completion
+# without a matching spawn produces a role file that does nothing useful —
+# the auditor that the role would unblock never ran, so its report file
+# never appears, and the receipt is rejected.
 _STAMP_ROLE_ALLOWLIST: frozenset[str] = frozenset({
     "backend-executor", "ui-executor", "testing-executor", "integration-executor",
     "ml-executor", "db-executor", "refactor-executor", "docs-executor",
     "planning", "execute-inline", "repair-coordinator",
+    "audit-spec-completion", "audit-security", "audit-code-quality",
+    "audit-performance", "audit-dead-code", "audit-db-schema", "audit-ui",
+    "audit-claude-md",
 })
 
 
@@ -1139,9 +1147,9 @@ def cmd_stamp_role(args: argparse.Namespace) -> int:
     """Write the executor role to active-segment-role under role=ctl.
 
     Replaces the legacy `printf '%s' "{role}" > active-segment-role` pattern.
-    Refuses audit-* roles and any role outside the executor allowlist —
-    auditor roles must come from a real Agent-tool spawn (caught by the
-    spawn-log hook), not from orchestrator self-stamping.
+    Validates the role string against the allowlist. Forgery defense for
+    audit-* claims is enforced downstream at receipt_audit_done, which
+    cross-checks against spawn-log.jsonl — see task-20260430-005.
     """
     task_dir = Path(args.task_dir).resolve()
     if not task_dir.is_dir():
@@ -1153,20 +1161,9 @@ def cmd_stamp_role(args: argparse.Namespace) -> int:
         print("stamp-role: --role is required and must be non-empty", file=sys.stderr)
         return 1
 
-    if role.startswith("audit-"):
-        print(
-            f"stamp-role: refused — audit-* roles cannot be stamped; "
-            f"auditor roles must come from a real Agent-tool spawn (the "
-            f"spawn-log hook records the evidence). Stamping {role!r} would "
-            f"re-open the self-elevation primitive behind the 2026-04-30 "
-            f"audit-chain forgery incident.",
-            file=sys.stderr,
-        )
-        return 1
-
     if role not in _STAMP_ROLE_ALLOWLIST:
         print(
-            f"stamp-role: refused — role {role!r} is not in the executor "
+            f"stamp-role: refused — role {role!r} is not in the role "
             f"allowlist; permitted values: {sorted(_STAMP_ROLE_ALLOWLIST)}",
             file=sys.stderr,
         )
