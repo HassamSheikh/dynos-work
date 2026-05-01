@@ -122,13 +122,19 @@ def _has_cross_check_valueerror(fn: ast.FunctionDef) -> bool:
 
 def _has_hash_artifact_open(fn: ast.FunctionDef) -> bool:
     """Approved pattern C: the writer opens an artifact (``Path.open``
-    or ``json.load`` or ``hash_file``) — evidence of direct re-derivation."""
+    or ``json.load`` or ``hash_file``) — evidence of direct re-derivation.
+
+    Also accepts the project-internal ``_hash_artifact`` helper, which
+    is the canonical SHA-256-of-file primitive used by writers that
+    bind their payload to an on-disk artifact (e.g.
+    receipt_search_conducted hashing external-solution-gate.json).
+    """
     for sub in ast.walk(fn):
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute):
             if sub.func.attr in {"open", "read_text", "read_bytes"}:
                 return True
         if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name):
-            if sub.func.id in {"hash_file", "parse_acceptance_criteria"}:
+            if sub.func.id in {"hash_file", "_hash_artifact", "parse_acceptance_criteria"}:
                 return True
     return False
 
