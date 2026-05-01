@@ -309,6 +309,24 @@ def main() -> int:
 
         destinations = _extract_bash_destinations(command)
 
+        # Substring-scan defense for control-plane filenames against deletion
+        # primitives that bypass _extract_bash_destinations. Only scans when
+        # the command contains a deletion verb (rm/rmdir/unlink/shred/find-
+        # -delete/truncate) — avoids false positives on `git commit -m
+        # "...audit-grep-quota.json..."` and similar non-destructive uses.
+        # Parser-independent within the deletion class; closes V1-V5 from
+        # sec-1-residual.
+        _DELETION_VERB = re.compile(
+            r"\b(rm|rmdir|unlink|shred|truncate)\b|\bfind\b[^|;&]*-delete\b"
+        )
+        if task_dir is not None and _DELETION_VERB.search(command):
+            from write_policy import _CONTROL_PLANE_EXACT
+            for cp_name in _CONTROL_PLANE_EXACT:
+                if cp_name in command:
+                    cp_path = (task_dir / cp_name).resolve()
+                    if str(cp_path) not in destinations and cp_name not in destinations:
+                        destinations.append(str(cp_path))
+
         if not destinations:
             # No write pattern matched -- pass without policy check
             return 0

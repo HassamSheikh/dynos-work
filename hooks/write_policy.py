@@ -79,6 +79,7 @@ _CONTROL_PLANE_EXACT = frozenset({
     "token-usage.json",
     "events.jsonl",
     "spawn-log.jsonl",
+    "audit-grep-quota.json",
 })
 
 _WRAPPER_REQUIRED = {
