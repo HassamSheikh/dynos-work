@@ -79,6 +79,17 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     "pre_tool_use_role_missing",
     "pre_tool_use_bash_check",
     "pre_tool_use_role_file_missing",
+    # Audit-plan presence/shape diagnostics (pre_tool_use.py audit-plan
+    # check, task-20260501-002). Emitted when audit-plan.json is missing
+    # or malformed at PreToolUse time. Forensic trace only — no gate or
+    # state machine depends on these events.
+    "pre_tool_use_audit_plan_missing",
+    "pre_tool_use_audit_plan_invalid",
+    # Read-policy decision observability (read_policy gate, task-20260501-002).
+    # Forensic trace recording allow/deny decisions for read attempts.
+    # Observability only — no gate or state machine depends on these events.
+    "read_policy_allowed",
+    "read_policy_denied",
     # Risk level override observability (ctl._normalize_classification_payload).
     # Forensic trace — records when an observed_floor overrides the planner's
     # risk_level upward. No gate or state machine blocks on this event.

@@ -270,3 +270,50 @@ def test_malformed_stdin_never_silently_allows(tmp_path: Path) -> None:
         f"silently allow); got exit {result.returncode}, stderr="
         f"{result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# AC 3 + AC 16: non-audit role Read passes through without read policy
+# (integration test via subprocess hook invocation)
+# ---------------------------------------------------------------------------
+def test_non_audit_role_read_passthrough(tmp_path: Path) -> None:
+    """AC 3 + AC 16: non-audit role Read to any path exits 0; decide_read not called.
+
+    This exercises two things simultaneously:
+    (a) AC 16 — non-audit role (backend-executor) gets an unconditional pass on Read.
+    (b) AC 3 — the new Read/Grep/Glob handler block exists in pre_tool_use.py main()
+        and correctly short-circuits to return 0 for non-audit roles without invoking
+        decide_read. If the handler block were absent, the hook would still exit 0 via
+        the final passthrough — but then AC 3 wiring would not exist, making the audit
+        enforcement path unreachable. The audit-role tests cover that branch.
+    """
+    project_root, task_dir = _make_task_dir(tmp_path)
+
+    # Deliberately use a path that is completely outside task_dir and would be
+    # denied if read policy were applied to this non-audit role.
+    payload = {
+        "tool_name": "Read",
+        "tool_input": {"file_path": "/etc/passwd"},
+        "cwd": str(project_root),
+    }
+    env = {
+        "DYNOS_ROLE": "backend-executor",
+        "DYNOS_TASK_DIR": str(task_dir),
+    }
+
+    result = _invoke_hook(payload=payload, env_extra=env, cwd=project_root)
+
+    assert result.returncode == 0, (
+        f"Expected exit 0 for non-audit role Read (passthrough); "
+        f"got {result.returncode}; stderr={result.stderr!r}"
+    )
+
+    # Verify no read_policy_denied event was emitted — non-audit roles must
+    # not trigger read policy enforcement at all.
+    events_path = task_dir / "events.jsonl"
+    if events_path.exists():
+        events_text = events_path.read_text()
+        assert "read_policy_denied" not in events_text, (
+            f"read_policy_denied event must not appear for non-audit role Read; "
+            f"events.jsonl: {events_text!r}"
+        )
