@@ -14,6 +14,7 @@ import json
 import os
 import platform
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,8 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     "scheduler_transition_race",
     "verify_signed_events_no_secret",
     "verify_signed_events_mismatch",
+    "verify_signed_events_migration_attempted",
+    "verify_signed_events_migration_failed",
     # Per-auditor ensemble routing decision (router.py build_audit_plan).
     # Diagnostic trace — no gate or state machine depends on this event.
     "auditor_ensemble_decision",
@@ -127,7 +130,16 @@ _WRITE_ROLE = "eventbus"
 _EVENT_SECRET_CACHE: dict[str, str] = {}
 
 
-def _resolve_event_secret(root: Path) -> str:
+def _derive_per_task_secret(project_secret: str, task_id: str) -> str:
+    """Derive a per-task HMAC secret from project secret + task_id."""
+    return hmac.new(
+        project_secret.encode(),
+        task_id.encode(),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+
+
+def _resolve_event_secret(root: Path, *, task_id: str | None = None) -> str:
     """Resolve the HMAC-SHA256 secret used to sign events.
 
     Resolution order:
@@ -138,15 +150,27 @@ def _resolve_event_secret(root: Path) -> str:
     (d) Derive from sha256(f'{root.resolve()}:{platform.node()}')[:32], write
         atomically via os.open(O_WRONLY|O_CREAT|O_EXCL, 0o600), handle
         FileExistsError by re-reading (branch c).
+
+    When ``task_id`` is a non-empty string the resolved project secret is
+    further derived via :func:`_derive_per_task_secret` so each task's events
+    are signed under an isolated HMAC namespace. The ``_EVENT_SECRET_CACHE``
+    continues to cache the project secret only — never the per-task
+    derivation — so cross-task derivations remain pure functions of the
+    project secret.
     """
     env_secret = os.environ.get("DYNOS_EVENT_SECRET")
     if env_secret:
+        if task_id:
+            return _derive_per_task_secret(env_secret, task_id)
         return env_secret
 
     cache_key = str(root.resolve())
 
     if cache_key in _EVENT_SECRET_CACHE:
-        return _EVENT_SECRET_CACHE[cache_key]
+        secret = _EVENT_SECRET_CACHE[cache_key]
+        if task_id:
+            return _derive_per_task_secret(secret, task_id)
+        return secret
 
     cache_path = _persistent_project_dir(root) / "event-secret"
 
@@ -156,6 +180,8 @@ def _resolve_event_secret(root: Path) -> str:
             raise ValueError(f"event-secret perms unsafe: {cache_path}")
         secret = cache_path.read_text(encoding="utf-8").strip()
         _EVENT_SECRET_CACHE[cache_key] = secret
+        if task_id:
+            return _derive_per_task_secret(secret, task_id)
         return secret
 
     # Derive a deterministic secret for this project+host combination.
@@ -178,10 +204,12 @@ def _resolve_event_secret(root: Path) -> str:
         secret = cache_path.read_text(encoding="utf-8").strip()
 
     _EVENT_SECRET_CACHE[cache_key] = secret
+    if task_id:
+        return _derive_per_task_secret(secret, task_id)
     return secret
 
 
-def sign_event(payload: dict, secret: str) -> str:
+def sign_event(payload: dict, secret: str, *, task_id: str | None = None) -> str:
     """Return the hex digest of HMAC-SHA256 over the canonical JSON of payload.
 
     The ``_sig`` key is excluded from the canonical serialization before
@@ -189,8 +217,14 @@ def sign_event(payload: dict, secret: str) -> str:
 
     Canonical form: ``json.dumps(filtered, sort_keys=True,
     separators=(",", ":"), ensure_ascii=False, default=str)``.
+
+    When ``task_id`` is a non-empty string the supplied ``secret`` is
+    additionally derived via :func:`_derive_per_task_secret` before signing,
+    yielding per-task namespace isolation. Empty string and ``None`` both
+    fall back to the raw project secret (no derivation).
     """
     without_sig = {k: v for k, v in payload.items() if k != "_sig"}
+    effective_secret = _derive_per_task_secret(secret, task_id) if task_id else secret
     canonical = json.dumps(
         without_sig,
         sort_keys=True,
@@ -199,7 +233,7 @@ def sign_event(payload: dict, secret: str) -> str:
         default=str,
     ).encode("utf-8")
     digest = hmac.new(
-        secret.encode("utf-8"),
+        effective_secret.encode("utf-8"),
         canonical,
         hashlib.sha256,
     ).hexdigest()
@@ -260,50 +294,103 @@ def verify_signed_events(
         )
         return records
 
+    task_id = task_dir.name if task_dir.name else None
+    per_task_secret = _derive_per_task_secret(secret, task_id) if task_id else secret
+
     events_path = task_dir / "events.jsonl"
     if not events_path.exists():
         return []
 
+    # sec-007: only task-scoped directories may migrate. The global .dynos dir
+    # and any non-task path uses dual-verify only (read), no rewrite.
+    migration_eligible = (
+        task_id is not None
+        and task_id != ".dynos"
+        and task_id.startswith("task-")
+        and per_task_secret != secret
+    )
+
+    # sec-006: persistent migration failure sentinel disables retry storm.
+    sentinel = task_dir / ".events-migration-disabled"
+    if migration_eligible and sentinel.exists():
+        migration_eligible = False
+
+    # sec-003: refuse migration when path is a symlink — os.replace would
+    # follow the symlink and clobber the target.
+    if migration_eligible:
+        try:
+            if events_path.is_symlink() or task_dir.is_symlink():
+                migration_eligible = False
+        except OSError:
+            migration_eligible = False
+
+    # Capture original raw lines (sec-002) so a future rewrite preserves
+    # malformed/mismatched/unparseable lines verbatim and only replaces
+    # legacy-signed records.
     verified: list[dict] = []
-    # OSError propagates to caller — receipt_post_completion wraps it in ValueError.
-    with events_path.open("r", encoding="utf-8") as f:
-        for n, raw in enumerate(f, start=1):
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                record = json.loads(raw)
-            except json.JSONDecodeError:
-                if strict:
-                    raise ValueError(
-                        f"event signature invalid at line {n}: unparseable JSON"
-                    )
-                continue
-            if not isinstance(record, dict):
-                if strict:
-                    raise ValueError(
-                        f"event signature invalid at line {n}: not a JSON object"
-                    )
-                continue
+    raw_lines: list[str] = []
+    migration_line_set: set[int] = set()  # 1-indexed line numbers needing re-sign
 
-            stored_sig = record.get("_sig")
-            if stored_sig is None:
-                reason = "missing_sig"
-                if strict:
-                    raise ValueError(
-                        f"event signature invalid at line {n}: {reason}"
-                    )
-                log_event(
-                    task_dir.parent.parent,
-                    "verify_signed_events_mismatch",
-                    task_dir=str(task_dir),
-                    line_number=n,
-                    reason=reason,
-                )
-                continue
+    # sec-001: hold LOCK_EX on events.jsonl for the read+rewrite pair so
+    # concurrent log_event appends (which take LOCK_EX in _append_jsonl)
+    # cannot interleave between our read and our rewrite. Open r+ to allow
+    # the optional in-place rewrite later.
+    with events_path.open("r+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            for n, raw in enumerate(f, start=1):
+                raw_lines.append(raw if raw.endswith("\n") else raw + "\n")
+                stripped = raw.strip()
+                if not stripped:
+                    continue
+                try:
+                    record = json.loads(stripped)
+                except json.JSONDecodeError:
+                    if strict:
+                        raise ValueError(
+                            f"event signature invalid at line {n}: unparseable JSON"
+                        )
+                    continue
+                if not isinstance(record, dict):
+                    if strict:
+                        raise ValueError(
+                            f"event signature invalid at line {n}: not a JSON object"
+                        )
+                    continue
 
-            expected = sign_event(record, secret)
-            if not hmac.compare_digest(expected, stored_sig):
+                stored_sig = record.get("_sig")
+                if stored_sig is None:
+                    reason = "missing_sig"
+                    if strict:
+                        raise ValueError(
+                            f"event signature invalid at line {n}: {reason}"
+                        )
+                    log_event(
+                        task_dir.parent.parent,
+                        "verify_signed_events_mismatch",
+                        task_dir=str(task_dir),
+                        line_number=n,
+                        reason=reason,
+                    )
+                    continue
+
+                expected_per_task = sign_event(record, per_task_secret)
+                if hmac.compare_digest(expected_per_task, stored_sig):
+                    verified.append(record)
+                    continue
+
+                # Fall back to project-secret retry
+                expected_project = sign_event(record, secret)
+                if hmac.compare_digest(expected_project, stored_sig):
+                    if strict:
+                        raise ValueError(
+                            f"event signature invalid at line {n}: legacy_project_secret_in_strict_mode"
+                        )
+                    verified.append(record)
+                    migration_line_set.add(n)
+                    continue
+
+                # Neither matched → existing mismatch handling
                 reason = "signature_mismatch"
                 if strict:
                     raise ValueError(
@@ -316,9 +403,120 @@ def verify_signed_events(
                     line_number=n,
                     reason=reason,
                 )
-                continue
 
-            verified.append(record)
+            # Migration: rewrite while still holding LOCK_EX (sec-001).
+            if migration_line_set and migration_eligible:
+                # sec-005: route through the same write-policy gate as
+                # _append_jsonl uses for log_event appends.
+                try:
+                    require_write_allowed(
+                        WriteAttempt(
+                            role=_WRITE_ROLE,
+                            task_dir=task_dir,
+                            path=events_path,
+                            operation="modify",
+                            source=_WRITE_ROLE,
+                        ),
+                        capability_key=get_capability_key(_WRITE_ROLE),
+                        emit_event=False,
+                    )
+                except Exception as exc:
+                    log_event(
+                        task_dir.parent.parent,
+                        "verify_signed_events_migration_failed",
+                        task_dir=str(task_dir),
+                        error=f"write_policy_denied: {exc}",
+                    )
+                else:
+                    log_event(
+                        task_dir.parent.parent,
+                        "verify_signed_events_migration_attempted",
+                        task_dir=str(task_dir),
+                        migrated_count=len(migration_line_set),
+                    )
+                    tmp_path: str | None = None
+                    try:
+                        # Capture original mode for restoration after replace.
+                        try:
+                            original_mode = events_path.stat().st_mode & 0o777
+                        except OSError:
+                            original_mode = 0o600
+                        with tempfile.NamedTemporaryFile(
+                            mode="w",
+                            dir=task_dir,
+                            delete=False,
+                            suffix=".tmp",
+                            encoding="utf-8",
+                        ) as tmp:
+                            tmp_path = tmp.name
+                            # sec-002: rewrite using ORIGINAL raw lines, only
+                            # replacing migrated records. Mismatched/missing-
+                            # sig/unparseable lines are preserved verbatim.
+                            for line_no, line in enumerate(raw_lines, start=1):
+                                if line_no in migration_line_set:
+                                    try:
+                                        original = json.loads(line.strip())
+                                        if isinstance(original, dict):
+                                            original["_sig"] = sign_event(
+                                                original, per_task_secret
+                                            )
+                                            tmp.write(
+                                                json.dumps(
+                                                    original,
+                                                    default=str,
+                                                    ensure_ascii=False,
+                                                )
+                                                + "\n"
+                                            )
+                                            continue
+                                    except (json.JSONDecodeError, ValueError):
+                                        pass
+                                # Preserve verbatim.
+                                tmp.write(line)
+                            tmp.flush()
+                            os.fsync(tmp.fileno())
+                        # sec-003 re-check: between our earlier check and now,
+                        # ensure events_path still isn't a symlink.
+                        if events_path.is_symlink():
+                            raise OSError(
+                                "events_path became a symlink mid-flight"
+                            )
+                        os.replace(tmp_path, events_path)
+                        try:
+                            os.chmod(events_path, original_mode)
+                        except OSError:
+                            pass
+                        tmp_path = None  # successfully renamed; nothing to clean
+                    except Exception as exc:
+                        log_event(
+                            task_dir.parent.parent,
+                            "verify_signed_events_migration_failed",
+                            task_dir=str(task_dir),
+                            error=str(exc),
+                        )
+                        # sec-006: persistent failure → write sentinel to
+                        # disable retry. Best-effort.
+                        try:
+                            sentinel.write_text(
+                                json.dumps(
+                                    {
+                                        "ts": now_iso(),
+                                        "error": str(exc),
+                                    }
+                                )
+                            )
+                            os.chmod(sentinel, 0o600)
+                        except OSError:
+                            pass
+                    finally:
+                        # sec-004: best-effort cleanup of leaked tmpfile.
+                        if tmp_path is not None:
+                            try:
+                                os.unlink(tmp_path)
+                            except OSError:
+                                pass
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     return verified
 
@@ -360,7 +558,7 @@ def log_event(root: Path, event_type: str, *, task: str | None = None, **payload
         record.update(payload)
 
         try:
-            secret = _resolve_event_secret(root)
+            secret = _resolve_event_secret(root, task_id=task)
             record["_sig"] = sign_event(record, secret)
         except Exception as exc:
             print(
