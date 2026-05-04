@@ -2015,6 +2015,25 @@ def cmd_write_execute_handoff(args: argparse.Namespace) -> int:
         return 1
 
 
+def _try_extend_chain_for_artifact(task_dir: Path, file_path: Path) -> None:
+    """Best-effort task-receipt-chain extension for an artifact write.
+    Failures log task_receipt_chain_extension_failed and never propagate.
+    """
+    try:
+        from lib_chain import extend_chain_for_artifact
+        extend_chain_for_artifact(task_dir, file_path)
+    except Exception as exc:
+        try:
+            from lib_log import log_event
+            log_event(
+                task_dir.parent.parent,
+                "task_receipt_chain_extension_failed",
+                task=task_dir.name, file=str(file_path), error=str(exc),
+            )
+        except Exception:
+            pass
+
+
 def cmd_write_execution_graph(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     try:
@@ -2025,6 +2044,7 @@ def cmd_write_execution_graph(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    _try_extend_chain_for_artifact(task_dir, out_path)
     print(json.dumps({"status": "execution_graph_written", "path": str(out_path)}, indent=2))
     return 0
 
@@ -2052,6 +2072,7 @@ def cmd_write_classification(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    _try_extend_chain_for_artifact(task_dir, out_path)
     print(json.dumps({"status": "classification_written", "path": str(out_path)}, indent=2))
     return 0
 
@@ -2138,6 +2159,12 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
             return 1
 
         receipt_path = receipt_spec_validated(task_dir)
+        # Task-receipt-chain (task-20260503-001 AC 8): chain spec.md after
+        # validation. Best-effort.
+        spec_path = task_dir / "spec.md"
+        if spec_path.exists():
+            _try_extend_chain_for_artifact(task_dir, spec_path)
+
         transitioned_to = None
         stage = _load_manifest(task_dir).get("stage")
         if stage == "SPEC_NORMALIZATION":
@@ -3630,6 +3657,21 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
         completion = load_json(summary_path)
         completion_path = task_dir / "completion.json"
         write_json(completion_path, completion)
+
+        # Task-receipt-chain (task-20260503-001): extend chain for the
+        # final completion artifact. If the chain file is absent, this
+        # is a legacy task and we set chain_unverified=true. Best-effort.
+        chain_path = task_dir / "task-receipt-chain.jsonl"
+        if not chain_path.exists():
+            try:
+                manifest["chain_unverified"] = True
+                from lib_core import write_ctl_json as _wcj
+                _wcj(task_dir, task_dir / "manifest.json", manifest)
+            except Exception:
+                pass
+        else:
+            _try_extend_chain_for_artifact(task_dir, completion_path)
+
         _, updated = transition_task(task_dir, "DONE")
         print(json.dumps({
             "status": "done",
@@ -3642,6 +3684,143 @@ def cmd_run_audit_finish(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+_FIXED_CHAIN_ARTIFACTS = (
+    "manifest.json",
+    "spec.md",
+    "plan.md",
+    "execution-graph.json",
+    "repair-log.json",
+    "task-retrospective.json",
+    "audit-plan.json",
+    "audit-summary.json",
+    "audit-context.md",
+    "external-solution-gate.json",
+    "completion.json",
+)
+
+
+def cmd_run_task_receipt_chain(args: argparse.Namespace) -> int:
+    """Walk receipts/ recursively + fixed artifacts, append entries for files
+    not yet chained. Idempotent under sequential AND concurrent invocation.
+
+    sec-001 fix: holds fcntl.LOCK_EX on the chain file across the entire
+    'already' read + per-file append sequence so two concurrent invocations
+    cannot both decide to append the same (kind, file_path).
+    """
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        import fcntl as _fcntl
+        from lib_chain import _CHAIN_FILENAME, _append_entry_unlocked
+    except Exception as exc:
+        print(f"lib_chain import failed: {exc}", file=sys.stderr)
+        return 1
+
+    chain_path = task_dir / _CHAIN_FILENAME
+    chain_path.parent.mkdir(parents=True, exist_ok=True)
+    if not chain_path.exists():
+        chain_path.touch()
+
+    # Hold LOCK_EX across the entire read+append sequence so concurrent
+    # invocations serialize. _append_entry's own LOCK_EX is on the same
+    # file (BSD flock is per-open-file-description on POSIX), so the inner
+    # acquire is reentrant-safe within the same process.
+    pending: list[tuple[str, str, Path]] = []  # (kind, step, file_path)
+    with chain_path.open("r+", encoding="utf-8") as lock_f:
+        _fcntl.flock(lock_f.fileno(), _fcntl.LOCK_EX)
+        try:
+            already: set = set()
+            try:
+                for ln in lock_f.read().splitlines():
+                    if not ln.strip():
+                        continue
+                    try:
+                        e = json.loads(ln)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(e, dict):
+                        already.add((e.get("kind"), e.get("file_path")))
+            except OSError:
+                pass
+
+            # Walk receipts/
+            receipts_dir = task_dir / "receipts"
+            if receipts_dir.is_dir():
+                for rp in sorted(receipts_dir.rglob("*")):
+                    if not rp.is_file():
+                        continue
+                    try:
+                        rel = rp.relative_to(task_dir).as_posix()
+                    except ValueError:
+                        continue
+                    if ("receipt", rel) in already:
+                        continue
+                    pending.append(("receipt", rp.stem, rp))
+
+            # Fixed artifact list
+            for name in _FIXED_CHAIN_ARTIFACTS:
+                ap = task_dir / name
+                if not ap.is_file():
+                    continue
+                if ("artifact", name) in already:
+                    continue
+                pending.append(("artifact", name, ap))
+
+            # Append all pending entries while still holding the outer
+            # lock. Use the unlocked variant — taking the inner LOCK_EX
+            # again on a separate FD would deadlock under BSD flock
+            # (per-FD lock semantics). The outer lock_f's LOCK_EX is
+            # sufficient to serialize concurrent CLI invocations.
+            for kind, step, fp in pending:
+                try:
+                    _append_entry_unlocked(task_dir, step, kind, fp)
+                except Exception:
+                    pass
+        finally:
+            _fcntl.flock(lock_f.fileno(), _fcntl.LOCK_UN)
+
+    print(json.dumps({
+        "status": "task_receipt_chain_ready",
+        "task_dir": str(task_dir),
+        "chain_path": str(chain_path),
+        "appended": len(pending),
+    }, indent=2))
+    return 0
+
+
+def cmd_validate_task_receipt_chain(args: argparse.Namespace) -> int:
+    """Validate the chain. Exit codes: 0 valid, 1 content_mismatch,
+    2 chain_corrupt, 3 chain_missing.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    try:
+        from lib_chain import validate_chain
+    except Exception as exc:
+        print(f"lib_chain import failed: {exc}", file=sys.stderr)
+        return 1
+
+    result = validate_chain(task_dir)
+    code_map = {
+        "valid": 0,
+        "content_mismatch": 1,
+        "chain_corrupt": 2,
+        "chain_missing": 3,
+        "chain_truncated": 2,
+    }
+    code = code_map.get(result.status, 1)
+    if code == 0:
+        print(json.dumps({"status": "valid"}, indent=2))
+    else:
+        err = {
+            "error": result.status,
+            "index": result.first_failed_index,
+            "file_path": result.first_failed_file_path,
+            "field": result.first_failed_field,
+            "reason": result.error_reason,
+        }
+        print(json.dumps(err, indent=2), file=sys.stderr)
+    return code
 
 
 def cmd_repair_plan(args: argparse.Namespace) -> int:
@@ -4512,6 +4691,20 @@ def register_meta_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     run_audit_finish_parser.add_argument("task_dir")
     run_audit_finish_parser.set_defaults(func=cmd_run_audit_finish)
+
+    chain_run_parser = subparsers.add_parser(
+        "run-task-receipt-chain",
+        help="Walk receipts/ + fixed artifacts and append unchained entries",
+    )
+    chain_run_parser.add_argument("task_dir")
+    chain_run_parser.set_defaults(func=cmd_run_task_receipt_chain)
+
+    chain_validate_parser = subparsers.add_parser(
+        "validate-task-receipt-chain",
+        help="Validate task receipt chain (exit 0 valid, 1 content_mismatch, 2 chain_corrupt, 3 chain_missing)",
+    )
+    chain_validate_parser.add_argument("task_dir")
+    chain_validate_parser.set_defaults(func=cmd_validate_task_receipt_chain)
 
     rp_parser = subparsers.add_parser("repair-plan", help="Q-learning repair plan (reads findings from stdin)")
     rp_parser.add_argument("--root", default=".")
