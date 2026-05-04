@@ -175,6 +175,10 @@ def allowed_globs_for_role(role: str, task_dir: Path | None) -> list[str]:
 
 def decide_write(attempt: WriteAttempt) -> WriteDecision:
     path = attempt.path.resolve()
+    if path.name == ".rules_corrupt" and path.parent.name == ".dynos":
+        if attempt.role == "daemon":
+            return WriteDecision(True, ".dynos/.rules_corrupt allowed for daemon role", "direct")
+        return WriteDecision(False, ".dynos/.rules_corrupt is daemon-owned kill-switch state; agent writes denied", "deny")
     rel = _task_relative(path, attempt.task_dir)
     rel_posix = rel.as_posix() if rel is not None else None
 

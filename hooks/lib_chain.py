@@ -51,16 +51,27 @@ _CHAIN_FILENAME = "task-receipt-chain.jsonl"
 class ChainValidationResult:
     """Structured result of `validate_chain()`.
 
-    Fields:
-        status: One of {"valid", "content_mismatch", "chain_corrupt",
-                "chain_missing", "chain_truncated"}.
-        first_failed_index: 0-based index of the first failing entry, or
-                None when status == "valid" or "chain_missing".
-        first_failed_field: Which field broke ("sha256", "prev_sha256",
-                "_sig"), or None when status is "valid"/"chain_missing".
-        error_reason: Human-readable detail for the CLI/logs.
-        first_failed_file_path: file_path of the failing entry, or None
-                when status == "valid"/"chain_missing".
+Field invariants by status:
+
+| status              | first_failed_index | first_failed_field | error_reason | first_failed_file_path |
+|---------------------|--------------------|--------------------|--------------|------------------------|
+| "valid"             | None               | None               | None         | None                   |
+| "chain_missing"     | None               | None               | None         | None                   |
+| "content_mismatch"  | int >= 0           | "sha256"           | str          | str                    |
+| "chain_corrupt"     | int >= 0           | "_sig" or "prev_sha256" | str    | str or None            |
+| "chain_truncated"   | int >= 0           | "_sig"             | str          | str or None            |
+
+Fields:
+    status: One of {"valid", "content_mismatch", "chain_corrupt",
+            "chain_missing", "chain_truncated"}.
+    first_failed_index: 0-based index of the first failing entry, or
+            None when status is "valid" or "chain_missing".
+    first_failed_field: Which field broke ("sha256", "prev_sha256",
+            "_sig"), or None when status is "valid" or "chain_missing".
+    error_reason: Human-readable detail for the CLI/logs, or None
+            when status is "valid" or "chain_missing".
+    first_failed_file_path: file_path of the failing entry, or None
+            when status is "valid" or "chain_missing".
     """
     status: str
     first_failed_index: int | None
@@ -139,7 +150,7 @@ def _task_relative(task_dir: Path, file_path: Path) -> str:
     except ValueError:
         # File lives outside task_dir — store an absolute path. validate_chain
         # will recompute against the same path on validate.
-        return str(file_path)
+        return str(file_path.resolve())
 
 
 def _append_entry_unlocked(task_dir: Path, step: str, kind: str, file_path: Path) -> None:
