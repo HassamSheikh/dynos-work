@@ -215,8 +215,11 @@ def derive_user_summary(audit_summary: dict) -> str:
     else:
         header = f"Audit complete — FAILED — {total_blocking} blocking findings"
 
+    # Per-spec ordering: lines in the order of first appearance of each
+    # auditor_name in the reports array (insertion order — Python 3.7+
+    # dicts preserve insertion order, so iterate by_auditor directly).
     auditor_lines: list[str] = []
-    for name in sorted(by_auditor.keys()):
+    for name in by_auditor:
         bc = by_auditor[name]
         if bc == 0:
             auditor_lines.append(f"  {name}: PASS")

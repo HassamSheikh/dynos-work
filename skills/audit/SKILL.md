@@ -404,12 +404,7 @@ This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT
 
 Print verbatim the contents of `.dynos/task-{id}/completion.json::user_summary`.
 Do NOT paraphrase, reorder, or add commentary. The orchestrator's user-facing
-final output for this skill is constrained to a literal echo of that text. The
-text is derived deterministically by `run-audit-summary` (see
-`lib_validate.derive_user_summary`) and copied into `completion.json` by
-`run-audit-finish`. The text is also returned in `run-audit-finish` stdout JSON
-under the `user_summary` key. Run `verify-audit-summary-text .dynos/task-{id}`
-to confirm the stored text matches a fresh derivation (exit 0 = match).
+final output for this skill is constrained to a literal echo of that text.
 
 ---
 

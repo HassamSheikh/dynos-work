@@ -120,6 +120,56 @@ def test_derive_no_trailing_newline():
     assert not derive_user_summary(summary2).endswith("\n")
 
 
+def test_derive_single_blocking_finding():
+    """Scenario: one auditor with blocking_count=1 (singular)."""
+    summary = {
+        "task_id": "task-X",
+        "reports": [
+            {"auditor_name": "spec-completion-auditor", "blocking_count": 0},
+            {"auditor_name": "security-auditor", "blocking_count": 1},
+        ],
+    }
+    result = derive_user_summary(summary)
+    assert "Audit complete — FAILED — 1 blocking findings" in result
+    assert "  security-auditor: FAIL (1 blocking)" in result
+    assert "  spec-completion-auditor: PASS" in result
+
+
+def test_derive_multiple_blocking_across_auditors():
+    """Scenario: multiple auditors each contributing blocking findings."""
+    summary = {
+        "task_id": "task-X",
+        "reports": [
+            {"auditor_name": "security-auditor", "blocking_count": 3},
+            {"auditor_name": "code-quality-auditor", "blocking_count": 2},
+            {"auditor_name": "spec-completion-auditor", "blocking_count": 0},
+        ],
+    }
+    result = derive_user_summary(summary)
+    # Total = 3 + 2 + 0 = 5
+    assert "Audit complete — FAILED — 5 blocking findings" in result
+    assert "  security-auditor: FAIL (3 blocking)" in result
+    assert "  code-quality-auditor: FAIL (2 blocking)" in result
+    assert "  spec-completion-auditor: PASS" in result
+
+
+def test_derive_preserves_insertion_order():
+    """Per-auditor lines appear in order of first appearance, not alphabetical."""
+    summary = {
+        "task_id": "task-X",
+        "reports": [
+            {"auditor_name": "zzz-last-auditor", "blocking_count": 0},
+            {"auditor_name": "aaa-first-auditor", "blocking_count": 0},
+        ],
+    }
+    result = derive_user_summary(summary)
+    zzz_pos = result.index("zzz-last-auditor")
+    aaa_pos = result.index("aaa-first-auditor")
+    # Insertion order: zzz comes first because it's first in reports
+    assert zzz_pos < aaa_pos, \
+        f"insertion-order violated: zzz_pos={zzz_pos} aaa_pos={aaa_pos}"
+
+
 def test_derive_em_dash_codepoint():
     """Header uses U+2014 em-dash, not '--' or U+2013 en-dash."""
     summary = {"task_id": "task-X", "reports": []}
