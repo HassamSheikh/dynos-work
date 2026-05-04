@@ -402,15 +402,9 @@ python3 "${PLUGIN_HOOKS}/ctl.py" run-audit-finish .dynos/task-{id}
 
 This command writes `completion.json` and advances `CHECKPOINT_AUDIT|FINAL_AUDIT -> DONE` deterministically. Do NOT call `transition_task(...)` directly from prompt logic.
 
-Print (listing only auditors that were actually spawned, not skipped):
-```
-Audit complete — ALL PASSED
-
-  {auditor-name}:  PASS
-  ... (one line per spawned auditor)
-
-Task complete. Snapshot branch dynos/task-{id}-snapshot can be deleted if desired.
-```
+Print verbatim the contents of `.dynos/task-{id}/completion.json::user_summary`.
+Do NOT paraphrase, reorder, or add commentary. The orchestrator's user-facing
+final output for this skill is constrained to a literal echo of that text.
 
 ---
 
