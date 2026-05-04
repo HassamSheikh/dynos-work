@@ -2471,6 +2471,8 @@ def _collect_latest_audit_reports(audit_dir: Path) -> dict[str, Path]:
     # Group files by auditor key.
     groups: dict[str, list[tuple[int, int, str, float, str, Path]]] = {}
     for p in audit_dir.glob("*.json"):
+        if p.is_symlink():
+            continue
         name = p.name
         stem = p.stem  # filename without .json
 
@@ -4060,7 +4062,7 @@ def cmd_verify_audit_summary_text(args: argparse.Namespace) -> int:
     diff_first_line = None
     for i, (s, d) in enumerate(zip(stored_lines, derived_lines)):
         if s != d:
-            diff_first_line = stored_lines[i] if i < len(stored_lines) else None
+            diff_first_line = stored_lines[i]
             break
     else:
         # All shared lines match; the longer one diverges at its tail.
