@@ -20,25 +20,22 @@ writers would each see the same tail and produce duplicate prev_sha256.
 """
 from __future__ import annotations
 
-import dataclasses
 import fcntl
 import hashlib
 import hmac
 import json
 import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from lib_core import now_iso
-from lib_log import _derive_per_task_secret, _resolve_event_secret, log_event
+from lib_log import _derive_per_task_secret, _resolve_event_secret
 
 
 __all__ = [
     "extend_chain_for_receipt",
     "extend_chain_for_artifact",
     "validate_chain",
-    "ChainValidationResult",
 ]
 
 
@@ -62,11 +59,14 @@ class ChainValidationResult:
         first_failed_field: Which field broke ("sha256", "prev_sha256",
                 "_sig"), or None when status is "valid"/"chain_missing".
         error_reason: Human-readable detail for the CLI/logs.
+        first_failed_file_path: file_path of the failing entry, or None
+                when status == "valid"/"chain_missing".
     """
     status: str
     first_failed_index: int | None
     first_failed_field: str | None
     error_reason: str | None
+    first_failed_file_path: str | None = None
 
 
 def _canonical_json(entry: dict) -> str:
@@ -142,10 +142,12 @@ def _task_relative(task_dir: Path, file_path: Path) -> str:
         return str(file_path)
 
 
-def _append_entry(task_dir: Path, step: str, kind: str, file_path: Path) -> None:
-    """Append a chain entry under fcntl.LOCK_EX. Internal helper.
+def _append_entry_unlocked(task_dir: Path, step: str, kind: str, file_path: Path) -> None:
+    """Append a chain entry without taking fcntl.LOCK_EX.
 
-    file_path must exist; caller's responsibility.
+    Caller MUST hold an exclusive lock on the chain file already (e.g.
+    cmd_run_task_receipt_chain holds an outer lock across batch appends).
+    Use _append_entry for the locked path.
     """
     chain_path = task_dir / _CHAIN_FILENAME
     chain_path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,7 +155,33 @@ def _append_entry(task_dir: Path, step: str, kind: str, file_path: Path) -> None
     project_secret = _resolve_event_secret(root)
     task_id = task_dir.name if task_dir.name else None
 
-    # Touch the file first so we can open in r+ later if needed
+    prev_sha = _read_tail_prev_sha(chain_path)
+    entry = {
+        "step": step,
+        "kind": kind,
+        "file_path": _task_relative(task_dir, file_path),
+        "sha256": _file_sha256(file_path),
+        "prev_sha256": prev_sha,
+        "ts": now_iso(),
+    }
+    entry["_sig"] = _sign_entry(entry, project_secret, task_id or "")
+    line = json.dumps(entry, default=str, ensure_ascii=False) + "\n"
+    with chain_path.open("a", encoding="utf-8") as f:
+        f.write(line)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except OSError:
+            pass
+
+
+def _append_entry(task_dir: Path, step: str, kind: str, file_path: Path) -> None:
+    """Append a chain entry under fcntl.LOCK_EX. Internal helper.
+
+    file_path must exist; caller's responsibility.
+    """
+    chain_path = task_dir / _CHAIN_FILENAME
+    chain_path.parent.mkdir(parents=True, exist_ok=True)
     if not chain_path.exists():
         chain_path.touch()
 
@@ -162,23 +190,7 @@ def _append_entry(task_dir: Path, step: str, kind: str, file_path: Path) -> None
     with chain_path.open("a", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         try:
-            prev_sha = _read_tail_prev_sha(chain_path)
-            entry = {
-                "step": step,
-                "kind": kind,
-                "file_path": _task_relative(task_dir, file_path),
-                "sha256": _file_sha256(file_path),
-                "prev_sha256": prev_sha,
-                "ts": now_iso(),
-            }
-            entry["_sig"] = _sign_entry(entry, project_secret, task_id or "")
-            line = json.dumps(entry, default=str, ensure_ascii=False) + "\n"
-            f.write(line)
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass  # fsync best-effort; LOCK + write durability is the contract
+            _append_entry_unlocked(task_dir, step, kind, file_path)
         finally:
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
@@ -254,6 +266,7 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
                 first_failed_index=idx,
                 first_failed_field=None,
                 error_reason=f"line {idx} unparseable JSON: {exc}",
+                first_failed_file_path=None,
             )
         if not isinstance(entry, dict):
             return ChainValidationResult(
@@ -261,10 +274,12 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
                 first_failed_index=idx,
                 first_failed_field=None,
                 error_reason=f"line {idx} not a JSON object",
+                first_failed_file_path=None,
             )
 
-        # Check 1: content sha256
         rel = entry.get("file_path", "")
+
+        # Check 1: content sha256
         artifact_path = task_dir / rel if not Path(rel).is_absolute() else Path(rel)
         if not artifact_path.exists():
             return ChainValidationResult(
@@ -272,6 +287,7 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
                 first_failed_index=idx,
                 first_failed_field="sha256",
                 error_reason=f"line {idx} references missing file: {rel}",
+                first_failed_file_path=rel,
             )
         try:
             actual_sha = _file_sha256(artifact_path)
@@ -281,6 +297,7 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
                 first_failed_index=idx,
                 first_failed_field="sha256",
                 error_reason=f"line {idx} file unreadable: {exc}",
+                first_failed_file_path=rel,
             )
         if actual_sha != entry.get("sha256"):
             return ChainValidationResult(
@@ -288,6 +305,7 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
                 first_failed_index=idx,
                 first_failed_field="sha256",
                 error_reason=f"line {idx}: file content does not match stored sha256",
+                first_failed_file_path=rel,
             )
 
         # Check 2: prev_sha256 linkage
@@ -300,6 +318,7 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
                     f"line {idx}: prev_sha256 broken "
                     f"(stored={entry.get('prev_sha256')!r}, expected={expected_prev!r})"
                 ),
+                first_failed_file_path=rel,
             )
 
         # Check 3: HMAC _sig
@@ -310,6 +329,7 @@ def validate_chain(task_dir: Path) -> ChainValidationResult:
                 first_failed_index=idx,
                 first_failed_field="_sig",
                 error_reason=f"line {idx}: HMAC _sig invalid",
+                first_failed_file_path=rel,
             )
 
         # Advance expected_prev for the next entry.

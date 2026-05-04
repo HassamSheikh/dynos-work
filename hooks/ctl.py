@@ -2159,6 +2159,12 @@ def cmd_run_spec_ready(args: argparse.Namespace) -> int:
             return 1
 
         receipt_path = receipt_spec_validated(task_dir)
+        # Task-receipt-chain (task-20260503-001 AC 8): chain spec.md after
+        # validation. Best-effort.
+        spec_path = task_dir / "spec.md"
+        if spec_path.exists():
+            _try_extend_chain_for_artifact(task_dir, spec_path)
+
         transitioned_to = None
         stage = _load_manifest(task_dir).get("stage")
         if stage == "SPEC_NORMALIZATION":
@@ -3685,7 +3691,6 @@ _FIXED_CHAIN_ARTIFACTS = (
     "spec.md",
     "plan.md",
     "execution-graph.json",
-    "classification.json",
     "repair-log.json",
     "task-retrospective.json",
     "audit-plan.json",
@@ -3698,70 +3703,88 @@ _FIXED_CHAIN_ARTIFACTS = (
 
 def cmd_run_task_receipt_chain(args: argparse.Namespace) -> int:
     """Walk receipts/ recursively + fixed artifacts, append entries for files
-    not yet chained. Idempotent.
+    not yet chained. Idempotent under sequential AND concurrent invocation.
+
+    sec-001 fix: holds fcntl.LOCK_EX on the chain file across the entire
+    'already' read + per-file append sequence so two concurrent invocations
+    cannot both decide to append the same (kind, file_path).
     """
     task_dir = Path(args.task_dir).resolve()
     try:
-        from lib_chain import (
-            extend_chain_for_receipt, extend_chain_for_artifact,
-            _CHAIN_FILENAME,
-        )
+        import fcntl as _fcntl
+        from lib_chain import _CHAIN_FILENAME, _append_entry_unlocked
     except Exception as exc:
         print(f"lib_chain import failed: {exc}", file=sys.stderr)
         return 1
 
     chain_path = task_dir / _CHAIN_FILENAME
+    chain_path.parent.mkdir(parents=True, exist_ok=True)
+    if not chain_path.exists():
+        chain_path.touch()
 
-    # Build set of (kind, file_path) already chained
-    already: set = set()
-    if chain_path.exists():
+    # Hold LOCK_EX across the entire read+append sequence so concurrent
+    # invocations serialize. _append_entry's own LOCK_EX is on the same
+    # file (BSD flock is per-open-file-description on POSIX), so the inner
+    # acquire is reentrant-safe within the same process.
+    pending: list[tuple[str, str, Path]] = []  # (kind, step, file_path)
+    with chain_path.open("r+", encoding="utf-8") as lock_f:
+        _fcntl.flock(lock_f.fileno(), _fcntl.LOCK_EX)
         try:
-            for ln in chain_path.read_text(encoding="utf-8").splitlines():
-                if not ln.strip():
-                    continue
-                try:
-                    e = json.loads(ln)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(e, dict):
-                    already.add((e.get("kind"), e.get("file_path")))
-        except OSError:
-            pass
-
-    # Walk receipts/
-    receipts_dir = task_dir / "receipts"
-    if receipts_dir.is_dir():
-        for rp in sorted(receipts_dir.rglob("*")):
-            if not rp.is_file():
-                continue
+            already: set = set()
             try:
-                rel = rp.relative_to(task_dir).as_posix()
-            except ValueError:
-                continue
-            if ("receipt", rel) in already:
-                continue
-            step = rp.stem
-            try:
-                extend_chain_for_receipt(task_dir, step, rp)
-            except Exception:
+                for ln in lock_f.read().splitlines():
+                    if not ln.strip():
+                        continue
+                    try:
+                        e = json.loads(ln)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(e, dict):
+                        already.add((e.get("kind"), e.get("file_path")))
+            except OSError:
                 pass
 
-    # Fixed artifact list
-    for name in _FIXED_CHAIN_ARTIFACTS:
-        ap = task_dir / name
-        if not ap.is_file():
-            continue
-        if ("artifact", name) in already:
-            continue
-        try:
-            extend_chain_for_artifact(task_dir, ap)
-        except Exception:
-            pass
+            # Walk receipts/
+            receipts_dir = task_dir / "receipts"
+            if receipts_dir.is_dir():
+                for rp in sorted(receipts_dir.rglob("*")):
+                    if not rp.is_file():
+                        continue
+                    try:
+                        rel = rp.relative_to(task_dir).as_posix()
+                    except ValueError:
+                        continue
+                    if ("receipt", rel) in already:
+                        continue
+                    pending.append(("receipt", rp.stem, rp))
+
+            # Fixed artifact list
+            for name in _FIXED_CHAIN_ARTIFACTS:
+                ap = task_dir / name
+                if not ap.is_file():
+                    continue
+                if ("artifact", name) in already:
+                    continue
+                pending.append(("artifact", name, ap))
+
+            # Append all pending entries while still holding the outer
+            # lock. Use the unlocked variant — taking the inner LOCK_EX
+            # again on a separate FD would deadlock under BSD flock
+            # (per-FD lock semantics). The outer lock_f's LOCK_EX is
+            # sufficient to serialize concurrent CLI invocations.
+            for kind, step, fp in pending:
+                try:
+                    _append_entry_unlocked(task_dir, step, kind, fp)
+                except Exception:
+                    pass
+        finally:
+            _fcntl.flock(lock_f.fileno(), _fcntl.LOCK_UN)
 
     print(json.dumps({
         "status": "task_receipt_chain_ready",
         "task_dir": str(task_dir),
         "chain_path": str(chain_path),
+        "appended": len(pending),
     }, indent=2))
     return 0
 
@@ -3792,6 +3815,7 @@ def cmd_validate_task_receipt_chain(args: argparse.Namespace) -> int:
         err = {
             "error": result.status,
             "index": result.first_failed_index,
+            "file_path": result.first_failed_file_path,
             "field": result.first_failed_field,
             "reason": result.error_reason,
         }
