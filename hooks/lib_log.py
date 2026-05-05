@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from lib_core import _persistent_project_dir, now_iso
-from write_policy import WriteAttempt, get_capability_key, require_write_allowed
+from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 
 # Event names whose sole purpose is operator visibility / forensic trace.
@@ -422,7 +422,7 @@ def verify_signed_events(
                             operation="modify",
                             source=_WRITE_ROLE,
                         ),
-                        capability_key=get_capability_key(_WRITE_ROLE),
+                        capability_key=_get_capability_key(_WRITE_ROLE),
                         emit_event=False,
                     )
                 except Exception as exc:
@@ -526,11 +526,11 @@ def verify_signed_events(
     return verified
 
 
-def _append_jsonl(path: Path, line: str, *, attempt: WriteAttempt) -> None:
+def _append_jsonl(path: Path, line: str, *, attempt: WriteAttempt, capability_key: object) -> None:
     """Thread-safe append a single line to a JSONL file."""
     require_write_allowed(
         attempt,
-        capability_key=get_capability_key(attempt.role),
+        capability_key=capability_key,
         emit_event=False,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -587,6 +587,7 @@ def log_event(root: Path, event_type: str, *, task: str | None = None, **payload
                         operation="modify" if (task_dir / "events.jsonl").exists() else "create",
                         source=_WRITE_ROLE,
                     ),
+                    capability_key=_get_capability_key(_WRITE_ROLE),
                 )
                 return
 
@@ -602,6 +603,7 @@ def log_event(root: Path, event_type: str, *, task: str | None = None, **payload
                 operation="modify" if global_path.exists() else "create",
                 source="system",
             ),
+            capability_key=_get_capability_key("system"),
         )
     except Exception as exc:
         print(f"[dynos-log] WARNING: log_event failed: {exc}", file=sys.stderr)

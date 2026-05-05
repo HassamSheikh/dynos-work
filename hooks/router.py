@@ -43,7 +43,7 @@ from lib_receipts import (
     INJECTED_PROMPTS_DIR,
 )
 from lib_registry import ensure_learned_registry
-from write_policy import WriteAttempt, get_capability_key, require_write_allowed
+from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 
 # ---------------------------------------------------------------------------
@@ -1483,7 +1483,19 @@ def _atomic_write_bytes(path: Path, data: bytes, *, attempt: WriteAttempt | None
     if attempt is not None:
         require_write_allowed(
             attempt,
-            capability_key=get_capability_key(attempt.role),
+            capability_key=_get_capability_key("receipt-writer"),
+        )
+    else:
+        _system_attempt = WriteAttempt(
+            role="system",
+            task_dir=None,
+            path=path,
+            operation="modify",
+            source="system",
+        )
+        require_write_allowed(
+            _system_attempt,
+            capability_key=_get_capability_key("system"),
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(

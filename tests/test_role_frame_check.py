@@ -10,6 +10,9 @@ AC 9: hooks/write_policy.py defines _PRIVILEGED_ROLE_MODULE_MAP: dict[str, froze
       require_write_allowed identity-checks a per-role capability_key sentinel;
       a call without the matching key raises ValueError containing
       'capability_key mismatch'. (Replaces former sys._getframe stack-walking.)
+
+task-20260504-008 hardening: post-rename, the import is `_get_capability_key`
+(private-by-convention). See AC 5 in spec.md.
 """
 from __future__ import annotations
 
@@ -36,7 +39,7 @@ from write_policy import (
     WriteAttempt,
     _CAPABILITY_KEYS,
     _PRIVILEGED_ROLE_MODULE_MAP,
-    get_capability_key,
+    _get_capability_key,
     require_write_allowed,
 )
 

@@ -18,7 +18,7 @@ from typing import Any
 from lib_core import now_iso, append_execution_log, _persistent_project_dir
 from lib_log import log_event, verify_signed_events
 from lib_validate import require_nonblank, require_nonblank_str
-from write_policy import WriteAttempt, get_capability_key, require_write_allowed
+from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 
 # Receipt contract version. Receipts written by this module embed
@@ -362,7 +362,7 @@ def write_receipt(task_dir: Path, step_name: str, **payload: Any) -> Path:
             operation="modify" if receipt_path.exists() else "create",
             source=_WRITE_ROLE,
         ),
-        capability_key=get_capability_key(_WRITE_ROLE),
+        capability_key=_get_capability_key(_WRITE_ROLE),
     )
     _atomic_write_text(receipt_path, json.dumps(receipt, indent=2, default=str))
 
