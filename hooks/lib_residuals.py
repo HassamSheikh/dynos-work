@@ -41,7 +41,22 @@ from lib_core import load_json
 
 ALLOWED_AUDITORS: frozenset[str] = frozenset({
     "claude-md-auditor",
+    "code-quality-auditor",
     "dead-code-auditor",
+    "performance-auditor",
+    "security-auditor",
+})
+
+# Postmortem prevention-rule enforcement values that are actionable
+# engineering work (worth queuing). Values like "review-checklist",
+# "prompt-constraint", and "advisory" are deliberately excluded — they
+# describe judgment-based gates, not buildable items.
+ACTIONABLE_ENFORCEMENTS: frozenset[str] = frozenset({
+    "test",
+    "lint",
+    "static-check",
+    "ci-gate",
+    "runtime-guard",
 })
 
 REJECTED_CATEGORIES: frozenset[str] = frozenset({
@@ -309,6 +324,120 @@ def ingest_findings(task_dir: Path, root: Path, summary: dict) -> int:
             os.close(fd)
 
 
+def ingest_prevention_rules(root: Path, rules: list) -> int:
+    """Ingest postmortem prevention rules with actionable enforcement.
+
+    Filters to rules whose ``enforcement`` is in ``ACTIONABLE_ENFORCEMENTS``
+    (test, lint, static-check, ci-gate, runtime-guard). Rules with
+    ``review-checklist``, ``prompt-constraint``, or ``advisory`` enforcement
+    are NOT ingested — they describe judgment-based gates, not buildable
+    items.
+
+    Each accepted rule becomes a queue row with ``kind = "residual"`` and
+    ``source_auditor = "postmortem-analysis"``. Fingerprint is
+    ``sha256("postmortem-analysis:" + rule.rule + ":" + rule.rationale)`` —
+    intentionally NOT keyed on enforcement, so a rule that gets escalated
+    from advisory→ci-gate later does not produce a duplicate row.
+
+    Returns the count actually appended (after filter and dedup).
+    Concurrency-safe via the same ``fcntl.LOCK_EX`` pattern as
+    ``ingest_findings``. Never raises on a malformed rule entry — those
+    are silently skipped. May raise on irrecoverable IO; the caller in
+    ``postmortem_analysis.apply_analysis`` is expected to catch and log.
+    """
+    if not isinstance(rules, list):
+        return 0
+
+    candidates: list[dict] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        enforcement = rule.get("enforcement")
+        if not isinstance(enforcement, str) or enforcement not in ACTIONABLE_ENFORCEMENTS:
+            continue
+        rule_text = rule.get("rule")
+        rationale = rule.get("rationale")
+        if not isinstance(rule_text, str) or not rule_text:
+            continue
+        if not isinstance(rationale, str):
+            rationale = ""
+
+        title = rule_text[:120]
+        source_finding = rule.get("source_finding", "")
+        if not isinstance(source_finding, str):
+            source_finding = ""
+        category = rule.get("category", "")
+        if not isinstance(category, str):
+            category = ""
+
+        description_parts = [
+            f"Rule: {rule_text}",
+            f"Rationale: {rationale}" if rationale else "",
+            f"Enforcement: {enforcement}",
+            f"Category: {category}" if category else "",
+            f"Source finding: {source_finding}" if source_finding else "",
+        ]
+        description = "\n".join(p for p in description_parts if p)
+
+        fp = compute_fingerprint("postmortem-analysis", rule_text, rationale)
+
+        candidates.append({
+            "id": str(uuid.uuid4()),
+            "kind": "residual",
+            "fingerprint": fp,
+            "created_at": _now_iso_z(),
+            "source_task_id": "",
+            "source_auditor": "postmortem-analysis",
+            "title": title,
+            "description": description,
+            "location": "",
+            "status": "pending",
+            "attempts": 0,
+            "last_attempt_at": None,
+        })
+
+    if not candidates:
+        return 0
+
+    qp = queue_path(root)
+    qp.parent.mkdir(parents=True, exist_ok=True)
+    fd: int = -1
+    try:
+        fd = os.open(str(qp), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            current = _read_locked_queue(fd)
+            existing = current.get("findings", [])
+
+            blocking_fps: set[str] = set()
+            for row in existing:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("status") in DEDUP_BLOCKING_STATUSES:
+                    f = row.get("fingerprint")
+                    if isinstance(f, str):
+                        blocking_fps.add(f)
+
+            appended = 0
+            for cand in candidates:
+                fp = cand["fingerprint"]
+                if fp in blocking_fps:
+                    continue
+                existing.append(cand)
+                blocking_fps.add(fp)
+                appended += 1
+
+            if appended > 0:
+                _atomic_write_under_lock(qp, {"findings": existing})
+
+            return appended
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -450,6 +579,7 @@ __all__ = [
     "queue_path",
     "load_queue",
     "ingest_findings",
+    "ingest_prevention_rules",
     "select_next_pending",
     "update_row_status",
     "extract_residual_id",

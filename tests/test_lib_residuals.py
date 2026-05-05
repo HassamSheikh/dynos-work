@@ -52,9 +52,11 @@ ALLOWED_ROW_KEYS = frozenset({
 
 
 def _make_root(tmp_path: Path) -> Path:
-    """Create a minimal project root with a .dynos directory."""
+    """Create a minimal project root with a .dynos directory.
+    Idempotent so a single test can call this multiple times against
+    distinct sub-tmp_paths without colliding."""
     root = tmp_path / "project"
-    (root / ".dynos").mkdir(parents=True)
+    (root / ".dynos").mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -317,19 +319,21 @@ def test_filter_accepts_correct_findings(tmp_path: Path):
     dead_code_findings = [
         _make_finding(id="F-accept-2", severity="error", category="unused-import", blocking=False),
     ]
-    # Findings for disallowed auditor: all rejected
-    security_findings = [
+    # Findings for disallowed auditor: all rejected. v7.4.0 broadened the
+    # allowlist (now includes security/performance/code-quality), so use a
+    # name NOT in the v7.4.0 set.
+    disallowed_findings = [
         _make_finding(id="F-disallowed", severity="warning", category="xss", blocking=False),
     ]
 
     claude_path = _write_auditor_report(task_dir, "claude-md-auditor", claude_findings)
     dead_path = _write_auditor_report(task_dir, "dead-code-auditor", dead_code_findings)
-    sec_path = _write_auditor_report(task_dir, "security-auditor", security_findings)
+    disallowed_path = _write_auditor_report(task_dir, "ml-executor-auditor", disallowed_findings)
 
     summary = _make_summary(task_dir, [
         {"auditor_name": "claude-md-auditor", "report_path": str(claude_path)},
         {"auditor_name": "dead-code-auditor", "report_path": str(dead_path)},
-        {"auditor_name": "security-auditor", "report_path": str(sec_path)},
+        {"auditor_name": "ml-executor-auditor", "report_path": str(disallowed_path)},
     ])
 
     count = ingest_findings(task_dir, root, summary)
@@ -399,15 +403,17 @@ def test_filter_rejects_bad_category(tmp_path: Path):
 
 
 def test_filter_rejects_disallowed_auditor(tmp_path: Path):
-    """auditor_name='security-auditor' is not appended."""
+    """An auditor_name that is NOT in the v7.4.0 allowlist is not appended."""
     root = _make_root(tmp_path)
     task_dir = tmp_path / "task-dir"
     task_dir.mkdir()
 
     finding = _make_finding(severity="warning", category="xss", blocking=False)
-    report_path = _write_auditor_report(task_dir, "security-auditor", [finding])
+    # v7.4.0 allowlist: claude-md, dead-code, security, performance, code-quality.
+    # Use a name not in that set.
+    report_path = _write_auditor_report(task_dir, "ml-executor-auditor", [finding])
     summary = _make_summary(task_dir, [
-        {"auditor_name": "security-auditor", "report_path": str(report_path)}
+        {"auditor_name": "ml-executor-auditor", "report_path": str(report_path)}
     ])
 
     count = ingest_findings(task_dir, root, summary)
@@ -761,3 +767,151 @@ def test_ingest_findings_missing_task_id_uses_empty_string(tmp_path: Path):
 
     q = load_queue(queue_path(root))
     assert q["findings"][0]["source_task_id"] == ""
+
+
+# ---------------------------------------------------------------------------
+# v7.4.0 — broadened auditor allowlist
+# ---------------------------------------------------------------------------
+
+
+def _ingest_one(tmp_path: Path, auditor_name: str, severity: str = "warning",
+                category: str = "perf", blocking: bool = False) -> int:
+    root = _make_root(tmp_path)
+    task_dir = tmp_path / f"task-{auditor_name}"
+    task_dir.mkdir()
+    finding = _make_finding(
+        severity=severity, category=category, blocking=blocking, id=f"F-{auditor_name}",
+    )
+    report_path = _write_auditor_report(task_dir, auditor_name, [finding])
+    summary = _make_summary(
+        task_dir,
+        [{"auditor_name": auditor_name, "report_path": str(report_path)}],
+    )
+    return ingest_findings(task_dir, root, summary)
+
+
+def test_filter_accepts_security_auditor(tmp_path: Path):
+    """v7.4.0: non-blocking security finding is admitted."""
+    assert _ingest_one(tmp_path, "security-auditor",
+                       severity="warning", category="security") == 1
+
+
+def test_filter_accepts_performance_auditor(tmp_path: Path):
+    """v7.4.0: non-blocking performance finding is admitted."""
+    assert _ingest_one(tmp_path, "performance-auditor",
+                       severity="minor", category="performance") == 1
+
+
+def test_filter_accepts_code_quality_auditor(tmp_path: Path):
+    """v7.4.0: non-blocking code-quality finding is admitted."""
+    assert _ingest_one(tmp_path, "code-quality-auditor",
+                       severity="warning", category="quality") == 1
+
+
+def test_filter_still_rejects_severity_info_for_new_auditors(tmp_path: Path):
+    """v7.4.0: severity=info is still rejected even for newly-allowed auditors."""
+    assert _ingest_one(tmp_path, "security-auditor",
+                       severity="info", category="security") == 0
+    assert _ingest_one(tmp_path, "performance-auditor",
+                       severity="info", category="performance") == 0
+    assert _ingest_one(tmp_path, "code-quality-auditor",
+                       severity="info", category="quality") == 0
+
+
+# ---------------------------------------------------------------------------
+# v7.4.0 — ingest_prevention_rules
+# ---------------------------------------------------------------------------
+
+
+def _make_rule(
+    *,
+    rule: str = "Reject os.open(... 0o644) in hooks/",
+    rationale: str = "Blocks the world-readable queue literal",
+    enforcement: str = "lint",
+    category: str = "sec",
+    source_finding: str = "SEC-002",
+) -> dict:
+    return {
+        "rule": rule,
+        "rationale": rationale,
+        "enforcement": enforcement,
+        "category": category,
+        "source_finding": source_finding,
+        "executor": "backend-executor",
+        "template": "pattern_must_not_appear",
+        "params": {"regex": "0o644", "scope": "hooks/**/*.py"},
+    }
+
+
+def test_ingest_prevention_rules_filters_by_enforcement(tmp_path: Path):
+    """v7.4.0: rules with actionable enforcement land in queue; advisory rules don't."""
+    root = _make_root(tmp_path)
+    rules = [
+        _make_rule(rule="Test rule 1", enforcement="lint"),
+        _make_rule(rule="Test rule 2", enforcement="static-check"),
+        _make_rule(rule="Test rule 3", enforcement="ci-gate"),
+        _make_rule(rule="Test rule 4", enforcement="test"),
+        _make_rule(rule="Test rule 5", enforcement="runtime-guard"),
+        _make_rule(rule="Skipped 1", enforcement="advisory"),
+        _make_rule(rule="Skipped 2", enforcement="review-checklist"),
+        _make_rule(rule="Skipped 3", enforcement="prompt-constraint"),
+    ]
+    count = lib_residuals.ingest_prevention_rules(root, rules)
+    assert count == 5
+
+    q = load_queue(queue_path(root))
+    titles = {r["title"] for r in q["findings"]}
+    assert "Test rule 1" in titles
+    assert "Test rule 5" in titles
+    assert "Skipped 1" not in titles
+    assert "Skipped 2" not in titles
+    assert "Skipped 3" not in titles
+
+
+def test_ingest_prevention_rules_dedup(tmp_path: Path):
+    """v7.4.0: calling twice with the same rule produces one row."""
+    root = _make_root(tmp_path)
+    rules = [_make_rule(rule="Same rule", rationale="Same rationale")]
+    assert lib_residuals.ingest_prevention_rules(root, rules) == 1
+    assert lib_residuals.ingest_prevention_rules(root, rules) == 0
+    q = load_queue(queue_path(root))
+    assert len(q["findings"]) == 1
+
+
+def test_ingest_prevention_rules_row_shape(tmp_path: Path):
+    """v7.4.0: appended rows have correct kind, source_auditor, and AC-2 fields."""
+    root = _make_root(tmp_path)
+    rules = [_make_rule(rule="Shape test", rationale="Shape rationale",
+                        enforcement="lint", category="sec",
+                        source_finding="SEC-002")]
+    assert lib_residuals.ingest_prevention_rules(root, rules) == 1
+    q = load_queue(queue_path(root))
+    row = q["findings"][0]
+    assert set(row.keys()) == ALLOWED_ROW_KEYS
+    assert row["kind"] == "residual"
+    assert row["source_auditor"] == "postmortem-analysis"
+    assert row["title"] == "Shape test"
+    assert "Shape rationale" in row["description"]
+    assert "lint" in row["description"]
+    assert "SEC-002" in row["description"]
+    assert row["status"] == "pending"
+    assert row["attempts"] == 0
+    assert row["last_attempt_at"] is None
+    assert row["source_task_id"] == ""
+    assert row["location"] == ""
+    # Fingerprint is sha256("postmortem-analysis:" + rule + ":" + rationale)
+    expected_fp = compute_fingerprint("postmortem-analysis", "Shape test", "Shape rationale")
+    assert row["fingerprint"] == expected_fp
+
+
+def test_ingest_prevention_rules_skips_malformed(tmp_path: Path):
+    """v7.4.0: malformed rule entries are silently skipped, not raised."""
+    root = _make_root(tmp_path)
+    rules = [
+        "not a dict",
+        {},  # no rule field
+        {"rule": "", "enforcement": "lint"},  # empty rule
+        {"rule": "missing enforcement"},  # no enforcement
+        _make_rule(rule="Valid rule", enforcement="lint"),
+    ]
+    assert lib_residuals.ingest_prevention_rules(root, rules) == 1

@@ -11,6 +11,21 @@ and this project adheres to **Semantic Versioning**.
 
 ---
 
+## [7.4.0] - 2026-05-05
+### "Wider Drain": Residual Queue Captures More Sources
+
+The 7.3.0 producer admitted only `claude-md-auditor` and `dead-code-auditor` non-blocking findings — narrow on purpose, but narrow enough that running the queue against itself excluded most of the actionable follow-ups it surfaced. 7.4.0 broadens the producer to three more auditors and adds a second source surface so postmortem prevention rules with concrete enforcement (test, lint, static-check, ci-gate, runtime-guard) land in the same queue rather than only `prevention-rules.json`.
+
+### Added
+- Producer now admits non-blocking findings from `security-auditor`, `performance-auditor`, and `code-quality-auditor` (in addition to `claude-md-auditor` and `dead-code-auditor`). Severity-`info` and category skip-list rules still apply.
+- New `lib_residuals.ingest_prevention_rules(root, rules)` helper that ingests postmortem prevention rules with actionable enforcement (test / lint / static-check / ci-gate / runtime-guard) into the residual queue. Advisory and review-checklist rules are deliberately excluded.
+- `postmortem_analysis.apply_analysis` now calls the new helper after writing prevention rules, so engineering-actionable rules surface as queue items alongside their write to `prevention-rules.json`.
+
+### Plugin / Distribution
+- Bump `package.json` and `.claude-plugin/plugin.json` to `7.4.0`.
+
+---
+
 ## [7.3.0] - 2026-05-04
 ### "Residual Drain": Non-Blocking Findings Become an Overnight Backlog
 

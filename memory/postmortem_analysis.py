@@ -784,6 +784,7 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
     # category — the same chain-of-custody PR #131 established for
     # the drop path but cut off before the promote path.
     promoted_records: list[dict] = []
+    just_merged_rules: list[dict] = []
     lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(lock_fd, "w") as lock_fh:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
@@ -822,6 +823,7 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
                 current_rules.append(merged)
                 existing_rule_texts.add(text.lower())
                 added += 1
+                just_merged_rules.append(merged)
                 promoted_records.append({
                     "category": merged["category"],
                     "executor": merged["executor"],
@@ -867,6 +869,24 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
     except (FileNotFoundError, OSError, ValueError) as exc:
         log_event(root, "postmortem_analysis_receipt_failed", task=task_id, error=str(exc))
 
+    # v7.4.0: ingest rules with actionable enforcement (test/lint/static-check/
+    # ci-gate/runtime-guard) into the residual queue so they surface as
+    # buildable follow-ups, not just policy entries. Defensive — a queue
+    # write failure must NOT abort the postmortem.
+    queue_ingested = 0
+    if just_merged_rules:
+        try:
+            from lib_residuals import ingest_prevention_rules
+            queue_ingested = ingest_prevention_rules(root, just_merged_rules)
+        except Exception as _exc:  # noqa: BLE001 — defensive
+            log_event(
+                root,
+                "postmortem_residual_ingest_failed",
+                task=task_id,
+                task_id=task_id,
+                error=str(_exc),
+            )
+
     return {
         "task_id": task_id,
         "rules_added": added,
@@ -874,6 +894,7 @@ def apply_analysis(task_dir: Path, analysis: dict) -> dict:
         "input_rule_count": _input_rule_count,
         "rejected_count": rejected_count,
         "normalization_drops": len(_normalization_drops),
+        "residual_queue_ingested": queue_ingested,
     }
 
 
