@@ -1,6 +1,5 @@
 """Static-allowlist and invariant tests for the capability-key forge boundary.
 
-Segment owner: segment-A-tdd-allowlist (task-20260504-008).
 ACs covered: 2 (public name gone), 11 (module allowlist grep enforcement).
 PRO-001 hard constraint: sc-001 (no sys._getframe reintroduction), sc-002 (public name removed).
 
