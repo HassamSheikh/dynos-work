@@ -27,7 +27,7 @@ def test_receipt_contract_version_is_five():
     fixtures; asserting the exact value here is the pin that catches
     an out-of-band bump. Rename _is_four → _is_five follows the
     task-009 policy of making the current floor visible in the test name."""
-    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 5
+    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 6
 
 
 def test_plan_routing_writer_fully_deleted():

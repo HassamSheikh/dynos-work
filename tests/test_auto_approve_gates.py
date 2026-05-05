@@ -381,11 +381,21 @@ class TestSetAutoApproveGatesCeilings:
         assert "policy" in r.stderr
 
     def test_set_auto_approve_gates_success_stdout_json(self, tmp_path: Path):
-        """AC-3 happy path: all ceilings pass -> exits 0, stdout is parseable JSON."""
+        """AC-3 happy path: all ceilings pass -> exits 0, stdout is parseable JSON.
+
+        Uses pre-classification fixture (classification=None overridden after
+        _make_task because the fixture's `cls = classification or {...}` falls
+        through to a default dict on None — overwrite manifest post-creation
+        to genuinely null out classification, matching the residual-pick-time
+        precondition.
+        """
         root = tmp_path / "project"
         root.mkdir()
         (root / ".dynos").mkdir()
-        task_dir = _make_task(tmp_path / "td", stage="SPEC_REVIEW")
+        task_dir = _make_task(tmp_path / "td", stage="FOUNDRY_INITIALIZED")
+        manifest = json.loads((task_dir / "manifest.json").read_text())
+        manifest["classification"] = None
+        (task_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         row = _default_row(source_auditor="code-quality-auditor", location="lib/utils.py")
         _make_queue(root, row)
         dynos_home = tmp_path / "home"
@@ -406,11 +416,21 @@ class TestSetAutoApproveGatesCeilings:
         assert "ceiling_checked" in out
 
     def test_set_auto_approve_gates_manifest_written(self, tmp_path: Path):
-        """AC-3 success: manifest.auto_approve_gates=true after command exits 0."""
+        """AC-3 success: manifest.auto_approve_gates=true after command exits 0.
+
+        Uses pre-classification fixture (classification=None overridden after
+        _make_task because the fixture's `cls = classification or {...}` falls
+        through to a default dict on None — overwrite manifest post-creation
+        to genuinely null out classification, matching the residual-pick-time
+        precondition.
+        """
         root = tmp_path / "project"
         root.mkdir()
         (root / ".dynos").mkdir()
-        task_dir = _make_task(tmp_path / "td", stage="SPEC_REVIEW")
+        task_dir = _make_task(tmp_path / "td", stage="FOUNDRY_INITIALIZED")
+        manifest = json.loads((task_dir / "manifest.json").read_text())
+        manifest["classification"] = None
+        (task_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         row = _default_row(source_auditor="code-quality-auditor", location="lib/utils.py")
         _make_queue(root, row)
         dynos_home = tmp_path / "home"
@@ -1117,7 +1137,7 @@ class TestTransitionGateExtension:
         sys.path.insert(0, str(HOOKS))
         from lib_core import transition_task  # noqa: PLC0415
         task_dir = self._make_spec_review_task(tmp_path)
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(ValueError, match="missing approval receipt") as exc_info:
             transition_task(task_dir, "PLANNING")
         msg = str(exc_info.value)
         assert "human-approval-SPEC_REVIEW" in msg
@@ -1524,3 +1544,207 @@ class TestValidateChainGapFree:
         # auto-approval receipts must not introduce spurious gap reports
         auto_gaps = [g for g in gaps if "auto-approval" in g]
         assert auto_gaps == [], f"validate_chain must not gap-report auto-approval receipts: {auto_gaps}"
+
+
+# ===========================================================================
+# AC-21i exact name: test_auto_approval_hash_mismatch_refused
+# AC-21m exact name: test_force_override_on_auto_approved_task
+# AC-21 integration: test_low_risk_residual_auto_drains_end_to_end
+# ===========================================================================
+
+class TestEndToEndDrain:
+    """AC-21 exact-name fixtures and end-to-end low-risk drain integration test."""
+
+    def test_auto_approval_hash_mismatch_refused(self, tmp_path: Path):
+        """AC-21i exact name: tampered artifact_sha256 in auto-approval receipt raises ValueError.
+
+        Writes auto-approval-SPEC_REVIEW.json with a known-wrong sha256 and
+        asserts transition_task raises ValueError whose message contains both
+        'auto-approval-SPEC_REVIEW' and 'hash mismatch'.
+        """
+        import sys
+        sys.path.insert(0, str(HOOKS))
+        from lib_core import transition_task  # noqa: PLC0415
+        task_dir = _make_task(tmp_path, stage="SPEC_REVIEW")
+        tampered_sha = "0" * 64
+        _write_receipt_file(task_dir, "auto-approval-SPEC_REVIEW", {"artifact_sha256": tampered_sha})
+        with pytest.raises(ValueError) as exc_info:
+            transition_task(task_dir, "PLANNING")
+        msg = str(exc_info.value)
+        assert "auto-approval-SPEC_REVIEW" in msg
+        assert "hash mismatch" in msg
+
+    def test_force_override_on_auto_approved_task(self, tmp_path: Path):
+        """AC-21m exact name: force-transition on an auto-approved task yields empty bypassed-gates.
+
+        A task where SPEC_REVIEW was auto-approved: transition_task(..., force=True)
+        must compute an empty bypassed-gates list because the auto-approval receipt
+        satisfies the gate even in force/dry-run mode.
+        """
+        import sys
+        sys.path.insert(0, str(HOOKS))
+        from lib_core import transition_task  # noqa: PLC0415
+        from lib_receipts import hash_file  # noqa: PLC0415
+        task_dir = _make_task(tmp_path, stage="SPEC_REVIEW", auto_approve_gates=True)
+        sha = hash_file(task_dir / "spec.md")
+        _write_receipt_file(task_dir, "auto-approval-SPEC_REVIEW", {"artifact_sha256": sha})
+        transition_task(
+            task_dir,
+            "PLANNING",
+            force=True,
+            force_reason="test override",
+            force_approver="test-operator",
+        )
+        override_receipts = list((task_dir / "receipts").glob("force-override-*.json"))
+        if override_receipts:
+            receipt_data = json.loads(override_receipts[0].read_text())
+            bypassed = receipt_data.get("bypassed_gates", [])
+            assert bypassed == [], (
+                f"bypassed_gates must be empty when auto-approval receipt satisfies the gate; got {bypassed}"
+            )
+        # Regardless of whether a force-override receipt exists, stage must advance
+        manifest = json.loads((task_dir / "manifest.json").read_text())
+        assert manifest["stage"] == "PLANNING"
+
+    def test_low_risk_residual_auto_drains_end_to_end(self, tmp_path: Path):
+        """AC-21 integration (end-to-end): a low-risk residual drains through all auto-approve gates.
+
+        Setup:
+          - Queue row: source_auditor=code-quality-auditor, location=hooks/lib_receipts.py
+            (NOT in the surface-block path-glob list — this is a non-ctl.py hooks file).
+          - Task at SPEC_REVIEW, classification risk_level=low, domains=['backend'].
+
+        Sequence:
+          1. set-auto-approve-gates  → manifest.auto_approve_gates=true
+          2. apply-auto-approve-veto → decision='auto' (does NOT downgrade)
+          3. approve-stage SPEC_REVIEW --auto-approved  → auto-approval-SPEC_REVIEW.json written
+          4. approve-stage PLAN_REVIEW --auto-approved  → auto-approval-PLAN_REVIEW.json written
+          5. approve-stage TDD_REVIEW  --auto-approved  → auto-approval-TDD_REVIEW.json written
+          6. manifest stage advances through SPEC_REVIEW approval gate to PLANNING.
+
+        This test is intentionally RED until seg-3 (ctl.py commands) is implemented.
+        """
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / ".dynos").mkdir()
+
+        # Task at SPEC_REVIEW, no pre-settled classification (set-auto-approve-gates needs pre-classification)
+        task_dir = _make_task(
+            tmp_path / "td",
+            stage="SPEC_REVIEW",
+            classification=None,  # not yet classified
+        )
+        # Overwrite manifest to remove the classification field entirely
+        manifest_data = json.loads((task_dir / "manifest.json").read_text())
+        manifest_data.pop("classification", None)
+        (task_dir / "manifest.json").write_text(json.dumps(manifest_data, indent=2))
+
+        # Queue row: safe auditor, location NOT in surface-block list
+        row = _default_row(
+            rid="res-e2e-001",
+            source_auditor="code-quality-auditor",
+            location="hooks/lib_receipts.py",
+        )
+        _make_queue(root, row)
+
+        dynos_home = tmp_path / "home"
+        dynos_home.mkdir()
+        persistent = _persistent_dir(dynos_home, root)
+        _write_policy(persistent, disabled=False)
+
+        # Step 1: set-auto-approve-gates must exit 0 and write manifest.auto_approve_gates=true
+        r_set = _run(
+            "set-auto-approve-gates",
+            "--task-dir", str(task_dir),
+            "--from-residual-id", row["id"],
+            dynos_home=dynos_home,
+            cwd=root,
+        )
+        assert r_set.returncode == 0, (
+            f"set-auto-approve-gates failed: {r_set.stderr!r}"
+        )
+        manifest_after_set = json.loads((task_dir / "manifest.json").read_text())
+        assert manifest_after_set.get("auto_approve_gates") is True, (
+            "manifest.auto_approve_gates must be true after set-auto-approve-gates"
+        )
+
+        # Step 2: settle classification so apply-auto-approve-veto can run
+        manifest_after_set["classification"] = {
+            "type": "feature",
+            "domains": ["backend"],
+            "risk_level": "low",
+            "notes": "low-risk backend change",
+            "tdd_required": False,
+        }
+        (task_dir / "manifest.json").write_text(json.dumps(manifest_after_set, indent=2))
+        # Write raw-input.md sentinel for veto to locate the residual row
+        (task_dir / "raw-input.md").write_text(
+            f"<!-- residual-id: {row['id']} -->\nResidual input."
+        )
+
+        # Step 3: apply-auto-approve-veto must exit 0 and NOT downgrade (decision='auto')
+        r_veto = _run(
+            "apply-auto-approve-veto",
+            "--task-dir", str(task_dir),
+            dynos_home=dynos_home,
+            cwd=root,
+        )
+        assert r_veto.returncode == 0, (
+            f"apply-auto-approve-veto failed: {r_veto.stderr!r}"
+        )
+        veto_out = json.loads(r_veto.stdout)
+        assert veto_out.get("decision") == "auto", (
+            f"apply-auto-approve-veto must not downgrade low-risk task; got decision={veto_out.get('decision')!r}"
+        )
+        manifest_after_veto = json.loads((task_dir / "manifest.json").read_text())
+        assert manifest_after_veto.get("auto_approve_gates") is True, (
+            "apply-auto-approve-veto must NOT downgrade auto_approve_gates for low-risk task"
+        )
+
+        # Step 4: approve-stage SPEC_REVIEW --auto-approved → writes auto-approval-SPEC_REVIEW.json
+        r_spec = _run("approve-stage", str(task_dir), "SPEC_REVIEW", "--auto-approved", cwd=root)
+        assert r_spec.returncode == 0, (
+            f"approve-stage SPEC_REVIEW --auto-approved failed: {r_spec.stderr!r}"
+        )
+        assert (task_dir / "receipts" / "auto-approval-SPEC_REVIEW.json").exists(), (
+            "auto-approval-SPEC_REVIEW.json must be written"
+        )
+
+        # Step 5: approve-stage PLAN_REVIEW --auto-approved → writes auto-approval-PLAN_REVIEW.json
+        #   (task must be at PLAN_REVIEW stage for this to work; advance the stage manually)
+        manifest_spec_approved = json.loads((task_dir / "manifest.json").read_text())
+        manifest_spec_approved["stage"] = "PLAN_REVIEW"
+        (task_dir / "plan.md").write_text(PLAN_CONTENT)
+        (task_dir / "manifest.json").write_text(json.dumps(manifest_spec_approved, indent=2))
+        r_plan = _run("approve-stage", str(task_dir), "PLAN_REVIEW", "--auto-approved", cwd=root)
+        assert r_plan.returncode == 0, (
+            f"approve-stage PLAN_REVIEW --auto-approved failed: {r_plan.stderr!r}"
+        )
+        assert (task_dir / "receipts" / "auto-approval-PLAN_REVIEW.json").exists(), (
+            "auto-approval-PLAN_REVIEW.json must be written"
+        )
+
+        # Step 6: approve-stage TDD_REVIEW --auto-approved → writes auto-approval-TDD_REVIEW.json
+        manifest_plan_approved = json.loads((task_dir / "manifest.json").read_text())
+        manifest_plan_approved["stage"] = "TDD_REVIEW"
+        (task_dir / "evidence").mkdir(exist_ok=True)
+        (task_dir / "evidence" / "tdd-tests.md").write_text(TDD_EVIDENCE_CONTENT)
+        (task_dir / "manifest.json").write_text(json.dumps(manifest_plan_approved, indent=2))
+        r_tdd = _run("approve-stage", str(task_dir), "TDD_REVIEW", "--auto-approved", cwd=root)
+        assert r_tdd.returncode == 0, (
+            f"approve-stage TDD_REVIEW --auto-approved failed: {r_tdd.stderr!r}"
+        )
+        assert (task_dir / "receipts" / "auto-approval-TDD_REVIEW.json").exists(), (
+            "auto-approval-TDD_REVIEW.json must be written"
+        )
+
+        # Step 7: manifest stage advances through SPEC_REVIEW gate
+        # (The stage transitions were driven by approve-stage above; verify final receipt state)
+        receipts_dir = task_dir / "receipts"
+        for stage_label in ("SPEC_REVIEW", "PLAN_REVIEW", "TDD_REVIEW"):
+            receipt_file = receipts_dir / f"auto-approval-{stage_label}.json"
+            assert receipt_file.exists(), f"auto-approval-{stage_label}.json must exist"
+            receipt_data = json.loads(receipt_file.read_text())
+            assert receipt_data.get("valid") is True, (
+                f"auto-approval-{stage_label}.json must have valid=true"
+            )

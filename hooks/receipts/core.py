@@ -70,7 +70,7 @@ from write_policy import WriteAttempt, _get_capability_key, require_write_allowe
 #   * receipt_rules_check_passed derives counts internally from rules_engine
 # The bump signals "new semantics available"; it does NOT retroactively
 # invalidate v2 receipts (see MIN_VERSION_PER_STEP floors below).
-RECEIPT_CONTRACT_VERSION = 5
+RECEIPT_CONTRACT_VERSION = 6
 
 
 # Files that compose the calibration policy snapshot used by the
@@ -116,6 +116,12 @@ MIN_VERSION_PER_STEP: dict[str, int] = {
     # writes; existing pre-v5 force-override receipts remain readable
     # and are NOT retroactively invalidated.
     "force-override-*": 5,
+    # v5 -> v6 bump (task-20260505-001): auto-approval receipts allow
+    # /dynos-work:residual run-next to drain low-risk residuals overnight
+    # without human gates while preserving the same hash-mismatch refusal
+    # invariant as human-approval receipts. v5 receipts on disk remain
+    # readable; only new auto-approval-* writes carry contract_version=6.
+    "auto-approval-*": 6,
 }
 
 
@@ -216,6 +222,9 @@ _LOG_MESSAGES: dict[str, str] = {
     "human-approval-SPEC_REVIEW": "[DONE] human-approval SPEC_REVIEW — approver={approver}",
     "human-approval-PLAN_REVIEW": "[DONE] human-approval PLAN_REVIEW — approver={approver}",
     "human-approval-TDD_REVIEW": "[DONE] human-approval TDD_REVIEW — approver={approver}",
+    "auto-approval-SPEC_REVIEW": "[DONE] auto-approval SPEC_REVIEW — approver={approver}",
+    "auto-approval-PLAN_REVIEW": "[DONE] auto-approval PLAN_REVIEW — approver={approver}",
+    "auto-approval-TDD_REVIEW": "[DONE] auto-approval TDD_REVIEW — approver={approver}",
     "postmortem-generated": "[DONE] postmortem generated — anomalies={anomaly_count} patterns={pattern_count}",
     "postmortem-analysis": "[DONE] postmortem analysis — rules_added={rules_added}",
     "postmortem-skipped": "[DONE] postmortem skipped — reason={reason}",

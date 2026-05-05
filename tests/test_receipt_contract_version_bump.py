@@ -32,10 +32,10 @@ def _td(tmp_path: Path) -> Path:
 
 
 def test_contract_version_constant_is_five():
-    """AC 24 (task-009): RECEIPT_CONTRACT_VERSION == 5. Renamed from
+    """AC 24 (task-009): RECEIPT_CONTRACT_VERSION == 6. Renamed from
     _is_four to _is_five so the current floor is obvious to future
     readers rather than hidden behind a stale name."""
-    assert RECEIPT_CONTRACT_VERSION == 5
+    assert RECEIPT_CONTRACT_VERSION == 6
 
 
 def test_write_receipt_embeds_contract_version_five(tmp_path: Path):
@@ -43,7 +43,7 @@ def test_write_receipt_embeds_contract_version_five(tmp_path: Path):
     td = _td(tmp_path)
     p = write_receipt(td, "spec-validated", criteria_count=1, spec_sha256="x" * 64)
     payload = json.loads(p.read_text())
-    assert payload["contract_version"] == 5
+    assert payload["contract_version"] == 6
 
 
 def _exercise_writer(name: str, td: Path, tmp_path: Path | None = None):
@@ -166,7 +166,7 @@ def test_every_writer_in_all_embeds_contract_version_five(tmp_path: Path, monkey
             continue
         exercised += 1
         payload = json.loads(out.read_text())
-        assert payload["contract_version"] == 5, (
+        assert payload["contract_version"] == 6, (
             f"writer {name} did not embed contract_version=5 (got {payload.get('contract_version')!r})"
         )
     assert exercised >= 14, f"expected at least 14 writers exercised, got {exercised}"
@@ -210,7 +210,7 @@ def test_postmortem_analysis_keyword_path_happy(tmp_path: Path):
     assert payload["rules_sha256_after"] == hash_file(rules_file)
     assert payload["rules_added"] == 2
     # AC 18: contract_version still 5 (no bump)
-    assert payload["contract_version"] == 5
+    assert payload["contract_version"] == 6
 
 
 def test_postmortem_analysis_missing_analysis_path_raises(tmp_path: Path):

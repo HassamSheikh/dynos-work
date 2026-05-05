@@ -49,4 +49,4 @@ def test_constants_exported():
     assert "RECEIPT_CONTRACT_VERSION" in lib_receipts.__all__
     assert "CALIBRATION_POLICY_FILES" in lib_receipts.__all__
     # Migrated task-20260419-009 AC 24: contract bumped 4 -> 5.
-    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 5
+    assert lib_receipts.RECEIPT_CONTRACT_VERSION == 6

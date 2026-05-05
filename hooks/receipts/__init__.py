@@ -39,6 +39,7 @@ from .planner import (
 )
 from .approval import (
     receipt_human_approval,
+    receipt_auto_approval,
     receipt_postmortem_generated,
     receipt_postmortem_analysis,
     receipt_postmortem_skipped,
@@ -69,6 +70,7 @@ __all__ = [
     "receipt_plan_audit",
     "receipt_tdd_tests",
     "receipt_human_approval",
+    "receipt_auto_approval",
     "receipt_postmortem_generated",
     "receipt_postmortem_analysis",
     "receipt_postmortem_skipped",

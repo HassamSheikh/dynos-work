@@ -68,9 +68,10 @@ def test_every_log_message_key_has_writer():
     dynamic_prefixes = {
         "planner-": "receipt_planner_spawn",
         "human-approval-": "receipt_human_approval",
+        "auto-approval-": "receipt_auto_approval",  # task-20260505-001 AC-8 / AC-11
         "executor-": "receipt_executor_done",  # also executor-routing (static)
         "audit-": "receipt_audit_done",  # also audit-routing (static)
-        "force-override-": "receipt_force_override",  # PR #130 G2 force-override
+        "force-override-": "receipt_force_override",  # PR G2 force-override
     }
 
     unmapped = []
