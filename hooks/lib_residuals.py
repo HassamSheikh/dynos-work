@@ -174,8 +174,9 @@ def update_row_status(root: Path, row_id: str, new_status: str) -> None:
 
     # Open with O_CREAT|O_RDWR so the FD exists for LOCK_EX even if the
     # file was just created. The lock is held for the entire RMW window.
-    fd = os.open(str(qp), os.O_RDWR | os.O_CREAT, 0o644)
+    fd: int = -1
     try:
+        fd = os.open(str(qp), os.O_RDWR | os.O_CREAT, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             current = _read_locked_queue(fd)
@@ -197,7 +198,8 @@ def update_row_status(root: Path, row_id: str, new_status: str) -> None:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
 
 
 def ingest_findings(task_dir: Path, root: Path, summary: dict) -> int:
@@ -264,8 +266,9 @@ def ingest_findings(task_dir: Path, root: Path, summary: dict) -> int:
     # concurrent ingest calls serialize correctly.
     qp = queue_path(root)
     qp.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(qp), os.O_RDWR | os.O_CREAT, 0o644)
+    fd: int = -1
     try:
+        fd = os.open(str(qp), os.O_RDWR | os.O_CREAT, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             current = _read_locked_queue(fd)
@@ -302,7 +305,8 @@ def ingest_findings(task_dir: Path, root: Path, summary: dict) -> int:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
 
 
 # ---------------------------------------------------------------------------
