@@ -187,10 +187,15 @@ def test_subsumed_by_empty_rejected_when_reason_not_clean_or_no_findings(
     # Expand the enum to include a test-only reason so we can reach
     # rule (c). The original frozenset is restored automatically by
     # monkeypatch at teardown.
+    # task-20260505-002: lib_receipts.py is now a re-export shim;
+    # receipt_postmortem_skipped lives in receipts.approval and reads its
+    # local binding of _POSTMORTEM_SKIP_REASONS. Patch the actual call
+    # site, not the shim.
+    from receipts import approval as _approval_module
     extended = frozenset(
         set(lib_receipts._POSTMORTEM_SKIP_REASONS) | {"test-reason-expansion"}
     )
-    monkeypatch.setattr(lib_receipts, "_POSTMORTEM_SKIP_REASONS", extended)
+    monkeypatch.setattr(_approval_module, "_POSTMORTEM_SKIP_REASONS", extended)
 
     with pytest.raises(ValueError) as excinfo:
         receipt_postmortem_skipped(

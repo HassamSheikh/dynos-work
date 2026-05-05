@@ -45,7 +45,18 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# task-20260505-002: receipt-writer scope expanded from the (now-shim)
+# hooks/lib_receipts.py to the hooks/receipts/ submodule package. Scan
+# all submodule files for receipt_* writer functions.
 LIB_RECEIPTS = ROOT / "hooks" / "lib_receipts.py"
+RECEIPTS_PACKAGE = ROOT / "hooks" / "receipts"
+RECEIPT_SOURCE_FILES = [
+    RECEIPTS_PACKAGE / "core.py",
+    RECEIPTS_PACKAGE / "stage.py",
+    RECEIPTS_PACKAGE / "planner.py",
+    RECEIPTS_PACKAGE / "approval.py",
+    RECEIPTS_PACKAGE / "cli.py",
+]
 LIB_CORE = ROOT / "hooks" / "lib_core.py"
 READER_SEARCH_DIRS = [
     ROOT / "hooks",
@@ -165,11 +176,13 @@ def _writer_step_info() -> tuple[set[str], set[str]]:
     ``step_name = f"planner-{phase}"; write_receipt(task_dir, step_name,
     ...)`` idiom used in ``receipt_planner_spawn``.
     """
-    src = LIB_RECEIPTS.read_text()
-    tree = ast.parse(src)
-
     literal_writers: set[str] = set()
     fstring_writer_prefixes: set[str] = set()
+
+    # task-20260505-002: walk every submodule under hooks/receipts/.
+    sources = [path.read_text() for path in RECEIPT_SOURCE_FILES if path.exists()]
+    src = "\n".join(sources)
+    tree = ast.parse(src)
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
@@ -439,7 +452,7 @@ def test_every_writer_has_reader_or_is_allowlisted():
     # we would silently pass. Guard against that regression.
     assert literal_writers, (
         "AST extraction returned zero literal writers from "
-        f"{LIB_RECEIPTS}. Either the file is empty or the AST walk is "
+        f"hooks/receipts/. Either the package is empty or the AST walk is "
         "broken; either way the parity test has lost its teeth."
     )
 

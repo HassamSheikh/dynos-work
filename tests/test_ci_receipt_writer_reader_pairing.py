@@ -85,7 +85,18 @@ def _collect_reader_literals() -> set[str]:
     # (2) stage_requires dict literals — scan lib_core.py for any dict
     # whose values are iterables of string literals; treat every literal
     # as a reader reference.
-    for py in [HOOKS_DIR / "lib_core.py", HOOKS_DIR / "lib_receipts.py"]:
+    # task-20260505-002: receipt-writer scan expanded to hooks/receipts/*
+    # since lib_receipts.py is now a re-export shim.
+    _scan_paths = [
+        HOOKS_DIR / "lib_core.py",
+        HOOKS_DIR / "lib_receipts.py",
+        HOOKS_DIR / "receipts" / "core.py",
+        HOOKS_DIR / "receipts" / "stage.py",
+        HOOKS_DIR / "receipts" / "planner.py",
+        HOOKS_DIR / "receipts" / "approval.py",
+        HOOKS_DIR / "receipts" / "cli.py",
+    ]
+    for py in _scan_paths:
         if not py.exists():
             continue
         text = py.read_text(encoding="utf-8")

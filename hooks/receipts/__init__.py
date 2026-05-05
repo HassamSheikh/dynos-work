@@ -1,23 +1,12 @@
-"""Receipt-based contract validation chain for dynos-work.
+"""dynos-work receipt-writer package — split from lib_receipts.py.
 
-Every pipeline step writes a structured JSON receipt to
-.dynos/task-{id}/receipts/{step-name}.json proving what it did.
-The next step refuses to proceed unless the prior receipt exists.
+Re-exports the full public surface that was previously defined in the
+monolithic ``hooks/lib_receipts.py``. The names listed in ``__all__``
+match the original module's ``__all__`` exactly so downstream callers
+that imported from ``lib_receipts`` continue to work via the shim.
 """
 
-# Backwards-compatibility shim from task-20260505-002.
-#
-# The original monolithic implementation was split into the
-# ``hooks/receipts/`` package (segments B–F). This module remains as a
-# pure re-export surface so that callers using ``from hooks.lib_receipts
-# import <name>`` (or ``import lib_receipts``) continue to work without
-# modification. No logic lives here; every public name is bound from the
-# corresponding submodule, and the five private symbols are re-exported
-# explicitly because star-imports drop underscore-prefixed names.
-
-from __future__ import annotations
-
-from receipts.core import (
+from .core import (
     write_receipt,
     read_receipt,
     require_receipt,
@@ -29,16 +18,8 @@ from receipts.core import (
     INJECTED_PROMPTS_DIR,
     INJECTED_AUDITOR_PROMPTS_DIR,
     INJECTED_PLANNER_PROMPTS_DIR,
-    _LOG_MESSAGES,
-    _HASH_CACHE,
-    _HASH_CACHE_MAX,
-    _WRITE_ROLE,
-    _receipts_dir,
-    _atomic_write_text,
-    _resolve_min_version,
-    _record_tokens,
 )
-from receipts.stage import (
+from .stage import (
     receipt_search_conducted,
     receipt_spec_validated,
     receipt_plan_validated,
@@ -51,12 +32,12 @@ from receipts.stage import (
     plan_validated_receipt_matches,
     plan_audit_matches,
 )
-from receipts.planner import (
+from .planner import (
     receipt_planner_spawn,
     receipt_plan_audit,
     receipt_tdd_tests,
 )
-from receipts.approval import (
+from .approval import (
     receipt_human_approval,
     receipt_postmortem_generated,
     receipt_postmortem_analysis,
@@ -65,10 +46,7 @@ from receipts.approval import (
     receipt_calibration_noop,
     receipt_rules_check_passed,
     receipt_force_override,
-    receipt_scheduler_refused,
-    _POSTMORTEM_SKIP_REASONS,
 )
-
 
 __all__ = [
     "write_receipt",

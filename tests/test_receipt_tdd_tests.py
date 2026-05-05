@@ -62,7 +62,10 @@ def test_rejects_empty_model_used(tmp_path: Path):
 
 def test_record_tokens_invoked_when_tokens_positive(tmp_path: Path):
     td = _task_dir(tmp_path)
-    with mock.patch.object(lib_receipts, "_record_tokens") as rt:
+    # task-20260505-002: receipt_tdd_tests lives in receipts.planner;
+    # patch the actual call site, not the lib_receipts shim.
+    from receipts import planner as _planner_module
+    with mock.patch.object(_planner_module, "_record_tokens") as rt:
         receipt_tdd_tests(td, ["a.py"], "f" * 64, 1000, "haiku")
     assert rt.called
     args, _kwargs = rt.call_args
@@ -73,7 +76,10 @@ def test_record_tokens_invoked_when_tokens_positive(tmp_path: Path):
 
 def test_record_tokens_skipped_when_zero(tmp_path: Path):
     td = _task_dir(tmp_path)
-    with mock.patch.object(lib_receipts, "_record_tokens") as rt:
+    # task-20260505-002: receipt_tdd_tests lives in receipts.planner;
+    # patch the actual call site, not the lib_receipts shim.
+    from receipts import planner as _planner_module
+    with mock.patch.object(_planner_module, "_record_tokens") as rt:
         receipt_tdd_tests(td, ["a.py"], "f" * 64, 0, "haiku")
     assert not rt.called
 
