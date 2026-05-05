@@ -36,7 +36,7 @@ from write_policy import (
     WriteAttempt,
     _CAPABILITY_KEYS,
     _PRIVILEGED_ROLE_MODULE_MAP,
-    get_capability_key,
+    _get_capability_key,
     require_write_allowed,
 )
 
