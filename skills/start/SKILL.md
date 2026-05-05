@@ -354,6 +354,17 @@ python3 hooks/ctl.py run-spec-ready .dynos/task-{id}
 
 **Fast-track skip:** If `manifest.json` has `"fast_track": true`, skip this step. Spec is reviewed together with the plan in Step 6 (combined approval gate). Log: `{timestamp} [SKIP] spec-review — fast_track combined gate`.
 
+**Auto-approve path (precedes the human path):** If `manifest.json` has `"auto_approve_gates": true`, do NOT present `spec.md` to the user. Run the auto-approved variant of the approve-stage ctl command instead. This is the only sanctioned bypass — it still hashes the live `spec.md`, writes a `human-approval-SPEC_REVIEW` receipt with `approver_type="residual-auto"`, and advances SPEC_REVIEW → PLANNING through the same atomic gate that the human path uses. The receipt is forensically distinguishable from a human approval (the `approver_type` field), so the audit chain remains intact.
+
+```text
+python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW --auto-approved
+```
+
+- Exit code 0: receipt was written and the stage advanced. Skip the rest of this step.
+- Exit code 1: the gate refused — the most common cause is `auto_approve_gates is not true` (the manifest flag was flipped off mid-flight) or a hash mismatch. Log the stderr message and fall through to the human-approval path below. Do NOT retry with `--auto-approved` if the manifest flag is no longer true; the gate is correct to refuse.
+
+In the auto path, the "if changes requested" and "if rejected" branches of the human path below are unreachable — the residual queue's classification has already filtered out tasks where human review is required. If you find yourself in those branches with `auto_approve_gates=true`, that is a bug in the pick-time ceilings, not a runtime decision to make here.
+
 **Normal path:** Present `spec.md` to the user and ask for approval.
 
 - If approved: run the `approve-stage` ctl command below. It hashes the current `spec.md`, writes the `human-approval-SPEC_REVIEW` receipt with that hash, the scheduler then observes the receipt write and advances the task to PLANNING asynchronously. Do NOT write a manual `[HUMAN]` log line — `approve-stage` is the only path that satisfies the receipt-gate in `transition_task` (which compares the receipt's `artifact_sha256` against the live `spec.md` at transition time and refuses with `human-approval-SPEC_REVIEW` / `hash mismatch` substrings on drift).
@@ -455,6 +466,30 @@ python3 hooks/ctl.py transition .dynos/task-{id} PLAN_REVIEW
 
 This gate always runs. For fast-track tasks it acts as the combined Spec + Plan approval (since Step 4 was skipped) — present BOTH `spec.md` AND `plan.md` together.
 
+**Auto-approve path (precedes the human path):** If `manifest.json` has `"auto_approve_gates": true`, do NOT present `plan.md` (or the combined `spec.md` + `plan.md`) to the user. Use the `--auto-approved` variant of approve-stage instead. Two cases:
+
+- Normal path (Step 4 already wrote the SPEC_REVIEW receipt — auto or human):
+
+  ```text
+  python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW --auto-approved
+  ```
+
+- Fast-track combined gate (Step 4 was skipped; the manifest is at SPEC_REVIEW after Step 5's stage walk and needs both receipts in order):
+
+  ```text
+  python3 hooks/ctl.py approve-stage .dynos/task-{id} SPEC_REVIEW --auto-approved
+  python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW --auto-approved
+  ```
+
+  The state machine requires the SPEC_REVIEW receipt before the PLAN_REVIEW receipt — this ordering is unchanged by the auto-approval feature. Both calls must return exit 0; if either returns exit 1, log the stderr message and fall through to the human-approval path for that specific gate.
+
+Either auto path:
+
+- Exit code 0 on every call: receipts written, stages advanced, skip the rest of this step.
+- Exit code 1 on any call: the gate refused (most common: `auto_approve_gates is not true`, hash mismatch, or illegal transition). Log the stderr message and fall through to the human path below for the refused gate. Do not bypass with `transition --force`.
+
+In the auto path, "if changes requested" and "if rejected outright" branches below are unreachable — see the same note in Step 4.
+
 Present the artifact(s) to the user and ask for approval.
 
 - If approved (normal path): run `python3 hooks/ctl.py approve-stage .dynos/task-{id} PLAN_REVIEW`. This hashes the current `plan.md`, writes the `human-approval-PLAN_REVIEW` receipt with that hash, and atomically advances PLAN_REVIEW → PLAN_AUDIT. Exit code 0 means success; exit code 1 means the gate refused (stderr identifies the cause). Do not bypass with `transition --force`.
@@ -532,15 +567,26 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
    )
    ```
 
-6. When the user approves the test suite, transition out of TDD_REVIEW via the `approve-stage` ctl command. This hashes `evidence/tdd-tests.md`, writes the `human-approval-TDD_REVIEW` receipt with that hash, and advances TDD_REVIEW → PRE_EXECUTION_SNAPSHOT in one atomic step. Do NOT append a manual `[HUMAN]` log line — the receipt + approve-stage path is the only one the state machine accepts (the gate refuses with `human-approval-TDD_REVIEW` / `hash mismatch` substrings on drift):
+6. **Auto-approve path (precedes the human path):** If `manifest.json` has `"auto_approve_gates": true` AND `tdd_required: true` (which is the only condition under which Step 8 fires at all), do NOT present the test suite to the user. After the testing-executor spawn and the deterministic validation in step 2 above have both passed, run the auto-approved variant of approve-stage:
+
+   ```text
+   python3 hooks/ctl.py approve-stage .dynos/task-{id} TDD_REVIEW --auto-approved
+   ```
+
+   - Exit code 0: receipt written, stage advanced TDD_REVIEW → PRE_EXECUTION_SNAPSHOT. Proceed to step 7 (commit tests).
+   - Exit code 1: the gate refused. Log the stderr message and fall through to the human-approval path (step 7 below) for this gate. Do not bypass with `transition --force`.
+
+   This conditional does NOT change the `tdd_required == false` behavior. When `tdd_required` is `false`, Step 8 does not fire at all (existing condition unchanged); the auto-approval flag has no effect on a step that is not executed.
+
+7. When the user approves the test suite (or after step 6's auto-approval has run), transition out of TDD_REVIEW via the `approve-stage` ctl command. This hashes `evidence/tdd-tests.md`, writes the `human-approval-TDD_REVIEW` receipt with that hash, and advances TDD_REVIEW → PRE_EXECUTION_SNAPSHOT in one atomic step. Do NOT append a manual `[HUMAN]` log line — the receipt + approve-stage path is the only one the state machine accepts (the gate refuses with `human-approval-TDD_REVIEW` / `hash mismatch` substrings on drift):
 
    ```text
    python3 hooks/ctl.py approve-stage .dynos/task-{id} TDD_REVIEW
    ```
 
-   Exit code 0 means the receipt was written and the stage advanced. Exit code 1 means the gate refused — the stderr text identifies the cause. Do not bypass with `transition --force`.
+   Exit code 0 means the receipt was written and the stage advanced. Exit code 1 means the gate refused — the stderr text identifies the cause. Do not bypass with `transition --force`. (If step 6's auto-approval already advanced the stage, this human-path call is unreachable.)
 
-7. Commit the approved tests to the snapshot branch before any production code is written.
+8. Commit the approved tests to the snapshot branch before any production code is written.
 
 ---
 

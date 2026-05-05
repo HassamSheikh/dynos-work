@@ -948,6 +948,33 @@ def receipt_retrospective(task_dir: Path, **_legacy: Any) -> Path:
     total_tokens = result.get("total_tokens")
     if total_tokens is None:
         total_tokens = result.get("total_token_usage", 0)
+
+    # task-20260505-001 AC-19: self-compute auto-approval gate counts by
+    # scanning the receipts directory at write time. Callers do NOT
+    # supply these fields (consistent with the v4 anti-falsification
+    # pattern). Counts only auto-approval receipts whose JSON parses and
+    # carries `valid: true`; the stage labels are extracted from the
+    # filename stem and sorted alphabetically.
+    receipts_dir = task_dir / "receipts"
+    gates_auto_approved = 0
+    auto_approved_stages: list[str] = []
+    if receipts_dir.is_dir():
+        for receipt_path in sorted(receipts_dir.glob("auto-approval-*.json")):
+            try:
+                payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("valid") is True:
+                gates_auto_approved += 1
+            stem = receipt_path.stem
+            if stem.startswith("auto-approval-"):
+                stage_label = stem[len("auto-approval-"):]
+                if stage_label and stage_label not in auto_approved_stages:
+                    auto_approved_stages.append(stage_label)
+    auto_approved_stages.sort()
+
     return write_receipt(
         task_dir,
         "retrospective",
@@ -956,6 +983,8 @@ def receipt_retrospective(task_dir: Path, **_legacy: Any) -> Path:
         efficiency_score=result.get("efficiency_score", 0.0),
         total_tokens=total_tokens,
         retrospective_path=str(task_dir / "task-retrospective.json"),
+        gates_auto_approved=gates_auto_approved,
+        auto_approved_stages=auto_approved_stages,
     )
 
 

@@ -772,41 +772,78 @@ def _human_approval_err(
     stage_label: str,
     artifact_path: Path,
 ) -> str | None:
-    """Mirror of ``_check_human_approval`` (nested in
-    ``_replay_gates_for_transition``) — returns an error string on
-    failure rather than raising. Promoted from a closure in
-    ``_compute_bypassed_gates_for_force`` so the captured variables
-    (``task_dir``, ``current_stage``, ``next_stage``) become explicit
-    parameters. Never raises: any internal exception → return None
-    (treat as no-error so the forced transition still proceeds).
+    """Mirror of ``_check_any_approval`` (closure in
+    ``_replay_gates_for_transition``); both paths must accept either
+    human-approval-{stage} or auto-approval-{stage} receipts. Drift
+    between this function and the closure causes
+    ``_compute_bypassed_gates_for_force`` to misreport auto-approved
+    tasks.
+
+    Returns an error string on failure rather than raising. Promoted
+    from a closure in ``_compute_bypassed_gates_for_force`` so the
+    captured variables (``task_dir``, ``current_stage``,
+    ``next_stage``) become explicit parameters. Never raises: any
+    internal exception → return None (treat as no-error so the forced
+    transition still proceeds).
+
+    Behavioural mirror of ``_check_any_approval``:
+      1. Try human-approval-{stage_label} first; if the receipt exists,
+         it is the chosen receipt for the gate.
+      2. Otherwise try auto-approval-{stage_label}; if it exists, it is
+         the chosen receipt.
+      3. Otherwise return a "missing approval receipt" error string
+         that names BOTH possibilities so the caller knows either
+         receipt would have satisfied the gate.
+      4. With a chosen receipt, validate the live artifact's hash
+         against the receipt's ``artifact_sha256``; on mismatch return
+         a "hash mismatch" error string naming the chosen step.
     """
     try:
         from lib_receipts import read_receipt, hash_file, _receipts_dir
     except Exception:
         return None
     try:
-        receipt_step = f"human-approval-{stage_label}"
-        receipt_path = _receipts_dir(task_dir) / f"{receipt_step}.json"
-        receipt = read_receipt(task_dir, receipt_step)
-        if receipt is None:
+        human_step = f"human-approval-{stage_label}"
+        auto_step = f"auto-approval-{stage_label}"
+        receipts_dir = _receipts_dir(task_dir)
+        receipt_path_human = receipts_dir / f"{human_step}.json"
+        receipt_path_auto = receipts_dir / f"{auto_step}.json"
+
+        human_receipt = read_receipt(task_dir, human_step)
+        auto_receipt = (
+            read_receipt(task_dir, auto_step) if human_receipt is None else None
+        )
+
+        if human_receipt is not None:
+            chosen_step = human_step
+            chosen_path = receipt_path_human
+            chosen_receipt = human_receipt
+        elif auto_receipt is not None:
+            chosen_step = auto_step
+            chosen_path = receipt_path_auto
+            chosen_receipt = auto_receipt
+        else:
             return (
                 f"Cannot transition {current_stage} -> {next_stage}: "
-                f"missing receipt {receipt_step} at {receipt_path} "
+                f"missing approval receipt — expected either "
+                f"{human_step} at {receipt_path_human} or "
+                f"{auto_step} at {receipt_path_auto} "
                 f"(artifact: {artifact_path})"
             )
+
         if not artifact_path.exists():
             return (
                 f"Cannot transition {current_stage} -> {next_stage}: "
-                f"receipt {receipt_step} present at {receipt_path} but "
+                f"receipt {chosen_step} present at {chosen_path} but "
                 f"artifact missing at {artifact_path}"
             )
-        expected = receipt.get("artifact_sha256") or ""
+        expected = chosen_receipt.get("artifact_sha256") or ""
         actual = hash_file(artifact_path)
         if not isinstance(expected, str) or expected != actual:
             return (
                 f"Cannot transition {current_stage} -> {next_stage}: "
-                f"hash mismatch for receipt {receipt_step} "
-                f"(receipt: {receipt_path}, artifact: {artifact_path}) "
+                f"hash mismatch for receipt {chosen_step} "
+                f"(receipt: {chosen_path}, artifact: {artifact_path}) "
                 f"expected={(expected or '')[:12]} actual={actual[:12]}"
             )
     except Exception:
@@ -1327,7 +1364,7 @@ def _replay_gates_for_transition(
     ``_refuse`` closure) on the first hard refusal, or aggregates
     ``gate_errors`` and raises one combined ``ValueError`` at the end.
 
-    The nested closures (``_refuse``, ``_check_human_approval``,
+    The nested closures (``_refuse``, ``_check_any_approval``,
     ``_check_tdd_tests``, ``_check_rules_check_passed``) intentionally
     stay nested — they share ``task_dir``, ``current_stage``,
     ``next_stage``, ``manifest_path`` via closure, and ``_refuse`` calls
@@ -1365,34 +1402,68 @@ def _replay_gates_for_transition(
             pass  # Logging must never block the refusal itself.
         raise ValueError(reason)
 
-    def _check_human_approval(stage_label: str, artifact_path: Path) -> None:
+    def _check_any_approval(stage_label: str, artifact_path: Path) -> None:
         """Refuse the current transition unless an approval receipt for
         ``stage_label`` exists and its ``artifact_sha256`` matches the
-        current hash of ``artifact_path``."""
+        current hash of ``artifact_path``.
+
+        Accepts EITHER ``human-approval-{stage_label}`` OR
+        ``auto-approval-{stage_label}``. Human-approval is checked
+        first; if absent, auto-approval is checked. When neither is
+        found the refusal message names BOTH possibilities so the
+        operator knows either receipt would have satisfied the gate.
+        Hash-mismatch refusal applies identically to both stems
+        (2026-04-30 forgery hardening invariant).
+
+        Mirrored by ``_human_approval_err`` (in this module) for the
+        force-override observability path; drift between this closure
+        and that helper causes ``_compute_bypassed_gates_for_force`` to
+        misreport auto-approved tasks as having human-bypassed gates.
+        """
         from lib_receipts import _receipts_dir  # type: ignore
 
-        receipt_step = f"human-approval-{stage_label}"
-        receipt_path = _receipts_dir(task_dir) / f"{receipt_step}.json"
-        receipt = read_receipt(task_dir, receipt_step)
-        if receipt is None:
+        human_step = f"human-approval-{stage_label}"
+        auto_step = f"auto-approval-{stage_label}"
+        receipts_dir = _receipts_dir(task_dir)
+        receipt_path_human = receipts_dir / f"{human_step}.json"
+        receipt_path_auto = receipts_dir / f"{auto_step}.json"
+
+        human_receipt = read_receipt(task_dir, human_step)
+        auto_receipt = (
+            read_receipt(task_dir, auto_step) if human_receipt is None else None
+        )
+
+        if human_receipt is not None:
+            chosen_step = human_step
+            chosen_path = receipt_path_human
+            chosen_receipt = human_receipt
+        elif auto_receipt is not None:
+            chosen_step = auto_step
+            chosen_path = receipt_path_auto
+            chosen_receipt = auto_receipt
+        else:
             _refuse(
                 f"Cannot transition {current_stage} -> {next_stage}: "
-                f"missing receipt {receipt_step} at {receipt_path} "
+                f"missing approval receipt — expected either "
+                f"{human_step} at {receipt_path_human} or "
+                f"{auto_step} at {receipt_path_auto} "
                 f"(artifact: {artifact_path})"
             )
+            return  # _refuse raises; this satisfies type-narrowing
+
         if not artifact_path.exists():
             _refuse(
                 f"Cannot transition {current_stage} -> {next_stage}: "
-                f"receipt {receipt_step} present at {receipt_path} but "
+                f"receipt {chosen_step} present at {chosen_path} but "
                 f"artifact missing at {artifact_path}"
             )
-        expected = receipt.get("artifact_sha256") or ""
+        expected = chosen_receipt.get("artifact_sha256") or ""
         actual = hash_file(artifact_path)
         if not isinstance(expected, str) or expected != actual:
             _refuse(
                 f"Cannot transition {current_stage} -> {next_stage}: "
-                f"hash mismatch for receipt {receipt_step} "
-                f"(receipt: {receipt_path}, artifact: {artifact_path}) "
+                f"hash mismatch for receipt {chosen_step} "
+                f"(receipt: {chosen_path}, artifact: {artifact_path}) "
                 f"expected={(expected or '')[:12]} actual={actual[:12]}"
             )
 
@@ -1528,15 +1599,17 @@ def _replay_gates_for_transition(
                 f"for risk_level={risk_level}; manifest={manifest_path}"
             )
 
-    # ---- AC 3: SPEC_REVIEW -> PLANNING requires human-approval-SPEC_REVIEW
-    # whose artifact_sha256 matches sha256(spec.md).
+    # ---- AC 3: SPEC_REVIEW -> PLANNING requires either
+    # human-approval-SPEC_REVIEW or auto-approval-SPEC_REVIEW whose
+    # artifact_sha256 matches sha256(spec.md).
     if current_stage == "SPEC_REVIEW" and next_stage == "PLANNING":
-        _check_human_approval("SPEC_REVIEW", task_dir / "spec.md")
+        _check_any_approval("SPEC_REVIEW", task_dir / "spec.md")
 
-    # ---- AC 4: PLAN_REVIEW -> PLAN_AUDIT requires human-approval-PLAN_REVIEW
-    # whose artifact_sha256 matches sha256(plan.md).
+    # ---- AC 4: PLAN_REVIEW -> PLAN_AUDIT requires either
+    # human-approval-PLAN_REVIEW or auto-approval-PLAN_REVIEW whose
+    # artifact_sha256 matches sha256(plan.md).
     if current_stage == "PLAN_REVIEW" and next_stage == "PLAN_AUDIT":
-        _check_human_approval("PLAN_REVIEW", task_dir / "plan.md")
+        _check_any_approval("PLAN_REVIEW", task_dir / "plan.md")
 
     # ---- F6: planner-spec receipt required at SPEC_NORMALIZATION ->
     # SPEC_REVIEW (skipped when manifest.fast_track is True — fast-track
@@ -1572,11 +1645,11 @@ def _replay_gates_for_transition(
                 "receipt: planner-plan (planner plan spawn was never recorded)"
             )
 
-    # ---- AC 6: TDD_REVIEW -> PRE_EXECUTION_SNAPSHOT requires
-    # human-approval-TDD_REVIEW whose artifact_sha256 matches
-    # sha256(evidence/tdd-tests.md).
+    # ---- AC 6: TDD_REVIEW -> PRE_EXECUTION_SNAPSHOT requires either
+    # human-approval-TDD_REVIEW or auto-approval-TDD_REVIEW whose
+    # artifact_sha256 matches sha256(evidence/tdd-tests.md).
     if current_stage == "TDD_REVIEW" and next_stage == "PRE_EXECUTION_SNAPSHOT":
-        _check_human_approval("TDD_REVIEW", task_dir / "evidence" / "tdd-tests.md")
+        _check_any_approval("TDD_REVIEW", task_dir / "evidence" / "tdd-tests.md")
 
     # ---- AC 11 + tdd_required gate: EXIT from PLAN_AUDIT.
     # (a) high/critical risk tasks MUST have a plan-audit-check receipt
@@ -3542,6 +3615,20 @@ def collect_retrospectives(root: Path, *, include_unverified: bool = False) -> l
         if not isinstance(data, dict):
             return
 
+        # AC-20: when the source retrospective JSON carries
+        # ``gates_auto_approved`` and/or ``auto_approved_stages`` (written
+        # by ``receipt_retrospective`` after seg-1), propagate them
+        # verbatim into the aggregated output dict for this task. The
+        # whole-dict ingestion below already preserves arbitrary keys,
+        # but we explicitly pin these two so a future refactor that
+        # narrows the kept keys cannot silently drop the auto-approval
+        # fields needed for grep-style audit.
+        _auto_approval_passthrough: dict[str, Any] = {}
+        if "gates_auto_approved" in data:
+            _auto_approval_passthrough["gates_auto_approved"] = data["gates_auto_approved"]
+        if "auto_approved_stages" in data:
+            _auto_approval_passthrough["auto_approved_stages"] = data["auto_approved_stages"]
+
         tid = data.get("task_id")
 
         # SEC-003: verify persistent retros against the flushed-event
@@ -3585,6 +3672,15 @@ def collect_retrospectives(root: Path, *, include_unverified: bool = False) -> l
             data["_source"] = "persistent"
         else:
             data["_source"] = "worktree"
+
+        # AC-20: re-pin the auto-approval pass-through so the aggregated
+        # entry always carries ``gates_auto_approved`` /
+        # ``auto_approved_stages`` verbatim when the source had them.
+        # Re-application is a no-op when the keys already round-tripped
+        # untouched, but it is a hard guarantee against any future code
+        # path that narrows ``data`` between ingestion and storage.
+        for _k, _v in _auto_approval_passthrough.items():
+            data[_k] = _v
 
         if isinstance(tid, str) and tid:
             key = tid

@@ -138,8 +138,8 @@ This is a LOCK_EX read-modify-write that:
 
 If the call raises an exception (filesystem error, race with another
 writer, etc.), print the error to stderr and exit non-zero. DO NOT
-proceed to step 4 — the queue is in an unknown state and a spawned
-task without a corresponding `in_progress` row would lose its
+proceed to step 4 or step 5 — the queue is in an unknown state and a
+spawned task without a corresponding `in_progress` row would lose its
 round-trip update.
 
 NOTE: `update_row_status` from the lib only changes `status` (and sets
@@ -175,7 +175,56 @@ print(json.dumps({"id": row["id"], "description": row.get("description","")}))
 PY
 ```
 
-### Step 4 — Invoke `/dynos-work:start` and POLL until terminal stage
+### Step 4 — Set auto-approve gates for the new task (best-effort)
+
+Before invoking `/dynos-work:start`, the new task directory does not
+yet exist. The auto-approve-gates ctl command requires the new task's
+`manifest.json` to be on disk because it is the sole writer of
+`manifest.auto_approve_gates`. There is therefore a sequencing
+constraint: `set-auto-approve-gates` MUST be called AFTER
+`/dynos-work:start` Step 0 has created `.dynos/task-{new_id}/manifest.json`
+but BEFORE classification has been settled (the gate refuses
+`false → true` once `manifest.classification` is non-null — this is
+the AC-4 enforcement in `cmd_set_auto_approve_gates`).
+
+In practice, call `set-auto-approve-gates` immediately after
+`/dynos-work:start` returns control with the new `task_id`. If the
+spawned start skill has already advanced past classification by the
+time you make the call, the gate will refuse with a non-zero exit; in
+that case fall through to the normal human-approval path (the gates
+were not enabled, but the residual still runs).
+
+```bash
+python3 hooks/ctl.py set-auto-approve-gates \
+  --task-dir .dynos/task-{new_id} \
+  --from-residual-id {row["id"]}
+```
+
+Fall-through behavior:
+
+- Exit code 0: `manifest.auto_approve_gates` was set to `true` on the
+  new task. Subsequent SPEC_REVIEW / PLAN_REVIEW / TDD_REVIEW gates in
+  `/dynos-work:start` will auto-approve via the receipt path. Continue
+  polling in Step 5.
+- Exit code 1: the gate refused (a pick-time ceiling tripped, the
+  classification was already settled, the manifest is missing, or the
+  global policy file disabled auto-approval). Log the stderr message
+  and continue with normal human-approval gates. DO NOT abort the
+  `run-next` flow — the residual must still run; it just runs with a
+  human in the loop.
+
+Recommended logging:
+
+```bash
+{timestamp} [GATE] set-auto-approve-gates residual={row.id} task={new_id} result={ok|refused: <reason>}
+```
+
+The auto-approval pathway is an opportunistic acceleration of
+operator-trusted residuals. A refusal is a normal outcome (e.g. for
+high-risk security findings) and never blocks the residual from
+running.
+
+### Step 5 — Invoke `/dynos-work:start` and POLL until terminal stage
 
 Build the input text for `/dynos-work:start`. The first line MUST be
 the residual-id sentinel comment, followed by a blank line, followed
@@ -195,7 +244,7 @@ Invoke `/dynos-work:start` with that text. The spawned task is a NEW
 dynos-work task with its own `task-{id}` directory under `.dynos/` and
 its own `manifest.json`.
 
-**WAIT — do NOT continue to step 5 until you have read the spawned
+**WAIT — do NOT continue to step 6 until you have read the spawned
 task's `manifest.json` and confirmed `stage` is exactly `"DONE"` or
 `"FAILED"`. Reading the manifest once and assuming the task completed
 is INCORRECT.** The `/dynos-work:start` skill returns control to you
@@ -213,14 +262,14 @@ REPAIR stages, which can take many minutes.
    ambiguity.)
 2. Read `.dynos/task-{id}/manifest.json`. Inspect the `stage` field.
 3. If `stage` is `"DONE"` or `"FAILED"`, polling is over — proceed to
-   step 5.
+   step 6.
 4. Otherwise, sleep approximately 30 seconds and re-read the manifest.
    Repeat. The lifecycle is monotonic; the manifest will eventually
    reach a terminal stage.
 5. If the manifest is missing or unreadable for more than a few
    consecutive polls (suggesting the spawned task crashed before
    writing the manifest), give up polling, treat this as a
-   round-trip-missing case, and fall through to step 5 — the fallback
+   round-trip-missing case, and fall through to step 6 — the fallback
    path will revert the row to `pending`.
 
 The skill prose deliberately uses 30-second polling rather than busy
@@ -229,7 +278,7 @@ than every few seconds wastes CPU and risks rate-limiting the
 filesystem. Polling looser than a minute slows feedback for the
 operator. 30 seconds is the recommended cadence.
 
-### Step 5 — Read the queue and report the round-trip outcome
+### Step 6 — Read the queue and report the round-trip outcome
 
 Once the spawned task is at a terminal stage (or polling has been
 abandoned because the manifest is permanently missing), re-read the
@@ -268,8 +317,9 @@ row was never updated. Possible causes include:
 
 In all these cases, the attempt is sacrificed — we do NOT increment
 `attempts` further on revert, because the original `update_row_status`
-in step 3 already incremented it once. Reverting `status` to
-`"pending"` lets the next `run-next` retry. After three sacrificed
+in step 3 already incremented it once. (Steps 4 and 5 do not touch
+`attempts`.) Reverting `status` to `"pending"` lets the next
+`run-next` retry. After three sacrificed
 attempts the row will not be eligible for selection (`attempts < 3`
 guard in `select_next_pending`), and an operator must inspect it
 manually.
@@ -315,7 +365,7 @@ fields).
 - Do NOT spawn auditor or executor agents directly to "fix" a
   residual. Only `/dynos-work:start` is the execution path; it
   enforces the full lifecycle and the audit gate.
-- Do NOT skip the polling loop in step 4. Reading `manifest.json`
+- Do NOT skip the polling loop in step 5. Reading `manifest.json`
   once and assuming completion is INCORRECT.
 - Do NOT mutate `proactive-findings.json` outside of
   `lib_residuals.update_row_status` (or an equivalent LOCK_EX atomic

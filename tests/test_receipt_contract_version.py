@@ -53,7 +53,7 @@ def test_contract_version_constant_is_five():
     force-override reason/approver. The rename (was _is_four) makes the
     current floor obvious to future readers — the old name would
     silently lie after a subsequent bump."""
-    assert RECEIPT_CONTRACT_VERSION == 5
+    assert RECEIPT_CONTRACT_VERSION == 6
 
 
 def test_write_receipt_embeds_contract_version(tmp_path: Path):
@@ -61,7 +61,7 @@ def test_write_receipt_embeds_contract_version(tmp_path: Path):
     td = _td(tmp_path)
     p = write_receipt(td, "spec-validated", criteria_count=1)
     payload = json.loads(p.read_text())
-    assert payload["contract_version"] == 5
+    assert payload["contract_version"] == 6
 
 
 def test_v1_receipt_without_contract_version_is_readable(tmp_path: Path):

@@ -83,6 +83,47 @@ def receipt_human_approval(
     )
 
 
+def receipt_auto_approval(
+    task_dir: Path,
+    stage: str,
+    artifact_sha256: str,
+    *,
+    approver: str = "auto:residual-skill",
+) -> Path:
+    """Write receipt proving an auto-approval (low-risk residual drain) at `stage`.
+
+    Writes ``receipts/auto-approval-{stage}.json``. Identical validation
+    surface to ``receipt_human_approval`` so auto-approval receipts go
+    through the same hash-mismatch refusal at transition time (preserving
+    the 2026-04-30 audit-chain forgery hardening).
+
+    The ``kind="auto"`` payload field distinguishes auto-approval receipts
+    from human-approval receipts in greppable form for retrospectives and
+    audit trails.
+    """
+    require_nonblank_str(stage, field_name="stage")
+    if "/" in stage or "\\" in stage or stage.startswith("."):
+        raise ValueError(f"stage must not contain path separators: {stage!r}")
+    require_nonblank_str(artifact_sha256, field_name="artifact_sha256")
+    try:
+        require_nonblank(approver, field_name="approver")
+    except (TypeError, ValueError):
+        raise ValueError(
+            "approver must be a non-empty string "
+            "(whitespace-only values are rejected — whitespace carries no "
+            "approver identity)"
+        )
+
+    return write_receipt(
+        task_dir,
+        f"auto-approval-{stage}",
+        stage=stage,
+        artifact_sha256=artifact_sha256,
+        approver=approver,
+        kind="auto",
+    )
+
+
 def receipt_postmortem_generated(
     task_dir: Path,
     postmortem_json_path: Path | str,

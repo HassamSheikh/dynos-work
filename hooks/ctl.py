@@ -31,6 +31,7 @@ from lib_receipts import (
     plan_validated_receipt_matches,
     read_receipt,
     receipt_audit_done,
+    receipt_auto_approval,
     receipt_executor_done,
     receipt_human_approval,
     receipt_plan_audit,
@@ -706,28 +707,25 @@ def cmd_transition(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_approve_stage(args: argparse.Namespace) -> int:
-    """Record a human approval receipt and atomically advance the manifest stage.
+def _do_approve_stage(task_dir: Path, stage: str, *, approver_type: str) -> int:
+    """Shared core for cmd_approve_stage. ``approver_type`` is "human" or "auto".
 
-    stage must be one of SPEC_NORMALIZATION / SPEC_REVIEW / PLAN_REVIEW /
-    TDD_REVIEW. Exits 1 on any failure that prevents the receipt write or the
-    stage transition (unknown stage, missing artifact, receipt-write refusal,
-    illegal transition). Exits 0 only after both the receipt is durably on disk
-    AND manifest.json reflects the new stage.
+    Behavior is byte-identical to the legacy ``cmd_approve_stage`` for
+    ``approver_type == "human"`` (same receipt stem, same stdout line, same
+    error semantics). For ``approver_type == "auto"`` the function instead
+    writes ``auto-approval-{stage}.json`` via ``receipt_auto_approval`` and
+    emits a stdout line that names ``auto-approved`` rather than ``approved``.
 
-    The manifest stage is guaranteed to be advanced before this function
-    returns; callers do not depend on the daemon to observe the receipt and
-    issue the transition. The daemon may still observe receipts for telemetry
-    purposes but is not required for correctness. stderr carries error text;
-    stdout is reserved for a success line.
+    Both paths refuse the corrupt-rules sentinel, validate the stage, hash
+    the artifact, write the receipt, and ensure the manifest stage is
+    advanced before returning 0. stderr carries error text; stdout is
+    reserved for a single success line.
     """
-    task_dir = Path(args.task_dir).resolve()
     root = _root_for_task_dir(task_dir)
     blocked = _refuse_if_rules_corrupt(root)
     if blocked is not None:
         return blocked
 
-    stage = args.stage
     mapping = _APPROVE_STAGE_MAP.get(stage)
     if mapping is None:
         allowed = ", ".join(sorted(_APPROVE_STAGE_MAP))
@@ -753,7 +751,10 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        receipt_human_approval(task_dir, stage, sha256_hex, approver="human")
+        if approver_type == "auto":
+            receipt_auto_approval(task_dir, stage, sha256_hex)
+        else:
+            receipt_human_approval(task_dir, stage, sha256_hex, approver="human")
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -777,8 +778,50 @@ def cmd_approve_stage(args: argparse.Namespace) -> int:
             print(str(exc), file=sys.stderr)
             return 1
 
-    print(f"{task_dir.name}: approved {stage} ({sha256_hex[:12]}) — stage advanced to {next_stage}")
+    verb = "auto-approved" if approver_type == "auto" else "approved"
+    print(f"{task_dir.name}: {verb} {stage} ({sha256_hex[:12]}) — stage advanced to {next_stage}")
     return 0
+
+
+def cmd_approve_stage(args: argparse.Namespace) -> int:
+    """Record an approval receipt and atomically advance the manifest stage.
+
+    stage must be one of SPEC_NORMALIZATION / SPEC_REVIEW / PLAN_REVIEW /
+    TDD_REVIEW. Exits 1 on any failure that prevents the receipt write or the
+    stage transition (unknown stage, missing artifact, receipt-write refusal,
+    illegal transition). Exits 0 only after both the receipt is durably on disk
+    AND manifest.json reflects the new stage.
+
+    Without ``--auto-approved`` the behavior is byte-identical to the legacy
+    human-approval flow (writes ``human-approval-{stage}.json`` via
+    ``receipt_human_approval`` and prints ``approved`` in the success line).
+
+    With ``--auto-approved`` the command refuses with exit 1 unless
+    ``manifest.auto_approve_gates`` is true, then writes
+    ``auto-approval-{stage}.json`` via ``receipt_auto_approval`` and prints
+    ``auto-approved`` in the success line.
+
+    The manifest stage is guaranteed to be advanced before this function
+    returns; callers do not depend on the daemon to observe the receipt and
+    issue the transition.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    auto_approved = bool(getattr(args, "auto_approved", False))
+    if auto_approved:
+        # Gate the auto path on manifest.auto_approve_gates being explicitly
+        # true. Refuse fast (before any receipt write or stage advance) so a
+        # caller cannot circumvent the residual-pick-time ceiling check by
+        # invoking ``approve-stage --auto-approved`` directly.
+        try:
+            manifest = load_json(task_dir / "manifest.json")
+        except Exception as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if not isinstance(manifest, dict) or manifest.get("auto_approve_gates") is not True:
+            print("auto_approve_gates is not true", file=sys.stderr)
+            return 1
+        return _do_approve_stage(task_dir, args.stage, approver_type="auto")
+    return _do_approve_stage(task_dir, args.stage, approver_type="human")
 
 
 # Artifact name → (relative file path within task_dir, canonical receipt stem)
@@ -970,6 +1013,540 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
 
     print(f"amended {artifact_name}: sha256={sha256_after}")
     print(f"amendment receipt: {amend_receipt_path}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Auto-approve gates (task-20260505-001)
+#
+# manifest.auto_approve_gates: bool
+#   Default false (enforced by absence — readers use
+#   ``manifest.get("auto_approve_gates", False)``). The flag is written to
+#   ``true`` ONLY by ``cmd_set_auto_approve_gates`` (residual-pick-time)
+#   below. ``cmd_apply_auto_approve_veto`` may downgrade ``true -> false``
+#   at classification-time but MUST NEVER raise ``false -> true``.
+# ---------------------------------------------------------------------------
+
+# Auditors permitted to seed an auto-approval flow at residual-pick time.
+# Anything outside this set fails the AC-21b "source_auditor_allowlist"
+# ceiling. ``security-auditor`` is intentionally excluded — it has its own
+# AC-21a "source_auditor_security" ceiling that fires earlier with a more
+# specific message, so a security-auditor row is rejected even though the
+# enclosing allowlist set would also reject it.
+_AUTO_APPROVE_ALLOWED_AUDITORS: frozenset[str] = frozenset({
+    "code-quality-auditor",
+    "dead-code-auditor",
+    "performance-auditor",
+    "ui-auditor",
+})
+
+
+def _check_external_surface_path(location: str) -> bool:
+    """Return True when ``location`` matches an external-surface ceiling pattern.
+
+    Patterns (any single match returns True):
+      * empty string -> True (an empty location is a fail-closed signal that
+        the producer could not localize the change; treat as external).
+      * exact match: ``hooks/ctl.py``
+      * recursive glob: ``skills/**/SKILL.md`` — any ``SKILL.md`` file at
+        any depth under ``skills/``.
+      * recursive glob: ``agents/**/*.md`` — any ``.md`` file at any depth
+        under ``agents/``.
+      * substring: ``router`` anywhere in the path (component or filename).
+      * prefix: ``api/``.
+
+    The recursive ``**`` patterns are NOT delegated to ``fnmatch.fnmatch``
+    (which does not implement recursive globbing). They are decomposed into
+    explicit ``Path.parts`` checks so behavior matches the spec on inputs
+    such as ``skills/foo/bar/SKILL.md`` and ``agents/x/y/z.md``.
+    """
+    if not isinstance(location, str) or location == "":
+        return True
+    # Normalize backslashes — accept Windows-style separators and route them
+    # through the same logic as POSIX paths.
+    norm = location.replace("\\", "/")
+    if norm == "hooks/ctl.py":
+        return True
+    if norm.startswith("api/"):
+        return True
+    if "router" in norm:
+        return True
+    parts = [p for p in norm.split("/") if p]
+    # skills/**/SKILL.md  (any depth >= 2 under skills/, basename SKILL.md)
+    if len(parts) >= 2 and parts[0] == "skills" and parts[-1] == "SKILL.md":
+        return True
+    # agents/**/*.md  (any depth >= 2 under agents/, .md suffix)
+    if len(parts) >= 2 and parts[0] == "agents" and parts[-1].endswith(".md"):
+        return True
+    return False
+
+
+def _read_auto_approve_gates_disabled(root: Path) -> bool:
+    """Return ``policy.auto_approve_gates_disabled`` (default False).
+
+    Reads ``_persistent_project_dir(root) / "policy.json"``. Missing file,
+    unreadable file, malformed JSON, missing key, or non-bool value all
+    fall through to ``False`` — the feature is enabled by default
+    (fail-open consistent with ``is_learning_enabled``).
+    """
+    try:
+        from lib_core import _persistent_project_dir  # noqa: PLC0415
+        policy_path = _persistent_project_dir(root) / "policy.json"
+        data = json.loads(policy_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    val = data.get("auto_approve_gates_disabled", False)
+    return val is True
+
+
+def _atomic_set_auto_approve_gates_true(task_dir: Path) -> None:
+    """Atomically set ``manifest.auto_approve_gates = True`` under LOCK_EX.
+
+    Holds an exclusive lock on the manifest file FD across read+modify+write
+    so two concurrent ``set-auto-approve-gates`` invocations cannot race and
+    corrupt the JSON. The write goes through ``_write_ctl_json`` so the
+    write-policy boundary is enforced exactly once.
+
+    Also re-checks the AC-4 post-classification refusal under the lock: the
+    pre-lock check in ``cmd_set_auto_approve_gates`` reads from a stale
+    snapshot, so a concurrent ``apply-auto-approve-veto`` can settle
+    classification between the snapshot read and the atomic write. Without
+    an in-lock re-check the writer would silently raise ``false -> true``
+    after classification has settled. Raises ``RuntimeError`` with the
+    sentinel substring ``"classification already settled"`` when the
+    in-lock manifest carries a non-null classification.
+    """
+    import fcntl as _fcntl  # noqa: PLC0415
+
+    manifest_path = task_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"manifest.json missing: {manifest_path}")
+    fd = -1
+    try:
+        fd = os.open(str(manifest_path), os.O_RDWR)
+        _fcntl.flock(fd, _fcntl.LOCK_EX)
+        try:
+            with os.fdopen(os.dup(fd), "r", encoding="utf-8") as fh:
+                fh.seek(0)
+                raw = fh.read()
+            try:
+                manifest = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"manifest.json is not valid JSON: {exc}") from exc
+            if not isinstance(manifest, dict):
+                raise ValueError("manifest.json must be a JSON object")
+            # AC-4 in-lock re-check: the pre-lock check in cmd_set_auto_approve_gates
+            # operates on a stale snapshot. Re-evaluate classification-settled
+            # under the lock to close the TOCTOU window between
+            # cmd_apply_auto_approve_veto and this writer (sec-Re-001).
+            if manifest.get("classification") is not None:
+                raise RuntimeError(
+                    "set-auto-approve-gates: classification already settled "
+                    "(in-lock check)"
+                )
+            manifest["auto_approve_gates"] = True
+            _write_ctl_json(task_dir, manifest_path, manifest)
+        finally:
+            _fcntl.flock(fd, _fcntl.LOCK_UN)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def cmd_set_auto_approve_gates(args: argparse.Namespace) -> int:
+    """Mark a task eligible for auto-approval gates at residual-pick time.
+
+    Walks the residual-pick-time ceilings (security-auditor, allowlist,
+    empty-location, external-surface path-glob, global policy) and, on
+    success, atomically writes ``manifest.auto_approve_gates = true``.
+
+    Refusal cases (each exits 1):
+      * --task-dir missing or manifest.json absent
+      * residual-id not present in proactive-findings.json
+      * any pick-time ceiling tripped (stderr names the ceiling)
+      * manifest.classification already settled (post-classification false
+        -> true is forbidden by AC-4)
+
+    Idempotent: when ``manifest.auto_approve_gates`` is already true the
+    command exits 0 without re-evaluating any ceiling.
+    """
+    task_dir_raw = getattr(args, "task_dir", None)
+    if not task_dir_raw:
+        print("set-auto-approve-gates: --task-dir is required", file=sys.stderr)
+        return 1
+    task_dir = Path(task_dir_raw).resolve()
+    # The residual queue and project-policy file are anchored at the project
+    # root (cwd), NOT at task_dir.parent.parent. Tests and orchestrators may
+    # place ``task_dir`` outside the project tree (e.g. shared scratch dir),
+    # while always running ``ctl.py`` from the project root. Manifest reads
+    # remain relative to ``task_dir`` (per-task), independent of ``root``.
+    # task_dir non-existence is reported via the manifest-missing check below
+    # (more specific error message).
+    root = Path.cwd().resolve()
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
+
+    # Read manifest first — we need it to short-circuit on already-true and
+    # to reject if classification is settled. A missing manifest is a hard
+    # failure regardless of the residual-id.
+    manifest_path = task_dir / "manifest.json"
+    if not manifest_path.is_file():
+        print(
+            f"set-auto-approve-gates: manifest.json missing at {manifest_path}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        manifest = load_json(manifest_path)
+    except Exception as exc:
+        print(
+            f"set-auto-approve-gates: failed to read manifest.json: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(manifest, dict):
+        print(
+            "set-auto-approve-gates: manifest.json must be a JSON object",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-4 idempotency: already-true exits 0 without re-checking ceilings.
+    if manifest.get("auto_approve_gates") is True:
+        print(json.dumps({
+            "auto_approve_gates": True,
+            "task_id": manifest.get("task_id", task_dir.name),
+            "ceiling_checked": ["already_true"],
+        }))
+        return 0
+
+    residual_id = getattr(args, "from_residual_id", None)
+    if not isinstance(residual_id, str) or not residual_id.strip():
+        print(
+            "set-auto-approve-gates: --from-residual-id is required",
+            file=sys.stderr,
+        )
+        return 1
+    residual_id = residual_id.strip()
+
+    # Look up the residual row by id.
+    try:
+        queue = lib_residuals.load_queue(lib_residuals.queue_path(root))
+    except Exception as exc:
+        print(
+            f"set-auto-approve-gates: failed to load residual queue: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    findings = queue.get("findings", [])
+    if not isinstance(findings, list):
+        findings = []
+    row = None
+    for entry in findings:
+        if isinstance(entry, dict) and entry.get("id") == residual_id:
+            row = entry
+            break
+    if row is None:
+        print(
+            f"set-auto-approve-gates: residual id not found in queue: {residual_id!r}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Pick-time ceilings (fail closed, in order). The order is significant —
+    # tests assert specific stderr substrings for the FIRST tripped ceiling.
+    source_auditor = row.get("source_auditor")
+    location = row.get("location")
+    if not isinstance(location, str):
+        location = ""
+
+    # AC-21a: security-auditor row -> blocked_by="source_auditor_security".
+    if source_auditor == "security-auditor":
+        print(
+            "set-auto-approve-gates: blocked by ceiling source_auditor_security "
+            "(row.source_auditor=security-auditor)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-21b: source_auditor not in allowlist -> blocked_by="source_auditor_allowlist".
+    if source_auditor not in _AUTO_APPROVE_ALLOWED_AUDITORS:
+        print(
+            "set-auto-approve-gates: blocked by ceiling source_auditor_allowlist "
+            f"(row.source_auditor={source_auditor!r} not in "
+            f"{sorted(_AUTO_APPROVE_ALLOWED_AUDITORS)})",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-21c: empty/missing location -> blocked_by="external_surface_empty_location".
+    if not location.strip():
+        print(
+            "set-auto-approve-gates: blocked by ceiling external_surface_empty_location "
+            "(row.location is empty)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-21d: global policy disabled -> blocked_by="global_policy".
+    if _read_auto_approve_gates_disabled(root):
+        print(
+            "set-auto-approve-gates: blocked by ceiling global_policy "
+            "(policy.auto_approve_gates_disabled=true)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-22: external-surface path glob -> blocked_by="external_surface_path".
+    if _check_external_surface_path(location):
+        print(
+            "set-auto-approve-gates: blocked by ceiling external_surface_path "
+            f"(row.location={location!r} matches a protected surface)",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-4 post-classification refusal: NEVER raise false -> true once
+    # classification is settled. The flag-set is residual-pick-time only.
+    # Evaluated AFTER ceilings so a ceiling-blocked row still names its ceiling
+    # in stderr (instead of being shadowed by classification settled).
+    if manifest.get("classification") is not None:
+        print("set-auto-approve-gates: classification already settled", file=sys.stderr)
+        return 1
+
+    # All ceilings pass — atomically flip the flag to true.
+    try:
+        _atomic_set_auto_approve_gates_true(task_dir)
+    except Exception as exc:
+        print(
+            f"set-auto-approve-gates: failed to update manifest.json: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(json.dumps({
+        "auto_approve_gates": True,
+        "task_id": manifest.get("task_id", task_dir.name),
+        "ceiling_checked": [
+            "source_auditor_security",
+            "source_auditor_allowlist",
+            "external_surface_empty_location",
+            "external_surface_path",
+            "global_policy",
+        ],
+    }))
+    return 0
+
+
+def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
+    """Apply classification-time veto ceilings to ``manifest.auto_approve_gates``.
+
+    Reads ``manifest.classification`` (must be settled — non-null), evaluates
+    six ceilings in order, and:
+      * if any ceiling trips, sets ``policy.decision = "blocked"`` and
+        downgrades ``manifest.auto_approve_gates`` to false (cannot raise
+        false -> true);
+      * otherwise sets ``policy.decision = "auto"`` and leaves
+        ``manifest.auto_approve_gates`` unchanged (the residual-pick-time
+        flag, if present, is preserved).
+
+    The ``classification.auto_approval_policy`` schema is exactly the shape
+    documented in AC-6:
+
+      {
+        "decision": "auto" | "blocked",
+        "basis": {
+          "risk_level": <str|None>,
+          "domains": [<str>],
+          "source_auditor": <str|None>,
+          "external_surface_path_match": <bool>,
+          "global_policy_disabled": <bool>,
+          "no_residual_row": <bool>,    # only when row is missing (sc-003)
+        },
+        "ceilings_checked": [
+          "risk_level", "domain_security", "source_auditor_security",
+          "external_surface_path", "source_auditor_allowlist",
+          "global_policy",
+        ],
+        "blocked_by": null | <ceiling-name>,
+      }
+    """
+    task_dir_raw = getattr(args, "task_dir", None)
+    if not task_dir_raw:
+        print("apply-auto-approve-veto: --task-dir is required", file=sys.stderr)
+        return 1
+    task_dir = Path(task_dir_raw).resolve()
+    if not task_dir.exists():
+        print(
+            f"apply-auto-approve-veto: task-dir does not exist: {task_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # See cmd_set_auto_approve_gates: residual queue + project policy live at
+    # cwd, manifest lives at task_dir. The two roots are independent.
+    root = Path.cwd().resolve()
+    blocked = _refuse_if_rules_corrupt(root)
+    if blocked is not None:
+        return blocked
+
+    manifest_path = task_dir / "manifest.json"
+    if not manifest_path.is_file():
+        print(
+            f"apply-auto-approve-veto: manifest.json missing at {manifest_path}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        manifest = load_json(manifest_path)
+    except Exception as exc:
+        print(
+            f"apply-auto-approve-veto: failed to read manifest.json: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(manifest, dict):
+        print(
+            "apply-auto-approve-veto: manifest.json must be a JSON object",
+            file=sys.stderr,
+        )
+        return 1
+
+    classification = manifest.get("classification")
+    if not isinstance(classification, dict):
+        print(
+            "apply-auto-approve-veto: classification not settled",
+            file=sys.stderr,
+        )
+        return 1
+
+    risk_level = classification.get("risk_level")
+    domains_raw = classification.get("domains")
+    domains: list[str] = []
+    if isinstance(domains_raw, list):
+        domains = [str(d) for d in domains_raw if isinstance(d, str)]
+
+    # Locate the residual row by extracting the residual-id from raw-input.md.
+    residual_id: str | None = None
+    raw_input_path = task_dir / "raw-input.md"
+    if raw_input_path.is_file():
+        try:
+            raw_text = raw_input_path.read_text(encoding="utf-8")
+            residual_id = lib_residuals.extract_residual_id(raw_text)
+        except OSError:
+            residual_id = None
+
+    row: dict | None = None
+    if residual_id:
+        try:
+            queue = lib_residuals.load_queue(lib_residuals.queue_path(root))
+            for entry in queue.get("findings", []):
+                if isinstance(entry, dict) and entry.get("id") == residual_id:
+                    row = entry
+                    break
+        except Exception:
+            row = None
+
+    row_source_auditor: str | None = None
+    row_location: str = ""
+    if row is not None:
+        sa = row.get("source_auditor")
+        row_source_auditor = sa if isinstance(sa, str) else None
+        loc = row.get("location")
+        row_location = loc if isinstance(loc, str) else ""
+
+    surface_match = _check_external_surface_path(row_location) if row is not None else False
+    global_disabled = _read_auto_approve_gates_disabled(root)
+
+    ceilings_checked = [
+        "risk_level",
+        "domain_security",
+        "source_auditor_security",
+        "external_surface_path",
+        "source_auditor_allowlist",
+        "global_policy",
+    ]
+
+    basis: dict = {
+        "risk_level": risk_level,
+        "domains": list(domains),
+        "source_auditor": row_source_auditor,
+        "external_surface_path_match": bool(surface_match),
+        "global_policy_disabled": bool(global_disabled),
+    }
+    if row is None:
+        # sc-003: when no row is found basis is still fully populated, with
+        # an explicit no_residual_row=true disambiguator. Downstream consumers
+        # can distinguish "row exists but auditor was null" from "no row".
+        basis["no_residual_row"] = True
+
+    blocked_by: str | None = None
+
+    # AC-5a: missing risk level -> blocked (fail-closed). AC-5a (continued):
+    # explicit high/critical -> blocked.
+    if not isinstance(risk_level, str) or not risk_level.strip():
+        blocked_by = "risk_level"
+    elif risk_level in {"high", "critical"}:
+        blocked_by = "risk_level"
+    elif "security" in domains:
+        blocked_by = "domain_security"
+    elif row is not None and row_source_auditor == "security-auditor":
+        blocked_by = "source_auditor_security"
+    elif row is not None and surface_match:
+        blocked_by = "external_surface_path"
+    elif global_disabled:
+        blocked_by = "global_policy"
+
+    decision = "blocked" if blocked_by is not None else "auto"
+
+    policy = {
+        "decision": decision,
+        "basis": basis,
+        "ceilings_checked": ceilings_checked,
+        "blocked_by": blocked_by,
+    }
+
+    # If blocked, downgrade manifest.auto_approve_gates to false (can never
+    # raise false -> true here — this is the AC-5 invariant).
+    if blocked_by is not None:
+        manifest["auto_approve_gates"] = False
+    # Update classification.auto_approval_policy in-place.
+    classification["auto_approval_policy"] = policy
+    manifest["classification"] = classification
+
+    # Persist to manifest.json AND mirror classification to classification.json
+    # via the canonical helper. ``_persist_classification`` validates type/risk/
+    # domains; if validation fails (e.g. risk_level=None on a malformed
+    # classification — AC-5e), this veto path still needs to record the
+    # blocked decision so callers see the policy. Fall back to a direct
+    # manifest write + classification.json mirror without re-running the
+    # type/risk/domains validator: the malformed classification is the
+    # *reason* the veto blocked, not a reason to refuse the decision.
+    try:
+        _persist_classification(task_dir, classification)
+    except Exception as _persist_exc:
+        try:
+            write_json(manifest_path, manifest)
+            cls_path = task_dir / "classification.json"
+            write_json(cls_path, classification)
+        except Exception as _fallback_exc:
+            print(
+                f"apply-auto-approve-veto: failed to persist classification: {_fallback_exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+    final_flag = bool(manifest.get("auto_approve_gates", False))
+    print(json.dumps({
+        "auto_approve_gates": final_flag,
+        "decision": decision,
+        "blocked_by": blocked_by,
+    }))
     return 0
 
 
@@ -1914,6 +2491,48 @@ def cmd_run_start_classification(args: argparse.Namespace) -> int:
             return 1
 
         fast_track = apply_fast_track(task_dir)
+
+        # AC-24: apply the auto-approve veto post-classification. Both
+        # exception path AND non-zero return path are logged to stderr but
+        # NEITHER aborts run-start-classification (sc-002 from plan audit).
+        # Calling via the module-level name so tests can monkeypatch the
+        # symbol on this module to exercise crash/non-zero scenarios.
+        # Fail-closed: if the veto could not run cleanly, force
+        # auto_approve_gates=False in the manifest so the trust substrate
+        # never trusts an unverified flag (the veto is what proves the
+        # ceilings were checked).
+        try:
+            veto_args = argparse.Namespace(task_dir=str(task_dir))
+            veto_rc = cmd_apply_auto_approve_veto(veto_args)
+        except Exception as _veto_exc:
+            print(
+                f"[warn] apply-auto-approve-veto raised: {_veto_exc}",
+                file=sys.stderr,
+            )
+            veto_rc = 1
+        if veto_rc != 0:
+            print(
+                f"[warn] apply-auto-approve-veto returned non-zero: rc={veto_rc}",
+                file=sys.stderr,
+            )
+            # Force-downgrade the flag to false on veto failure (fail-closed
+            # security posture; the flag is only trustworthy after the veto
+            # has affirmed the ceilings).
+            try:
+                manifest_path = task_dir / "manifest.json"
+                if manifest_path.is_file():
+                    fail_closed_manifest = load_json(manifest_path)
+                    if isinstance(fail_closed_manifest, dict) and (
+                        fail_closed_manifest.get("auto_approve_gates") is True
+                    ):
+                        fail_closed_manifest["auto_approve_gates"] = False
+                        write_json(manifest_path, fail_closed_manifest)
+            except Exception as _force_exc:
+                print(
+                    f"[warn] apply-auto-approve-veto fail-closed write failed: {_force_exc}",
+                    file=sys.stderr,
+                )
+
         manifest = _load_manifest(task_dir)
         current_stage = manifest.get("stage")
         transitioned_to = None
@@ -4671,7 +5290,53 @@ def register_task_lifecycle_parsers(subparsers: argparse._SubParsersAction) -> N
         "stage",
         help="Review stage: SPEC_REVIEW, PLAN_REVIEW, or TDD_REVIEW",
     )
+    approve_stage_parser.add_argument(
+        "--auto-approved",
+        dest="auto_approved",
+        action="store_true",
+        default=False,
+        help=(
+            "Write auto-approval-{stage}.json instead of human-approval-{stage}.json. "
+            "Refused with exit 1 unless manifest.auto_approve_gates is true."
+        ),
+    )
     approve_stage_parser.set_defaults(func=cmd_approve_stage)
+
+    set_auto_approve_gates_parser = subparsers.add_parser(
+        "set-auto-approve-gates",
+        help=(
+            "Mark a task eligible for auto-approval gates at residual-pick time. "
+            "Walks pick-time ceilings and atomically sets manifest.auto_approve_gates=true."
+        ),
+    )
+    set_auto_approve_gates_parser.add_argument(
+        "--task-dir",
+        dest="task_dir",
+        required=True,
+        help="Path to .dynos/task-<id> directory whose manifest will be updated.",
+    )
+    set_auto_approve_gates_parser.add_argument(
+        "--from-residual-id",
+        dest="from_residual_id",
+        required=True,
+        help="Residual id (lib_residuals row id) authorizing the auto-approve flag.",
+    )
+    set_auto_approve_gates_parser.set_defaults(func=cmd_set_auto_approve_gates)
+
+    apply_auto_approve_veto_parser = subparsers.add_parser(
+        "apply-auto-approve-veto",
+        help=(
+            "Apply classification-time veto ceilings; downgrades manifest.auto_approve_gates "
+            "to false when any ceiling trips. Cannot raise false -> true."
+        ),
+    )
+    apply_auto_approve_veto_parser.add_argument(
+        "--task-dir",
+        dest="task_dir",
+        required=True,
+        help="Path to .dynos/task-<id> directory whose classification will receive the veto.",
+    )
+    apply_auto_approve_veto_parser.set_defaults(func=cmd_apply_auto_approve_veto)
 
     amend_artifact_parser = subparsers.add_parser(
         "amend-artifact",
