@@ -79,7 +79,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from lib_core import load_json, write_json
-from write_policy import WriteAttempt, get_capability_key, require_write_allowed
+from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 
 EMPTY_USAGE: dict = {
@@ -127,7 +127,7 @@ def _write_usage(task_dir: Path, data: dict) -> None:
             operation="modify" if usage_path.exists() else "create",
             source="system",
         ),
-        capability_key=get_capability_key("system"),
+        capability_key=_get_capability_key("system"),
     )
     write_json(usage_path, data)
 

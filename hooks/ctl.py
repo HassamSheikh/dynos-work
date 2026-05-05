@@ -41,7 +41,7 @@ from lib_receipts import (
     receipt_executor_routing,
 )
 from lib_validate import apply_fast_track, check_segment_ownership, require_nonblank, validate_task_artifacts
-from write_policy import WriteAttempt, get_capability_key, require_write_allowed
+from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
 # task-20260504-007: residuals queue producer + run-next consumer.
 # Imported as a module (not `from lib_residuals import ...`) so tests
@@ -251,7 +251,7 @@ def _write_ctl_json(task_dir: Path, path: Path, payload: dict) -> None:
             operation="modify" if path.exists() else "create",
             source=_WRITE_ROLE,
         ),
-        capability_key=get_capability_key(_WRITE_ROLE),
+        capability_key=_get_capability_key(_WRITE_ROLE),
     )
     write_json(path, payload)
 
@@ -898,7 +898,7 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
                 operation="create",
                 source="amend-artifact",
             ),
-            capability_key=get_capability_key("receipt-writer"),
+            capability_key=_get_capability_key("receipt-writer"),
         )
     except Exception as exc:
         print(f"amend-artifact: write denied for amendment receipt: {exc}", file=sys.stderr)
@@ -935,7 +935,7 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
                     operation="modify",
                     source="amend-artifact",
                 ),
-                capability_key=get_capability_key("receipt-writer"),
+                capability_key=_get_capability_key("receipt-writer"),
             )
         except Exception as exc:
             print(f"amend-artifact: write denied for canonical receipt update: {exc}", file=sys.stderr)

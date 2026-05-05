@@ -38,15 +38,21 @@ _PRIVILEGED_ROLE_MODULE_MAP: dict[str, frozenset[str]] = {
 # Each privileged role gets a distinct object() identity that callers must
 # import and pass explicitly. Forge-resistance equals Python object identity:
 # without importing this module's private symbol, no caller can construct a
-# matching token. The role-to-module mapping in _PRIVILEGED_ROLE_MODULE_MAP
-# remains the policy source of truth for write permissions; the capability
-# key only proves caller identity.
+# matching token. The capability key proves caller identity at runtime.
+#
+# _PRIVILEGED_ROLE_MODULE_MAP is NOT consulted at runtime by this module —
+# it is a static allowlist enforced at lint/test time by
+# tests/test_write_policy_module_allowlist.py, which scans imports of the
+# capability-key helper across the codebase and fails CI if a module outside
+# the allowlist imports a privileged role's key. Runtime enforcement is the
+# capability-key identity check in require_write_allowed; the module map is
+# the static counterpart that catches drift before code lands.
 _CAPABILITY_KEYS: dict[str, object] = {
     role: object() for role in _PRIVILEGED_ROLE_MODULE_MAP
 }
 
 
-def get_capability_key(role: str) -> object:
+def _get_capability_key(role: str) -> object:
     """Return the capability-key sentinel for a privileged role.
 
     Raises KeyError if role is not in _CAPABILITY_KEYS. Privileged callers

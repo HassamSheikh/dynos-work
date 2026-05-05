@@ -1,10 +1,9 @@
-"""TDD-first tests for PRO-001 CapabilityKey enforcement.
+"""TDD-first tests for PRO-001 CapabilityKey enforcement and forge-resistance hardening.
 
-ACs covered: 9, 10, 11.
-
-These tests will FAIL with ImportError or TypeError until segment-A-write-policy
-adds _CAPABILITY_KEYS, get_capability_key, and the new require_write_allowed
-signature with required capability_key kwarg. That is the expected TDD-first state.
+Original ACs: 9, 10, 11 (capability_key kwarg machinery).
+task-20260504-008 hardening ACs: 4, 5, 13, 14 (rename to private name + adversarial tests).
+Segment owners: TDD-First gate authored adversarial tests; segment-F-update-tests
+finalized the rename + adversarial-test suite for the post-rename code paths.
 """
 from __future__ import annotations
 
