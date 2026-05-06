@@ -98,6 +98,22 @@ def build_file_context(files: list[str], root: Path) -> str:
 
 
 def build_diff_context(snapshot_sha: str, root: Path) -> str:
+    # Validate the SHA resolves to a commit before passing it to git diff.
+    # An abbreviated/wrong SHA that fails to resolve made `git diff` produce
+    # an empty diff silently, leading to a 1-byte sidecar. Surface the bad
+    # SHA via stderr + non-empty return so the caller notices.
+    verify = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{snapshot_sha}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    if verify.returncode != 0:
+        print(
+            f"build_prompt_context: snapshot_sha {snapshot_sha!r} does not "
+            "resolve to a commit (use the full 40-char SHA from "
+            "manifest.snapshot.head_sha)",
+            file=sys.stderr,
+        )
+        return ""
     try:
         result = subprocess.run(
             [_GIT or "git", "-C", str(root), "diff", "--name-only", "--diff-filter=AMRD", snapshot_sha],
