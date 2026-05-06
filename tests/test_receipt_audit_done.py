@@ -27,14 +27,30 @@ def _write_sidecar(td: Path, auditor: str, model: str, digest: str) -> Path:
     return p
 
 
+def _write_report(td: Path, findings: list[dict]) -> Path:
+    """Write a real audit report JSON and return its path."""
+    report = td / "audit-reports" / "sec.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps({"findings": findings}))
+    return report
+
+
 def test_matching_sidecar_passes(tmp_path: Path):
     td = _task_dir(tmp_path)
     digest = "a" * 64
     _write_sidecar(td, "security-auditor", "haiku", digest)
+    # Write an empty report so the envelope path and counts match on disk.
+    report = _write_report(td, [])
+    final_envelope = json.dumps({
+        "report_path": str(report),
+        "findings_count": 0,
+        "blocking_count": 0,
+    })
     out = receipt_audit_done(
-        td, "security-auditor", "haiku", 0, 0, None, 100,
+        td, "security-auditor", "haiku", 0, 0, str(report), 100,
         route_mode="replace", agent_path="learned/x.md",
         injected_agent_sha256=digest,
+        final_envelope=final_envelope,
     )
     assert out.exists()
     payload = json.loads(out.read_text())
