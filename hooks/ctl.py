@@ -2193,6 +2193,7 @@ def cmd_audit_receipt(args: argparse.Namespace) -> int:
             agent_path=args.agent_path,
             injected_agent_sha256=args.injected_agent_sha256,
             ensemble_context=args.ensemble_context,
+            final_envelope=args.final_envelope,
         )
     except Exception as exc:
         print(str(exc), file=sys.stderr)
@@ -6080,6 +6081,14 @@ def register_audit_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--ensemble-context",
         action="store_true",
         help="Mark this receipt as part of ensemble voting/escalation.",
+    )
+    audit_receipt_parser.add_argument(
+        "--final-envelope",
+        default=None,
+        help=(
+            "Single-line bare JSON envelope returned in the auditor's final "
+            "message. Required for non-generic route_mode; optional for generic."
+        ),
     )
     audit_receipt_parser.set_defaults(func=cmd_audit_receipt)
 

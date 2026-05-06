@@ -69,3 +69,15 @@ Write your report following the canonical schema defined in `agents/_shared/audi
 - Do not modify files
 - Always write report
 - If a state is implied by logic but never visibly rendered, treat it as missing
+
+## Final-Message Contract
+
+Your final message MUST be ONLY the envelope JSON defined in `agents/_shared/audit-report.md` — one line, no markdown fences, no prose:
+
+{"report_path": "<absolute-path>", "findings_count": N, "blocking_count": M}
+
+The full findings JSON lives on disk via your Write or Bash heredoc call. It NEVER appears inline in your final message.
+
+Returning the full report inline = failed run, will be re-spawned.
+
+This applies regardless of findings count — even zero findings requires the envelope with counts set to 0.

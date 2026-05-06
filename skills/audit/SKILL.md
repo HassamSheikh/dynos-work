@@ -102,16 +102,22 @@ The command logs `learned_auditor_applied`, `learned_auditor_missing`, or `learn
 
 After each auditor spawn returns, you MUST write the audit receipt via the deterministic ctl wrapper below. Do NOT hand-write a Python `receipt_audit_done(...)` call. The wrapper derives `finding_count` and `blocking_count` from the on-disk report file so the model cannot mix one auditor/model's counts with another auditor/model's report. The captured digest must be the contents of the sidecar file the router just wrote — read it back rather than re-hashing:
 
+The auditor's final text message IS the envelope JSON (a single bare JSON line). Capture the result content from the Agent tool spawn return and pass it verbatim as `--final-envelope`.
+
 ```bash
 INJECTED_AGENT_SHA256=$(cat .dynos/task-{id}/receipts/_injected-auditor-prompts/{auditor_name}-{model_used}.sha256)
+FINAL_ENVELOPE=$(... <extract last line of Agent tool return>)
 python3 hooks/ctl.py audit-receipt .dynos/task-{id} {auditor_name} \
   --model {model_used} \
   --report-path .dynos/task-{id}/audit-reports/{report_filename}.json \
   --tokens-used {tokens_used} \
   --route-mode {route_mode} \
   --agent-path {agent_path} \
-  --injected-agent-sha256 "${INJECTED_AGENT_SHA256}"
+  --injected-agent-sha256 "${INJECTED_AGENT_SHA256}" \
+  --final-envelope "${FINAL_ENVELOPE}"
 ```
+
+For `route_mode == "generic"` the `--final-envelope` argument may be omitted.
 
 `python3 hooks/ctl.py audit-receipt ...` calls `receipt_audit_done(...)`, which re-asserts the same sidecar exists at that exact path and that its contents match `injected_agent_sha256`. A mismatch raises `ValueError`. For `route_mode == "generic"` (no learned agent) the sidecar assertion is skipped and `injected_agent_sha256` may be `None`; `route_mode` and `agent_path` are still required keyword arguments. The wrapper derives counts from `--report-path`; when no report exists it writes literal zero findings only. The new `receipt_audit_routing` writer also enforces these fields per-entry, so any auditor entry missing `injected_agent_sha256` (when non-generic) or `agent_path` will hard-fail at the routing-receipt write.
 

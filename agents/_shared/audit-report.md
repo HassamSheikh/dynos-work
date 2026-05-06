@@ -55,3 +55,16 @@ Auditor-specific notes:
 - `db-schema-auditor`: `severity` meanings: `critical` = data loss risk or broken referential integrity, `major` = missing index or N+1, `minor` = naming or minor optimization. Finding IDs use prefix `db-`.
 - `dead-code-auditor`: `severity` meanings: `critical` = unreferenced files or unused exports from core modules, `major` = dead functions or unused imports in multiple files, `minor` = single unused import or isolated commented-out block. Finding IDs use prefix `dc-`.
 - `performance-auditor`: `severity` meanings: `critical` = will cause outage at scale (connection leak, unbounded query), `major` = significant latency risk (N+1, missing index, missing timeout), `minor` = optimization opportunity. Finding IDs use prefix `perf-`. Category: `performance`.
+
+## Final-Message Envelope
+
+Your final message — the last text you return to the orchestrator — MUST be ONLY the following single-line JSON object, bare with no code fences and no surrounding prose:
+
+{"report_path": "<absolute-path-to-written-report>", "findings_count": N, "blocking_count": M}
+
+Rules:
+- `report_path` must exactly match the path string you used in your Write or Bash call — character for character.
+- `findings_count` is the integer count of all entries in the `findings` array.
+- `blocking_count` is the integer count of findings where `blocking` is `true`.
+- The JSON must fit on a single line. No code fences. No prose before or after. No whitespace before the opening `{` or after the closing `}`.
+- Even if you found zero findings, emit the envelope with `findings_count: 0` and `blocking_count: 0`.

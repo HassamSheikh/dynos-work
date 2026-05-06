@@ -140,15 +140,20 @@ def test_envelope_report_path_mismatch_raises(tmp_path: Path):
 
     assert not receipt_path.exists(), "Receipt must NOT be written when envelope mismatches"
 
-    # Verify audit_envelope_mismatch event was emitted
-    events_file = td.parent.parent / "events.jsonl"
+    # Verify audit_envelope_mismatch event was emitted.
+    # log_event is called with task_dir.parent.parent as root and task_dir.name
+    # as the task kwarg. Since the task directory exists, log_event routes the
+    # event to the task-scoped log: <root>/.dynos/<task>/events.jsonl, which
+    # equals td / "events.jsonl".
+    events_file = td / "events.jsonl"
     assert events_file.exists(), "events.jsonl must exist after mismatch event"
     lines = [l.strip() for l in events_file.read_text().splitlines() if l.strip()]
     assert lines, "events.jsonl must have at least one event"
     last_event = json.loads(lines[-1])
 
-    assert last_event.get("type") == "audit_envelope_mismatch", (
-        f"Last event type must be 'audit_envelope_mismatch', got {last_event.get('type')!r}"
+    # log_event stores the event type under the key "event", not "type"
+    assert last_event.get("event") == "audit_envelope_mismatch", (
+        f"Last event type must be 'audit_envelope_mismatch', got {last_event.get('event')!r}"
     )
     # Verify all 9 required fields are present
     required_fields = [

@@ -71,6 +71,26 @@ def _ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _write_zero_report(td: Path, auditor: str) -> Path:
+    """Write a minimal zero-finding audit-report so the new envelope cross-check
+    (task-20260506-002) has a real on-disk file to compare against. Returns the
+    report path. Spawn-log tests use this to keep route_mode='replace' coverage
+    while satisfying the envelope contract."""
+    audit_dir = td / "audit-reports"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    p = audit_dir / f"{auditor}-checkpoint-001.json"
+    p.write_text(json.dumps({"findings": [], "auditor": auditor}, indent=2))
+    return p
+
+
+def _envelope_for(report_path: Path, findings_count: int = 0, blocking_count: int = 0) -> str:
+    return json.dumps({
+        "report_path": str(report_path),
+        "findings_count": findings_count,
+        "blocking_count": blocking_count,
+    })
+
+
 # ---------------------------------------------------------------------------
 # Existing sidecar contract still holds; spawn-log enforcement is additive.
 # ---------------------------------------------------------------------------
@@ -86,10 +106,12 @@ def test_matching_spawn_log_entry_passes(tmp_path: Path):
          "result_excerpt": "FINDINGS: none", "stop_reason": "end_turn",
          "timestamp": _ts()},
     ])
+    report = _write_zero_report(td, "security-auditor")
     out = receipt_audit_done(
-        td, "security-auditor", "haiku", 0, 0, None, 100,
+        td, "security-auditor", "haiku", 0, 0, str(report), 100,
         route_mode="replace", agent_path="learned/x.md",
         injected_agent_sha256=digest,
+        final_envelope=_envelope_for(report),
     )
     assert out.exists()
 
@@ -137,10 +159,12 @@ def test_subagent_type_audit_prefix_matches_auditor_suffix(tmp_path: Path):
         {"phase": "post", "tool": "Agent", "subagent_type": "audit-spec-completion",
          "result_sha256": "r" * 64, "stop_reason": "end_turn", "timestamp": _ts()},
     ])
+    report = _write_zero_report(td, "spec-completion-auditor")
     out = receipt_audit_done(
-        td, "spec-completion-auditor", "haiku", 0, 0, None, 100,
+        td, "spec-completion-auditor", "haiku", 0, 0, str(report), 100,
         route_mode="replace", agent_path="learned/x.md",
         injected_agent_sha256=digest,
+        final_envelope=_envelope_for(report),
     )
     assert out.exists()
 
@@ -153,10 +177,12 @@ def test_missing_spawn_log_file_proceeds_gracefully(tmp_path: Path, monkeypatch)
     digest = "a" * 64
     _write_sidecar(td, "security-auditor", "haiku", digest)
     # No spawn-log.jsonl at all
+    report = _write_zero_report(td, "security-auditor")
     out = receipt_audit_done(
-        td, "security-auditor", "haiku", 0, 0, None, 100,
+        td, "security-auditor", "haiku", 0, 0, str(report), 100,
         route_mode="replace", agent_path="learned/x.md",
         injected_agent_sha256=digest,
+        final_envelope=_envelope_for(report),
     )
     assert out.exists()
 
