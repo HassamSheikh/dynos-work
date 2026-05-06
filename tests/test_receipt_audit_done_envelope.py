@@ -518,3 +518,116 @@ def test_envelope_mismatch_message_does_not_contain_raw_report_path_traversal(tm
         f"Exception message must direct reader to audit_envelope_mismatch event. "
         f"Message: {msg!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 13-14: missing-on-disk report_path → ValueError. Closes residual
+# 123a8fe0 (postmortem-analysis from PR #167's audit cycle):
+# "Require at least one test asserting _validate_final_envelope raises on
+# missing report_path."
+#
+# Distinct from test_envelope_report_path_mismatch_raises (test 2) which
+# covers the case where the envelope's report_path field STRING-DIFFERS
+# from the caller-supplied report_path arg — both paths exist but
+# disagree. This pair covers the orthogonal case where the envelope's
+# report_path field MATCHES the caller arg, but the file at that path
+# does not exist on disk.
+#
+# The implementation at hooks/receipts/stage.py:744-754 raises with
+# "missing or unreadable" when report_file.open() fails. Without these
+# tests, a future code change that silently skipped on OSError (the
+# inverted-implicit-requirement-13 pattern this residual was filed
+# against) would slip past the existing test pack.
+# ---------------------------------------------------------------------------
+
+
+def test_envelope_report_path_missing_file_raises(tmp_path: Path):
+    """Closes residual 123a8fe0: envelope has valid report_path field but
+    the file at that path was never written to disk → ValueError raised
+    with message naming the missing path; receipt is NOT written."""
+    td = _make_task(tmp_path)
+    digest = "9" * 64
+    _write_sidecar(td, "security-auditor", "haiku", digest)
+
+    # Construct a path INSIDE task_dir (passes the SEC-001 path-traversal
+    # bounds check) but DON'T write a file at it.
+    missing_path = td / "audit-reports" / "security-auditor-never-written.json"
+    assert not missing_path.exists(), (
+        "Test setup: report file should NOT exist on disk for this test"
+    )
+
+    envelope = json.dumps({
+        "report_path": str(missing_path),
+        "findings_count": 0,
+        "blocking_count": 0,
+    })
+
+    receipt_path = td / "receipts" / "audit-security-auditor.json"
+
+    with pytest.raises(ValueError) as excinfo:
+        receipt_audit_done(
+            td, "security-auditor", "haiku", 0, 0, str(missing_path), 100,
+            route_mode="replace",
+            agent_path="learned/security-auditor.md",
+            injected_agent_sha256=digest,
+            final_envelope=envelope,
+        )
+
+    msg = str(excinfo.value)
+    # Message must indicate the file is missing/unreadable. The
+    # implementation at stage.py:751-754 uses the exact phrase
+    # "missing or unreadable".
+    assert "missing or unreadable" in msg, (
+        f"Exception message must say 'missing or unreadable' to satisfy IR-13. "
+        f"Message: {msg!r}"
+    )
+    # Receipt must not exist — a missing report cannot back a passing receipt.
+    assert not receipt_path.exists(), (
+        "Receipt must NOT be written when the report_path file is missing"
+    )
+
+
+def test_envelope_report_path_missing_file_no_silent_skip(tmp_path: Path):
+    """Closes residual 123a8fe0: explicit regression seal that the missing
+    file does NOT cause a silent skip with null counts. The exact
+    inversion of implicit requirement 13 the residual was filed against.
+
+    A future code change that wrapped the OSError in `try ... except:
+    pass` and treated counts as None would let an auditor claim arbitrary
+    counts via a missing report. This test asserts that path is closed —
+    OSError MUST raise, not return null counts that downstream code might
+    accept."""
+    td = _make_task(tmp_path)
+    digest = "a" * 64
+    _write_sidecar(td, "security-auditor", "haiku", digest)
+
+    missing_path = td / "audit-reports" / "security-auditor-not-on-disk.json"
+
+    envelope = json.dumps({
+        "report_path": str(missing_path),
+        "findings_count": 99,   # an attacker-supplied wrong count
+        "blocking_count": 99,
+    })
+
+    # The whole point: even with a perfectly-shaped envelope, a missing
+    # report_path file MUST short-circuit to ValueError, not let the
+    # caller-supplied counts propagate.
+    with pytest.raises(ValueError):
+        receipt_audit_done(
+            td, "security-auditor", "haiku", 99, 99, str(missing_path), 100,
+            route_mode="replace",
+            agent_path="learned/security-auditor.md",
+            injected_agent_sha256=digest,
+            final_envelope=envelope,
+        )
+
+    # Defense-in-depth: verify no receipt was emitted with the
+    # caller-supplied counts. A silent-skip implementation would have
+    # written a receipt with finding_count=99 / blocking_count=99 and
+    # returned successfully.
+    receipt_path = td / "receipts" / "audit-security-auditor.json"
+    assert not receipt_path.exists(), (
+        "Silent-skip regression: a receipt was written despite the report file "
+        "being missing on disk. This is the exact inversion of implicit "
+        "requirement 13 the residual was filed against."
+    )
