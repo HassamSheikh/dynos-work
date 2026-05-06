@@ -69,6 +69,10 @@ from receipts.approval import (
     receipt_scheduler_refused,
     _POSTMORTEM_SKIP_REASONS,
 )
+from receipts.budget import (
+    receipt_spawn_budget_paused,
+    receipt_spawn_budget_resumed,
+)
 
 
 __all__ = [
@@ -106,4 +110,6 @@ __all__ = [
     "INJECTED_PROMPTS_DIR",
     "INJECTED_AUDITOR_PROMPTS_DIR",
     "INJECTED_PLANNER_PROMPTS_DIR",
+    "receipt_spawn_budget_paused",
+    "receipt_spawn_budget_resumed",
 ]

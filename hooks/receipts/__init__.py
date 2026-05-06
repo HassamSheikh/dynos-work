@@ -48,6 +48,10 @@ from .approval import (
     receipt_rules_check_passed,
     receipt_force_override,
 )
+from .budget import (
+    receipt_spawn_budget_paused,
+    receipt_spawn_budget_resumed,
+)
 
 __all__ = [
     "write_receipt",
@@ -84,4 +88,6 @@ __all__ = [
     "INJECTED_PROMPTS_DIR",
     "INJECTED_AUDITOR_PROMPTS_DIR",
     "INJECTED_PLANNER_PROMPTS_DIR",
+    "receipt_spawn_budget_paused",
+    "receipt_spawn_budget_resumed",
 ]

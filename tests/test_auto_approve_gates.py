@@ -772,6 +772,7 @@ class TestAutoApprovalPolicySchema:
             "external_surface_path",
             "source_auditor_allowlist",
             "global_policy",
+            "spawn_budget_paused",
         }
 
     def test_apply_veto_no_residual_row_schema_complete(self, tmp_path: Path):

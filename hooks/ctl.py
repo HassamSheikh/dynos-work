@@ -42,6 +42,8 @@ from lib_receipts import (
     receipt_plan_validated,
     receipt_planner_spawn,
     receipt_search_conducted,
+    receipt_spawn_budget_paused,
+    receipt_spawn_budget_resumed,
     receipt_spec_validated,
     receipt_executor_routing,
 )
@@ -1458,7 +1460,7 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
     """Apply classification-time veto ceilings to ``manifest.auto_approve_gates``.
 
     Reads ``manifest.classification`` (must be settled — non-null), evaluates
-    six ceilings in order, and:
+    seven ceilings in order, and:
       * if any ceiling trips, sets ``policy.decision = "blocked"`` and
         downgrades ``manifest.auto_approve_gates`` to false (cannot raise
         false -> true);
@@ -1467,7 +1469,7 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
         flag, if present, is preserved).
 
     The ``classification.auto_approval_policy`` schema is exactly the shape
-    documented in AC-6:
+    documented in AC-6/AC-11:
 
       {
         "decision": "auto" | "blocked",
@@ -1477,12 +1479,13 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
           "source_auditor": <str|None>,
           "external_surface_path_match": <bool>,
           "global_policy_disabled": <bool>,
+          "spawn_budget_paused": <bool>,
           "no_residual_row": <bool>,    # only when row is missing (sc-003)
         },
         "ceilings_checked": [
           "risk_level", "domain_security", "source_auditor_security",
           "external_surface_path", "source_auditor_allowlist",
-          "global_policy",
+          "global_policy", "spawn_budget_paused",
         ],
         "blocked_by": null | <ceiling-name>,
       }
@@ -1581,6 +1584,7 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
         "external_surface_path",
         "source_auditor_allowlist",
         "global_policy",
+        "spawn_budget_paused",
     ]
 
     basis: dict = {
@@ -1589,6 +1593,8 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
         "source_auditor": row_source_auditor,
         "external_surface_path_match": bool(surface_match),
         "global_policy_disabled": bool(global_disabled),
+        # AC-11b: spawn_budget_paused is always present in basis.
+        "spawn_budget_paused": (manifest.get("blocked_reason") == "wasted_spawns_exceeded"),
     }
     if row is None:
         # sc-003: when no row is found basis is still fully populated, with
@@ -1612,6 +1618,9 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
         blocked_by = "external_surface_path"
     elif global_disabled:
         blocked_by = "global_policy"
+    # AC-11c: 7th ceiling — evaluated only when blocked_by is still None.
+    elif basis["spawn_budget_paused"]:
+        blocked_by = "spawn_budget_paused"
 
     decision = "blocked" if blocked_by is not None else "auto"
 
@@ -1640,6 +1649,14 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
     # *reason* the veto blocked, not a reason to refuse the decision.
     try:
         _persist_classification(task_dir, classification)
+        # AC-11c: _persist_classification re-reads manifest from disk and
+        # writes it back, which would overwrite the in-memory
+        # auto_approve_gates=False mutation set above. Patch the on-disk
+        # manifest a second time to preserve the downgrade.
+        if blocked_by is not None:
+            persisted = _load_manifest(task_dir)
+            persisted["auto_approve_gates"] = False
+            write_json(manifest_path, persisted)
     except Exception as _persist_exc:
         try:
             write_json(manifest_path, manifest)
@@ -1658,6 +1675,290 @@ def cmd_apply_auto_approve_veto(args: argparse.Namespace) -> int:
         "decision": decision,
         "blocked_by": blocked_by,
     }))
+    return 0
+
+
+def _collect_ensemble_auditors(plan: object) -> set:
+    """Permissively collect auditor names marked ensemble:true from audit-plan.json.
+
+    Handles two common shapes:
+      - plan["auditors"] as list of dicts with "name" and "ensemble" fields
+      - top-level dict keyed by auditor name with "ensemble" field
+
+    Returns a set of auditor name strings. If the plan has no recognised
+    shape, returns an empty set (no dedup applied).
+    """
+    result: set[str] = set()
+    if not isinstance(plan, dict):
+        return result
+    # Shape 1: plan["auditors"] as list of dicts
+    auds = plan.get("auditors")
+    if isinstance(auds, list):
+        for a in auds:
+            if isinstance(a, dict) and a.get("ensemble") is True:
+                name = a.get("name")
+                if isinstance(name, str):
+                    result.add(name)
+    # Shape 2: top-level dict keyed by auditor name
+    for k, v in plan.items():
+        if isinstance(v, dict) and v.get("ensemble") is True:
+            result.add(k)
+    return result
+
+
+def cmd_check_spawn_budget(args: argparse.Namespace) -> int:
+    """Check whether the current task has exhausted its wasted-spawn budget.
+
+    Reads spawn-budget-policy.json from the persistent project dir, counts
+    wasted (empty-findings) audit reports with ensemble-cascade dedup, and
+    either emits status "ok" / "paused" / "already_paused" to stdout as
+    single-line JSON (exit 0), or exits 1 when manifest.json is missing.
+
+    stdout: {"status": "ok"|"paused"|"already_paused", "count": <int>,
+             "threshold": <int>, "exempt_count": <int>, "task_class": "<str>"}
+    """
+    from lib_core import _persistent_project_dir  # noqa: PLC0415
+
+    task_dir = Path(args.task_dir).resolve()
+
+    # AC-8: missing manifest.json -> exit 1 with clear stderr.
+    manifest_path = task_dir / "manifest.json"
+    if not manifest_path.is_file():
+        print(
+            f"check-spawn-budget: manifest.json missing at {manifest_path}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        manifest = load_json(manifest_path)
+    except Exception as exc:
+        print(
+            f"check-spawn-budget: failed to read manifest.json: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(manifest, dict):
+        print(
+            "check-spawn-budget: manifest.json must be a JSON object",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-8a: read spawn-budget-policy.json; missing/unreadable -> global fallback.
+    policy_path = _persistent_project_dir(Path.cwd()) / "spawn-budget-policy.json"
+    policy: dict = {}
+    try:
+        raw_policy = load_json(policy_path)
+        if isinstance(raw_policy, dict):
+            policy = raw_policy
+    except Exception:
+        policy = {}
+
+    # AC-1: schema places threshold under policy["global_fallback"]["threshold_count"]
+    # (matching what _build_spawn_budget_policy_data writes in memory/policy_engine.py).
+    # Reading the top-level key would silently always fall to the hardcoded literal 2.
+    gf = policy.get("global_fallback")
+    gf_threshold_raw = gf.get("threshold_count") if isinstance(gf, dict) else None
+    global_fallback_threshold: int = (
+        int(gf_threshold_raw) if isinstance(gf_threshold_raw, int) else 2
+    )
+    per_task_class: dict = {}
+    ptc = policy.get("per_task_class")
+    if isinstance(ptc, dict):
+        per_task_class = ptc
+
+    exempt_auditors: set[str] = set()
+    ea = policy.get("exempt_auditors")
+    if isinstance(ea, list):
+        for name in ea:
+            if isinstance(name, str):
+                exempt_auditors.add(name)
+
+    # AC-8b: extract task_class from manifest.classification. Note that
+    # manifest.classification uses "type" (matching lib_validate.py:308 and
+    # ctl.py:2798) while retrospectives use "task_type" — so the policy
+    # file's per_task_class keys (built from retrospective["task_type"])
+    # share the same string value as manifest classification["type"]
+    # (e.g. both yield "feature"). We accept "task_type" too for forward
+    # compat in case the spec wording becomes the canonical key later.
+    classification = manifest.get("classification") or {}
+    if isinstance(classification, dict):
+        task_type = classification.get("type") or classification.get("task_type")
+    else:
+        task_type = None
+    risk_level = classification.get("risk_level") if isinstance(classification, dict) else None
+    if isinstance(task_type, str) and task_type and isinstance(risk_level, str) and risk_level:
+        task_class = f"{task_type}:{risk_level}"
+    else:
+        task_class = "unknown:unknown"
+
+    # AC-8c: per-task-class threshold lookup.
+    task_class_policy = per_task_class.get(task_class)
+    if isinstance(task_class_policy, dict) and isinstance(task_class_policy.get("threshold_count"), int):
+        threshold: int = task_class_policy["threshold_count"]
+    else:
+        threshold = global_fallback_threshold
+
+    # AC-9: ensemble-cascade dedup — read audit-plan.json permissively.
+    ensemble_set: set[str] = set()
+    audit_plan_path = task_dir / "audit-plan.json"
+    try:
+        plan_raw = load_json(audit_plan_path)
+        ensemble_set = _collect_ensemble_auditors(plan_raw)
+    except Exception:
+        ensemble_set = set()
+
+    # Collect all audit reports from audit-reports/*.json.
+    # Each report dict must have "auditor" (str) and "findings" (list).
+    reports_dir = task_dir / "audit-reports"
+    # list of (auditor, findings, is_wasted, path, mtime)
+    all_reports: list[tuple[str, list, bool, Path, float]] = []
+    if reports_dir.is_dir():
+        for report_path in reports_dir.glob("*.json"):
+            try:
+                data = load_json(report_path)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            auditor = data.get("auditor")
+            findings = data.get("findings")
+            if not isinstance(auditor, str) or not isinstance(findings, list):
+                continue
+            is_wasted = (findings == [])
+            try:
+                mtime = report_path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            all_reports.append((auditor, findings, is_wasted, report_path, mtime))
+
+    # AC-9: apply ensemble dedup — for ensemble auditors, keep only the
+    # report with the greatest mtime; tie-break by filename descending.
+    # Group by auditor for ensemble members.
+    ensemble_by_auditor: dict[str, list[tuple[str, list, bool, Path, float]]] = {}
+    surviving_reports: list[tuple[str, list, bool, Path, float]] = []
+    for entry in all_reports:
+        auditor = entry[0]
+        if auditor in ensemble_set:
+            ensemble_by_auditor.setdefault(auditor, []).append(entry)
+        else:
+            # Non-ensemble auditors always survive.
+            surviving_reports.append(entry)
+
+    for auditor, entries in ensemble_by_auditor.items():
+        # Keep entry with greatest mtime; tie-break: filename descending.
+        best = max(entries, key=lambda e: (e[4], e[3].name))
+        surviving_reports.append(best)
+
+    # AC-8d/e: count wasted-and-not-exempt (count) and wasted-and-exempt (exempt_count).
+    count: int = 0
+    exempt_count: int = 0
+    contributing_auditors: set[str] = set()
+    for auditor, _findings, is_wasted, _path, _mtime in surviving_reports:
+        if not is_wasted:
+            continue
+        if auditor in exempt_auditors:
+            exempt_count += 1
+        else:
+            count += 1
+            contributing_auditors.add(auditor)
+
+    # AC-8h: already_paused branch — no mutation, no receipt.
+    if manifest.get("blocked_reason") == "wasted_spawns_exceeded":
+        print(json.dumps({
+            "status": "already_paused",
+            "count": count,
+            "threshold": threshold,
+            "exempt_count": exempt_count,
+            "task_class": task_class,
+        }))
+        return 0
+
+    # AC-8g: count >= threshold and not already paused -> write receipt + set blocked_reason.
+    if count >= threshold:
+        receipt_spawn_budget_paused(
+            task_dir,
+            count=count,
+            threshold=threshold,
+            exempt_count=exempt_count,
+            task_class=task_class,
+            contributing_auditors=sorted(contributing_auditors),
+        )
+        manifest["blocked_reason"] = "wasted_spawns_exceeded"
+        write_json(manifest_path, manifest)
+        print(json.dumps({
+            "status": "paused",
+            "count": count,
+            "threshold": threshold,
+            "exempt_count": exempt_count,
+            "task_class": task_class,
+        }))
+        return 0
+
+    # AC-8i: count < threshold -> status ok.
+    print(json.dumps({
+        "status": "ok",
+        "count": count,
+        "threshold": threshold,
+        "exempt_count": exempt_count,
+        "task_class": task_class,
+    }))
+    return 0
+
+
+def cmd_spawn_resume(args: argparse.Namespace) -> int:
+    """Clear a wasted_spawns_exceeded pause from a task manifest.
+
+    Validates --reason is at least 20 chars (stripped), then clears
+    manifest.blocked_reason and writes the spawn-budget-resumed receipt.
+
+    stdout: {"status": "resumed"} or {"status": "already_resumed"} (exit 0).
+    Exits 1 when --reason is too short, with no manifest mutation.
+    """
+    task_dir = Path(args.task_dir).resolve()
+
+    # AC-10a: validate --reason length before any manifest I/O.
+    reason_stripped = args.reason.strip()
+    if len(reason_stripped) < 20:
+        print(
+            f"spawn-resume: --reason must be at least 20 characters (got {len(reason_stripped)})",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-10b: read manifest.json.
+    manifest_path = task_dir / "manifest.json"
+    if not manifest_path.is_file():
+        print(
+            f"spawn-resume: manifest.json missing at {manifest_path}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        manifest = load_json(manifest_path)
+    except Exception as exc:
+        print(
+            f"spawn-resume: failed to read manifest.json: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(manifest, dict):
+        print(
+            "spawn-resume: manifest.json must be a JSON object",
+            file=sys.stderr,
+        )
+        return 1
+
+    # AC-10c: not currently paused -> already_resumed, no mutation.
+    if manifest.get("blocked_reason") != "wasted_spawns_exceeded":
+        print(json.dumps({"status": "already_resumed"}))
+        return 0
+
+    # AC-10d: clear blocked_reason, write manifest, write receipt.
+    manifest["blocked_reason"] = None
+    write_json(manifest_path, manifest)
+    receipt_spawn_budget_resumed(task_dir, reason=args.reason)
+    print(json.dumps({"status": "resumed"}))
     return 0
 
 
@@ -5473,6 +5774,38 @@ def register_task_lifecycle_parsers(subparsers: argparse._SubParsersAction) -> N
         help="Path to .dynos/task-<id> directory whose classification will receive the veto.",
     )
     apply_auto_approve_veto_parser.set_defaults(func=cmd_apply_auto_approve_veto)
+
+    check_spawn_budget_parser = subparsers.add_parser(
+        "check-spawn-budget",
+        help=(
+            "Check whether the current task has exhausted its wasted-spawn budget. "
+            "Reads spawn-budget-policy.json, counts wasted audit reports (empty findings), "
+            "and emits status ok/paused/already_paused as single-line JSON."
+        ),
+    )
+    check_spawn_budget_parser.add_argument(
+        "task_dir",
+        help="Path to .dynos/task-<id> directory to evaluate.",
+    )
+    check_spawn_budget_parser.set_defaults(func=cmd_check_spawn_budget)
+
+    spawn_resume_parser = subparsers.add_parser(
+        "spawn-resume",
+        help=(
+            "Clear a wasted_spawns_exceeded pause from a task manifest. "
+            "Requires --reason of at least 20 characters."
+        ),
+    )
+    spawn_resume_parser.add_argument(
+        "task_dir",
+        help="Path to .dynos/task-<id> directory whose pause will be cleared.",
+    )
+    spawn_resume_parser.add_argument(
+        "--reason",
+        required=True,
+        help="Human-readable rationale for resuming (must be at least 20 characters).",
+    )
+    spawn_resume_parser.set_defaults(func=cmd_spawn_resume)
 
     amend_artifact_parser = subparsers.add_parser(
         "amend-artifact",
