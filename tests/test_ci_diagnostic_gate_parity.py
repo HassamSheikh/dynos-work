@@ -86,7 +86,10 @@ def _full_done_chain(td: Path) -> None:
     receipt_retrospective(td)
     receipt_post_completion(td, [])
     receipt_calibration_applied(td, 0, 0, "a" * 64, "b" * 64)
-    pm = td / "postmortem.json"
+    from lib_core import _persistent_project_dir  # noqa: PLC0415 (local import inside helper)
+    postmortems_dir = _persistent_project_dir(td.parent.parent) / "postmortems"
+    postmortems_dir.mkdir(parents=True, exist_ok=True)
+    pm = postmortems_dir / f"{td.name}.json"
     pm.write_text('{"anomalies": [], "recurring_patterns": []}')
     receipt_postmortem_generated(td, pm)
     receipt_postmortem_skipped(td, "no-findings", "f" * 64, subsumed_by=[])
