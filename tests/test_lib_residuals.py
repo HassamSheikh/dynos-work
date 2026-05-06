@@ -915,3 +915,120 @@ def test_ingest_prevention_rules_skips_malformed(tmp_path: Path):
         _make_rule(rule="Valid rule", enforcement="lint"),
     ]
     assert lib_residuals.ingest_prevention_rules(root, rules) == 1
+
+
+# ---------------------------------------------------------------------------
+# select_next_pending — depends_on dependency gating
+# ---------------------------------------------------------------------------
+
+
+def _make_dep_row(row_id, *, status="pending", attempts=0, depends_on=None,
+                  created_at="2026-05-06T20:00:00Z"):
+    return {
+        "id": row_id,
+        "kind": "residual",
+        "fingerprint": f"fp-{row_id}",
+        "created_at": created_at,
+        "source_task_id": "",
+        "source_auditor": "test",
+        "title": f"row {row_id}",
+        "description": f"desc {row_id}",
+        "location": "",
+        "status": status,
+        "attempts": attempts,
+        "last_attempt_at": None,
+        "depends_on": depends_on if depends_on is not None else [],
+    }
+
+
+def _write_queue(root, rows):
+    qp = queue_path(root)
+    qp.parent.mkdir(parents=True, exist_ok=True)
+    qp.write_text(json.dumps({"findings": rows}, indent=2), encoding="utf-8")
+
+
+def test_select_skips_row_with_unsatisfied_dependency(tmp_path: Path):
+    """A pending row whose dep is still pending must not be selected."""
+    root = tmp_path
+    _write_queue(root, [
+        _make_dep_row("A", created_at="2026-05-06T20:00:00Z"),
+        _make_dep_row("B", depends_on=["A"], created_at="2026-05-06T20:01:00Z"),
+    ])
+    nxt = select_next_pending(root)
+    assert nxt is not None
+    assert nxt["id"] == "A", "A must be selected first; B blocked on A"
+
+
+def test_select_unblocks_dependent_after_dep_done(tmp_path: Path):
+    """After dep is marked done, the dependent row becomes selectable."""
+    root = tmp_path
+    _write_queue(root, [
+        _make_dep_row("A", status="done", created_at="2026-05-06T20:00:00Z"),
+        _make_dep_row("B", depends_on=["A"], created_at="2026-05-06T20:01:00Z"),
+    ])
+    nxt = select_next_pending(root)
+    assert nxt is not None
+    assert nxt["id"] == "B"
+
+
+def test_select_chain_dependency(tmp_path: Path):
+    """Phase 1 → Phase 2 → Phase 3 chain: each unblocks the next."""
+    root = tmp_path
+    rows = [
+        _make_dep_row("p1", created_at="2026-05-06T20:00:00Z"),
+        _make_dep_row("p2", depends_on=["p1"], created_at="2026-05-06T20:01:00Z"),
+        _make_dep_row("p3", depends_on=["p1", "p2"], created_at="2026-05-06T20:02:00Z"),
+    ]
+    _write_queue(root, rows)
+    # All pending → only p1 selectable
+    assert select_next_pending(root)["id"] == "p1"
+    # Mark p1 done → p2 unblocks
+    rows[0]["status"] = "done"
+    _write_queue(root, rows)
+    assert select_next_pending(root)["id"] == "p2"
+    # Mark p2 done → p3 unblocks
+    rows[1]["status"] = "done"
+    _write_queue(root, rows)
+    assert select_next_pending(root)["id"] == "p3"
+
+
+def test_select_dep_failed_blocks_dependent(tmp_path: Path):
+    """A dep with status='failed' (not 'done') keeps the dependent blocked."""
+    root = tmp_path
+    _write_queue(root, [
+        _make_dep_row("A", status="failed", created_at="2026-05-06T20:00:00Z"),
+        _make_dep_row("B", depends_on=["A"], created_at="2026-05-06T20:01:00Z"),
+    ])
+    assert select_next_pending(root) is None, "B blocked because A failed (not done)"
+
+
+def test_select_missing_dep_id_blocks(tmp_path: Path):
+    """A typoed dep id (no matching row) blocks the dependent — fail-closed."""
+    root = tmp_path
+    _write_queue(root, [
+        _make_dep_row("B", depends_on=["NONEXISTENT-ID"],
+                       created_at="2026-05-06T20:00:00Z"),
+    ])
+    assert select_next_pending(root) is None
+
+
+def test_select_empty_depends_on_unconstrained(tmp_path: Path):
+    """An empty depends_on list (or absent) is unconstrained — backward-compat."""
+    root = tmp_path
+    _write_queue(root, [
+        _make_dep_row("A", depends_on=[], created_at="2026-05-06T20:00:00Z"),
+    ])
+    nxt = select_next_pending(root)
+    assert nxt is not None
+    assert nxt["id"] == "A"
+
+
+def test_select_legacy_row_without_depends_on_field(tmp_path: Path):
+    """Rows written before this feature (no depends_on field at all) work unchanged."""
+    root = tmp_path
+    legacy_row = _make_dep_row("legacy", created_at="2026-05-06T20:00:00Z")
+    del legacy_row["depends_on"]
+    _write_queue(root, [legacy_row])
+    nxt = select_next_pending(root)
+    assert nxt is not None
+    assert nxt["id"] == "legacy"

@@ -149,19 +149,50 @@ def extract_residual_id(raw_input_text: str) -> Optional[str]:
 def select_next_pending(root: Path) -> Optional[dict]:
     """Return the oldest eligible pending row, or ``None``.
 
-    Eligibility: ``status == "pending"`` AND ``attempts < 3``. Ordering is
-    by ``created_at`` ascending (lexicographic on the ISO-8601 string).
-    Missing queue file returns ``None`` without raising.
+    Eligibility:
+      - ``status == "pending"``
+      - ``attempts < 3``
+      - every entry in optional ``depends_on`` (list of residual ids)
+        resolves to a row whose ``status == "done"`` in the same queue.
+        Missing dependency ids are treated as unsatisfied (a typoed dep
+        blocks selection — fail-closed). An empty / absent ``depends_on``
+        list is unconstrained (backward-compatible default).
+
+    Ordering is by ``created_at`` ascending (lexicographic on the ISO-8601
+    string). Missing queue file returns ``None`` without raising.
     """
     qp = queue_path(root)
     q = load_queue(qp)
+    findings = q.get("findings", [])
+
+    # Index ids → status for dependency resolution.
+    status_by_id: dict[str, str] = {}
+    for row in findings:
+        if isinstance(row, dict):
+            rid = row.get("id")
+            st = row.get("status")
+            if isinstance(rid, str) and isinstance(st, str):
+                status_by_id[rid] = st
+
+    def _deps_satisfied(row: dict) -> bool:
+        deps = row.get("depends_on")
+        if not isinstance(deps, list) or not deps:
+            return True
+        for dep_id in deps:
+            if not isinstance(dep_id, str):
+                return False  # malformed dep entry blocks selection
+            if status_by_id.get(dep_id) != "done":
+                return False
+        return True
+
     eligible = [
         row
-        for row in q.get("findings", [])
+        for row in findings
         if isinstance(row, dict)
         and row.get("status") == "pending"
         and isinstance(row.get("attempts"), int)
         and row.get("attempts", 0) < 3
+        and _deps_satisfied(row)
     ]
     if not eligible:
         return None
