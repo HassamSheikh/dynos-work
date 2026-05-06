@@ -586,7 +586,7 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 
    Exit code 0 means the receipt was written and the stage advanced. Exit code 1 means the gate refused — the stderr text identifies the cause. Do not bypass with `transition --force`. (If step 6's auto-approval already advanced the stage, this human-path call is unreachable.)
 
-8. Commit the approved tests to the snapshot branch before any production code is written.
+8. Commit the approved tests to the snapshot branch before any production code is written. **The commit message MUST start with `tdd:`** (e.g. `tdd: PRO-XYZ test suite (RED)`). This is a load-bearing convention, not just a style hint: `ctl record-snapshot` in the execute skill detects HEAD's commit message and rewinds the recorded snapshot SHA to `HEAD^` when the message starts with `tdd:`. Without that rewind, the TDD-committed test files end up AT the snapshot SHA, never appear in `git diff <snapshot>`, and break `run-execution-segment-done`'s coverage check for the test segment. Other commit-message prefixes (`feat:`, `fix:`, `refactor:`, etc.) suppress the rewind.
 
 ---
 

@@ -930,6 +930,108 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_rejected(args: argparse.Namespace) -> int:
+    """Walk every `.dynos/task-*/postmortem-analysis.json` under --root,
+    find rules that were rejected by the old `_validate_rule_schema`
+    (missing `template` field but otherwise valid), apply the
+    default-to-advisory fallback now baked into the validator, and
+    merge them into `prevention-rules.json` if novel.
+
+    Dedup criterion: (executor, category, rule[:200]). Rules already in
+    prevention-rules.json under that key are skipped. Rules already
+    accepted at original-apply-time (template was set) are skipped
+    because re-merging them would be a no-op.
+    """
+    from pathlib import Path as _Path
+    from lib_core import _persistent_project_dir  # noqa: PLC0415
+
+    root = _Path(args.root).resolve()
+    persistent = _persistent_project_dir(root)
+    rules_path = persistent / "prevention-rules.json"
+
+    # Collect candidate rules from every task's saved analysis.
+    candidates: list[dict] = []
+    by_task: dict[str, int] = {}
+    task_dirs = sorted((root / ".dynos").glob("task-*"))
+    for td in task_dirs:
+        analysis_path = td / "postmortem-analysis.json"
+        if not analysis_path.is_file():
+            continue
+        try:
+            analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        rules = analysis.get("prevention_rules") if isinstance(analysis, dict) else None
+        if not isinstance(rules, list):
+            continue
+        salvaged = 0
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            if "template" in rule and rule["template"] is not None:
+                continue  # Was already accepted on original apply.
+            if not (isinstance(rule.get("rule"), str) and rule["rule"].strip()):
+                continue  # No rule text — schema would reject anyway.
+            # Build a fresh dict to avoid mutating the on-disk file.
+            candidate = dict(rule)
+            candidate["template"] = "advisory"
+            candidate.setdefault("source_task", td.name)
+            candidates.append(candidate)
+            salvaged += 1
+        if salvaged:
+            by_task[td.name] = salvaged
+
+    # Load existing rules + dedup key set.
+    if rules_path.is_file():
+        try:
+            existing_doc = json.loads(rules_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing_doc = {"rules": []}
+    else:
+        existing_doc = {"rules": []}
+    existing_rules = existing_doc.get("rules") if isinstance(existing_doc, dict) else None
+    if not isinstance(existing_rules, list):
+        existing_rules = []
+        existing_doc = {"rules": existing_rules}
+
+    def _dedup_key(r: dict) -> tuple[str, str, str]:
+        return (
+            str(r.get("executor", "")).strip(),
+            str(r.get("category", "")).strip(),
+            str(r.get("rule", "")).strip()[:200],
+        )
+
+    existing_keys = {_dedup_key(r) for r in existing_rules if isinstance(r, dict)}
+
+    novel: list[dict] = []
+    for cand in candidates:
+        key = _dedup_key(cand)
+        if key in existing_keys:
+            continue
+        novel.append(cand)
+        existing_keys.add(key)
+
+    result = {
+        "scanned_tasks": len(task_dirs),
+        "tasks_with_salvageable_rules": len(by_task),
+        "candidate_rules": len(candidates),
+        "novel_rules": len(novel),
+        "by_task": by_task,
+        "rules_path": str(rules_path),
+        "dry_run": bool(args.dry_run),
+    }
+    if not novel or args.dry_run:
+        print(json.dumps(result, indent=2))
+        return 0
+
+    existing_rules.extend(novel)
+    existing_doc["rules"] = existing_rules
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    rules_path.write_text(json.dumps(existing_doc, indent=2), encoding="utf-8")
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -941,6 +1043,23 @@ def build_parser() -> argparse.ArgumentParser:
     ap = sub.add_parser("apply", help="Apply LLM analysis output (reads JSON from stdin)")
     ap.add_argument("task_dir")
     ap.set_defaults(func=cmd_apply)
+
+    bf = sub.add_parser(
+        "backfill-rejected",
+        help=(
+            "Walk every task's postmortem-analysis.json and merge rules "
+            "that were rejected by the old missing-template check into "
+            "prevention-rules.json (post-PR#163 fix that accepts default "
+            "advisory template). Novel rules only; existing rules are "
+            "preserved verbatim."
+        ),
+    )
+    bf.add_argument("--root", default=".", help="Repo root (default: cwd)")
+    bf.add_argument(
+        "--dry-run", action="store_true",
+        help="Report counts without writing prevention-rules.json",
+    )
+    bf.set_defaults(func=cmd_backfill_rejected)
 
     return parser
 

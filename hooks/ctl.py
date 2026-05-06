@@ -2804,12 +2804,12 @@ def cmd_record_snapshot(args: argparse.Namespace) -> int:
     if not explicit_head and head_sha:
         try:
             msg = _sub.run(
-                ["git", "-C", str(root), "log", "-1", "--format=%s", head_sha],
+                [_GIT or "git", "-C", str(root), "log", "-1", "--format=%s", head_sha],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             if msg.returncode == 0 and msg.stdout.strip().lower().startswith("tdd:"):
                 parent = _sub.run(
-                    ["git", "-C", str(root), "rev-parse", f"{head_sha}^"],
+                    [_GIT or "git", "-C", str(root), "rev-parse", f"{head_sha}^"],
                     capture_output=True, text=True, timeout=10, check=False,
                 )
                 if parent.returncode == 0:
