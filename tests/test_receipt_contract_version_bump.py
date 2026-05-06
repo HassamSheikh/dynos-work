@@ -73,7 +73,12 @@ def _exercise_writer(name: str, td: Path, tmp_path: Path | None = None):
         "## Dependency Graph\n\nt\n## Open Questions\n\nt\n"
     )
     (td / "execution-graph.json").write_text('{"task_id":"test","segments":[]}')
-    pm_json = td / "postmortem.json"
+    # task-20260506-003 (SEC-001): postmortem JSON must live under
+    # _persistent_project_dir(root) / "postmortems" to satisfy the bounds-check.
+    from lib_core import _persistent_project_dir
+    pm_dir = _persistent_project_dir(td.parent.parent) / "postmortems"
+    pm_dir.mkdir(parents=True, exist_ok=True)
+    pm_json = pm_dir / f"{td.name}.json"
     pm_json.write_text('{"anomalies":[],"recurring_patterns":[]}')
 
     if name == "receipt_human_approval":
