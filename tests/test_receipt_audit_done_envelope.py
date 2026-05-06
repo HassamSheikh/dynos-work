@@ -354,3 +354,167 @@ def test_non_integer_counts_raise(tmp_path: Path):
             injected_agent_sha256=digest,
             final_envelope=envelope,
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 10-12: SEC-002 information-disclosure regression — exception messages
+# must NOT echo the ground-truth actual_finding_count / actual_blocking_count
+# values. The audit_envelope_mismatch event records both for forensic review;
+# exception text propagated to stderr where a hostile orchestrator could read
+# it back to discover the true counts and reconstruct a passing forged
+# envelope.
+#
+# Closes residual efffb867 (postmortem-analysis from PR #167's audit cycle):
+# "Validation errors must not interpolate ground-truth counts or raw
+# report_path into messages."
+#
+# These tests are the regression seal on hooks/receipts/stage.py:724-729
+# (SEC-002 hardening). The implementation already prevents disclosure;
+# these tests lock the no-echo behavior so a future code change cannot
+# silently re-introduce the leak.
+# ---------------------------------------------------------------------------
+
+
+def test_envelope_findings_count_mismatch_does_not_disclose_actual_count(tmp_path: Path):
+    """SEC-002 regression: exception message must not contain the on-disk findings count."""
+    td = _make_task(tmp_path)
+    # 7 findings on disk — a distinctive number that won't collide with
+    # other contents of the exception message.
+    findings = [{"id": f"F-{i}", "blocking": False} for i in range(7)]
+    report = _write_report(td, findings)
+    digest = "e" * 64
+    _write_sidecar(td, "security-auditor", "haiku", digest)
+
+    envelope = json.dumps({
+        "report_path": str(report),
+        "findings_count": 5,   # caller-supplied wrong; on-disk is 7
+        "blocking_count": 0,
+    })
+
+    with pytest.raises(ValueError) as excinfo:
+        receipt_audit_done(
+            td, "security-auditor", "haiku", 7, 0, str(report), 100,
+            route_mode="replace",
+            agent_path="learned/security-auditor.md",
+            injected_agent_sha256=digest,
+            final_envelope=envelope,
+        )
+
+    msg = str(excinfo.value)
+    # The on-disk count (7) and the caller-supplied count (5) must NOT
+    # appear in the exception message. This is the disclosure-prevention
+    # invariant. Use distinctive numbers + word-boundary matching to
+    # avoid false-positives on incidental digits.
+    import re
+    assert not re.search(r"\b7\b", msg), (
+        f"SEC-002 regression: exception message echoed actual_finding_count=7. "
+        f"Message: {msg!r}"
+    )
+    assert not re.search(r"\b5\b", msg), (
+        f"SEC-002 regression: exception message echoed env_findings_count=5. "
+        f"Message: {msg!r}"
+    )
+    # Sanity: the message MUST mention the structured event for forensic review.
+    assert "audit_envelope_mismatch" in msg, (
+        f"Exception message must point to audit_envelope_mismatch event for "
+        f"forensic review. Message: {msg!r}"
+    )
+
+
+def test_envelope_blocking_count_mismatch_does_not_disclose_actual_count(tmp_path: Path):
+    """SEC-002 regression: exception message must not contain the on-disk blocking count."""
+    td = _make_task(tmp_path)
+    # 4 blocking findings on disk — distinctive.
+    findings = [{"id": f"F-{i}", "blocking": True} for i in range(4)]
+    findings.extend([{"id": "F-NB", "blocking": False}])
+    report = _write_report(td, findings)
+    digest = "f" * 64
+    _write_sidecar(td, "security-auditor", "haiku", digest)
+
+    envelope = json.dumps({
+        "report_path": str(report),
+        "findings_count": 5,   # matches on-disk (5 total), so this passes
+        "blocking_count": 1,   # wrong; on-disk has 4
+    })
+
+    with pytest.raises(ValueError) as excinfo:
+        receipt_audit_done(
+            td, "security-auditor", "haiku", 5, 4, str(report), 100,
+            route_mode="replace",
+            agent_path="learned/security-auditor.md",
+            injected_agent_sha256=digest,
+            final_envelope=envelope,
+        )
+
+    msg = str(excinfo.value)
+    # Both counts must NOT appear. (5 is the agreed findings_count; only
+    # blocking_count is mismatched. Test focuses on blocking_count disclosure.)
+    import re
+    assert not re.search(r"\b4\b", msg), (
+        f"SEC-002 regression: exception message echoed actual_blocking_count=4. "
+        f"Message: {msg!r}"
+    )
+    assert not re.search(r"\b1\b", msg), (
+        f"SEC-002 regression: exception message echoed env_blocking_count=1. "
+        f"Message: {msg!r}"
+    )
+    assert "audit_envelope_mismatch" in msg, (
+        f"Exception message must point to audit_envelope_mismatch event. "
+        f"Message: {msg!r}"
+    )
+
+
+def test_envelope_mismatch_message_does_not_contain_raw_report_path_traversal(tmp_path: Path):
+    """SEC-002 regression: when the envelope's report_path contains a
+    traversal-style suffix, the exception message must not pass that
+    suffix through verbatim. The path-traversal guard at stage.py:735-743
+    rejects out-of-task paths up front; this test confirms a within-task
+    mismatch doesn't leak the raw envelope-supplied path either.
+
+    Note: the existing path-mismatch raise at line 740 DOES include the
+    rejected path because it must — that's the diagnostic for a path
+    traversal attempt and it's NOT echoing ground-truth counts. This test
+    is scoped to the COUNT mismatch raises (lines 772-776, 786-790) which
+    must not include either the report_path or the counts.
+    """
+    td = _make_task(tmp_path)
+    findings = [{"id": "F-1", "blocking": False}]
+    report = _write_report(td, findings)
+    digest = "1" * 64
+    _write_sidecar(td, "security-auditor", "haiku", digest)
+
+    envelope = json.dumps({
+        "report_path": str(report),
+        "findings_count": 99,  # distinctive wrong value
+        "blocking_count": 0,
+    })
+
+    with pytest.raises(ValueError) as excinfo:
+        receipt_audit_done(
+            td, "security-auditor", "haiku", 1, 0, str(report), 100,
+            route_mode="replace",
+            agent_path="learned/security-auditor.md",
+            injected_agent_sha256=digest,
+            final_envelope=envelope,
+        )
+
+    msg = str(excinfo.value)
+    # The count-mismatch raise (lines 772-776 in stage.py) must not
+    # interpolate the raw report_path verbatim. Auditor name is allowed
+    # (it's caller-supplied trust boundary, not ground-truth from disk).
+    import re
+    assert not re.search(r"\b99\b", msg), (
+        f"SEC-002 regression: exception message echoed env_findings_count=99. "
+        f"Message: {msg!r}"
+    )
+    assert not re.search(r"\b1\b", msg), (
+        f"SEC-002 regression: exception message echoed actual_finding_count=1. "
+        f"Message: {msg!r}"
+    )
+    # Defensive: full str(report) is too noisy a signal — the fixture may
+    # share path components with the message structurally. The structured
+    # event is the canonical channel for this data.
+    assert "audit_envelope_mismatch" in msg, (
+        f"Exception message must direct reader to audit_envelope_mismatch event. "
+        f"Message: {msg!r}"
+    )
