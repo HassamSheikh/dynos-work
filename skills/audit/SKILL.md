@@ -146,6 +146,22 @@ The role string strips the `-auditor` suffix from the agent file name: `spec-com
 
 When auditors run in parallel, the role file is overwritten on each stamp; this is fine because each subagent reads the file at its own first tool call within its own session. The post-spawn cleanup (delete `active-segment-role`) happens after the entire audit batch, not per auditor.
 
+**Spawn budget check (MANDATORY — BEFORE every batch):**
+
+Before issuing each parallel auditor batch (this includes the first batch AND every subsequent re-audit batch — the check runs once per spawn cycle, before EACH batch, not only the first), run:
+
+```bash
+python3 hooks/ctl.py check-spawn-budget .dynos/task-{id}
+```
+
+Parse the JSON output. The command emits a single-line JSON object with keys `status`, `count`, `threshold`, `exempt_count`, and `task_class`. If `status` is `'paused'` or `'already_paused'`:
+
+1. Write `escalation.md` in the task directory containing the full JSON output and a human-readable explanation that the spawn budget was exceeded — name the auditor count, the threshold, the `task_class`, and instruct the operator to run `python3 hooks/ctl.py spawn-resume .dynos/task-{id} --reason "<≥20-char rationale>"` after diagnosing why spawns were wasted.
+2. Append a line beginning with `[BUDGET-PAUSE]` to `execution-log.md` that records the timestamp, count, and threshold.
+3. Exit non-zero.
+
+Do not proceed with spawning auditors. The pause is intentional — the policy is calibrated from this project's retrospective history, and the wasted-spawn count has crossed the learned threshold.
+
 Spawn the determined auditors simultaneously, passing the resolved model for each auditor in the subagent spawn configuration. For alongside-mode auditors, this means two spawns for that role (generic + learned), both counted in {N}.
 
 Each auditor writes its own report to `.dynos/task-{id}/audit-reports/{auditor}-checkpoint-{timestamp}.json`. Every auditor agent has a write capability sufficient for this: auditors with `Bash` use a heredoc; `spec-completion-auditor` has the `Write` tool scoped via `write_policy.py` to its own report path. The role file stamped above is what unlocks the `audit-reports/` write rule for these subagents.

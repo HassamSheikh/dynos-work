@@ -6,6 +6,8 @@ import sys as _sys; _sys.path.insert(0, str(__import__("pathlib").Path(__file__)
 
 import argparse
 import json
+import math
+import statistics
 from pathlib import Path
 
 from lib_core import collect_retrospectives, now_iso, _persistent_project_dir, load_json, write_json, VALID_EXECUTORS
@@ -668,17 +670,172 @@ def _migrate_model_overrides(root: Path, model_policy_data: dict[str, dict]) -> 
     return merged
 
 
+def _build_spawn_budget_policy_data(retrospectives: list[dict]) -> dict:
+    """Compute spawn-budget policy data from task retrospectives.
+
+    Returns a dict matching this exact schema:
+
+        {
+          "version": 1,
+          "computed_at": "<ISO 8601 UTC string>",
+          "per_task_class": {
+            "<task_type>:<risk_level>": {
+              "waste_count_baseline": <float>,
+              "waste_count_stddev": <float>,
+              "n_observations": <int>,
+              "threshold_count": <int>
+            }
+          },
+          "global_fallback": {"threshold_count": 2},
+          "exempt_auditors": ["<auditor_name>", ...]
+        }
+
+    Aggregation rules (AC-2 / AC-3):
+
+    * The ``wasted_spawns`` field is sourced from each retrospective dict
+      (top-level field). Source-of-truth: ``task-retrospective.json``
+      schema, top-level ``wasted_spawns`` (int|float). Missing or
+      non-numeric values are coerced to ``0``.
+    * Retrospectives missing ``task_type`` or ``risk_level`` are SKIPPED
+      entirely — no ``unknown:unknown`` aggregation is performed.
+    * Observations are grouped by ``f"{task_type}:{risk_level}"``.
+    * A ``per_task_class`` entry is emitted only when ``n_observations
+      >= 3``. Classes with fewer observations are omitted.
+    * ``baseline = statistics.mean(values)``. ``stddev =
+      statistics.stdev(values)`` (sample stddev, requires n>=2). For
+      n==1 the stddev is forced to ``0.0``. n>=3 with all-identical
+      observations yields ``stddev == 0.0`` and
+      ``threshold_count = max(2, ceil(baseline))``.
+    * ``threshold_count = max(2, min(10, math.ceil(baseline + 2 *
+      stddev)))`` — capped to the inclusive range [2, 10].
+
+    Exempt-auditor rules (AC-4):
+
+    * For each task (keyed by ``task_id``), select the most-recent
+      retrospective by ``computed_at`` (ISO descending). When two
+      retros for the same task share an identical ``computed_at``,
+      the tiebreaker prefers the retro with the higher
+      ``wasted_spawns`` count (more conservative — picks the noisier
+      observation).
+    * From the selected retro's ``auditor_zero_finding_streaks`` dict
+      (top-level, ``dict[str, int|float]``), collect every key whose
+      value is ``>= 5``.
+    * Union across all tasks; deduplicate; sort ascending.
+
+    Source-of-truth field paths (``task-retrospective.json``):
+    ``wasted_spawns``, ``task_type``, ``risk_level``, ``task_id``,
+    ``computed_at``, ``auditor_zero_finding_streaks``.
+    """
+    # ----- per-task-class aggregation (AC-2 / AC-3) --------------------
+    grouped: dict[str, list[float]] = {}
+    for retro in retrospectives:
+        if not isinstance(retro, dict):
+            continue
+        task_type = retro.get("task_type")
+        risk_level = retro.get("risk_level")
+        # Hard rule: skip retrospectives missing task_type / risk_level
+        # — never silently default to "unknown:unknown".
+        if not isinstance(task_type, str) or not task_type:
+            continue
+        if not isinstance(risk_level, str) or not risk_level:
+            continue
+        raw_waste = retro.get("wasted_spawns", 0)
+        if isinstance(raw_waste, bool) or not isinstance(raw_waste, (int, float)):
+            # bool is a subclass of int — exclude explicitly. Non-numeric
+            # values become 0 per AC-2 ("default 0 when absent or
+            # non-numeric").
+            waste = 0.0
+        else:
+            waste = float(raw_waste)
+        key = f"{task_type}:{risk_level}"
+        grouped.setdefault(key, []).append(waste)
+
+    per_task_class: dict[str, dict] = {}
+    for key, values in grouped.items():
+        n = len(values)
+        if n < 3:
+            # AC-2: only emit entries when n_observations >= 3.
+            continue
+        baseline = statistics.mean(values)
+        # statistics.stdev requires n >= 2; n is already >= 3 here, but
+        # we keep the n==1 branch documented for AC-3 completeness.
+        stddev = statistics.stdev(values) if n >= 2 else 0.0
+        threshold_count = max(2, min(10, math.ceil(baseline + 2 * stddev)))
+        per_task_class[key] = {
+            "waste_count_baseline": float(baseline),
+            "waste_count_stddev": float(stddev),
+            "n_observations": int(n),
+            "threshold_count": int(threshold_count),
+        }
+
+    # ----- exempt auditors (AC-4) --------------------------------------
+    # Pick the most-recent retrospective per task_id by computed_at (ISO
+    # descending). Tiebreaker on identical computed_at: higher
+    # wasted_spawns wins (the more conservative — noisier — observation).
+    most_recent_per_task: dict[str, dict] = {}
+    for retro in retrospectives:
+        if not isinstance(retro, dict):
+            continue
+        task_id = retro.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        computed_at = retro.get("computed_at")
+        if not isinstance(computed_at, str):
+            computed_at = ""
+        existing = most_recent_per_task.get(task_id)
+        if existing is None:
+            most_recent_per_task[task_id] = retro
+            continue
+        existing_ts = existing.get("computed_at")
+        if not isinstance(existing_ts, str):
+            existing_ts = ""
+        if computed_at > existing_ts:
+            most_recent_per_task[task_id] = retro
+        elif computed_at == existing_ts:
+            new_waste = retro.get("wasted_spawns", 0)
+            old_waste = existing.get("wasted_spawns", 0)
+            if not isinstance(new_waste, (int, float)) or isinstance(new_waste, bool):
+                new_waste = 0
+            if not isinstance(old_waste, (int, float)) or isinstance(old_waste, bool):
+                old_waste = 0
+            if float(new_waste) > float(old_waste):
+                most_recent_per_task[task_id] = retro
+
+    exempt: set[str] = set()
+    for retro in most_recent_per_task.values():
+        streaks = retro.get("auditor_zero_finding_streaks", {})
+        if not isinstance(streaks, dict):
+            continue
+        for auditor_name, value in streaks.items():
+            if not isinstance(auditor_name, str) or not auditor_name:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            if float(value) >= 5:
+                exempt.add(auditor_name)
+
+    return {
+        "version": 1,
+        "computed_at": now_iso(),
+        "per_task_class": per_task_class,
+        "global_fallback": {"threshold_count": 2},
+        "exempt_auditors": sorted(exempt),
+    }
+
+
 def _write_policy_json_files(
     root: Path,
     model_policy_data: dict[str, dict],
     skip_policy_data: dict[str, dict],
     route_policy_data: dict[str, dict],
+    spawn_budget_policy_data: dict,
 ) -> None:
-    """Write all three JSON policy files atomically."""
+    """Write all four JSON policy files atomically."""
     persistent = _persistent_project_dir(root)
     write_json(persistent / "model-policy.json", model_policy_data)
     write_json(persistent / "skip-policy.json", skip_policy_data)
     write_json(persistent / "route-policy.json", route_policy_data)
+    write_json(persistent / "spawn-budget-policy.json", spawn_budget_policy_data)
 
 
 def build_patterns_markdown(
@@ -825,13 +982,26 @@ def write_patterns(root: Path) -> dict:
 
     steps_completed.append(f"route:{len(route_policy_data)} routes")
 
-    # Step 4: Write JSON policy files + effectiveness scores
-    _write_policy_json_files(root, model_policy_data, skip_policy_data, route_policy_data)
+    # Step 4: Write JSON policy files + effectiveness scores.
+    # spawn_budget_policy_data is computed here (not passed as None) so
+    # that empty retrospectives still yield a valid schema with
+    # per_task_class={}, exempt_auditors=[].
+    spawn_budget_policy_data = _build_spawn_budget_policy_data(retrospectives)
+    _write_policy_json_files(
+        root,
+        model_policy_data,
+        skip_policy_data,
+        route_policy_data,
+        spawn_budget_policy_data,
+    )
     persistent = _persistent_project_dir(root)
     write_json(persistent / "effectiveness-scores.json", effectiveness_scores)
     steps_completed.append("json_written")
     log_event(root, "learn_step", step="write_json_policies",
-              model_count=len(model_policy_data), skip_count=len(skip_policy_data), route_count=len(route_policy_data))
+              model_count=len(model_policy_data), skip_count=len(skip_policy_data),
+              route_count=len(route_policy_data),
+              spawn_budget_class_count=len(spawn_budget_policy_data.get("per_task_class", {})),
+              spawn_budget_exempt_count=len(spawn_budget_policy_data.get("exempt_auditors", [])))
 
     # Step 5: Render markdown from the same data
     content = build_patterns_markdown(
