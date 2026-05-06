@@ -199,7 +199,8 @@ def main() -> int:
 
     # 3-step role resolution chain:
     # (a) env var -- highest priority
-    # (b) role file in task dir -- searched when DYNOS_TASK_DIR is set
+    # (b) role file in task dir -- searched whenever task_dir is known
+    #     (DYNOS_TASK_DIR env OR ancestor-walked discovery)
     # (c) default "execute-inline"
     role_file_searched: bool = False
     role_file_path: Path | None = None
@@ -210,13 +211,16 @@ def main() -> int:
         role = role_from_env
         role_missing = False
     else:
-        # Step (b): check role file when DYNOS_TASK_DIR is set
+        # Step (b): check role file whenever task_dir was resolved (env OR
+        # ancestor walk). Subagents spawned via the harness Agent tool do not
+        # inherit DYNOS_TASK_DIR, so gating this on the env var alone made the
+        # role-file fallback unreachable in real workflows — every spec.md
+        # write from a planning subagent fell to execute-inline and was denied.
         role = "execute-inline"
         role_missing = True
 
-        if task_dir_from_env:
-            resolved_task_dir = Path(task_dir_from_env).resolve()
-            role_file_path = resolved_task_dir / "active-segment-role"
+        if task_dir is not None:
+            role_file_path = task_dir / "active-segment-role"
             role_file_searched = True
             try:
                 if role_file_path.is_file():
@@ -267,14 +271,13 @@ def main() -> int:
 
     # Emit pre_tool_use_role_file_missing when resolution landed on (c) and
     # a role file was searched at (b) but was absent or empty
-    if role_missing and role_file_searched and role_file_reason is not None:
+    if role_missing and role_file_searched and role_file_reason is not None and task_dir is not None:
         try:
             if log_event is not None:
-                resolved_task_dir_str = str(Path(task_dir_from_env).resolve())
                 log_event(
-                    Path(task_dir_from_env).resolve().parent.parent,
+                    task_dir.parent.parent,
                     "pre_tool_use_role_file_missing",
-                    task_dir=resolved_task_dir_str,
+                    task_dir=str(task_dir),
                     path=str(role_file_path),
                     reason=role_file_reason,
                 )

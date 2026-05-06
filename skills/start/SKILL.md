@@ -169,6 +169,26 @@ This writes to `.dynos/task-{id}/token-usage.json` with a chronological event lo
 
 ---
 
+## MANDATORY: Role Stamping Before Every Agent Spawn
+
+Every Agent tool spawn in this skill (planner, spec-completion-auditor, testing-executor) requires a stamped `active-segment-role` file. The subagent's `pre_tool_use.py` reads this file to resolve its write role; without it the subagent runs as `execute-inline` and `write_policy.decide_write` denies the writes the subagent is trying to make:
+
+- `planning` is the only role that may write `discovery-notes.md`, `design-decisions.md`, `spec.md`, and `plan.md`. Without the stamp, the planner falls to `execute-inline` and **every spec/plan write is denied**.
+- `audit-*` roles are the only roles that may write `audit-reports/`. Without the stamp, the spec-completion-auditor falls to `execute-inline` and its audit report write is denied.
+- `testing-executor` is the only executor role permitted to write `evidence/tdd-tests.md` plus the test files in this stage; without it the spawn falls to `execute-inline` (works for repo files but not for the executor-scoped invariants downstream).
+
+Direct writes to `active-segment-role` are denied by `write_policy.py` — the file is wrapper-required. Always go through ctl:
+
+```bash
+python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "{role}"
+```
+
+The wrapper enforces `_STAMP_ROLE_ALLOWLIST` (`hooks/ctl.py`), which gates the allowed values. Forgery defense for `audit-*` claims is enforced downstream by `receipt_audit_done`, which cross-checks against `spawn-log.jsonl` — stamping a role that no real Agent spawn matches produces an unforgeable audit-trail mismatch at receipt time.
+
+The stamp file is overwritten by each new stamp, so successive phases do not need explicit cleanup between spawns. Step 9 cleans it up before handing off to `/dynos-work:execute`.
+
+---
+
 ## Step 1 — Discovery Intake
 
 1. Build discovery context from:
@@ -197,6 +217,14 @@ PYTHONPATH="${PLUGIN_HOOKS}:${PYTHONPATH:-}" python3 -c "from pathlib import Pat
 ```
 
 If a non-empty path is returned AND the file exists, read it, strip frontmatter, and append its contents to the planner's instruction below under a `## Learned Planning Rules` heading. This injects project-specific planning patterns (e.g., tighter acceptance criteria, better segment sizing) derived from past task retrospectives. Log: `{timestamp} [ROUTE] plan-skill route={mode} agent={agent_name}`.
+
+**Stamp role BEFORE the spawn (MANDATORY):**
+
+```bash
+python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "planning"
+```
+
+Without this stamp the planner subagent resolves to `execute-inline` and its writes to `discovery-notes.md` and `design-decisions.md` are denied by `write_policy`.
 
 Spawn the Planner subagent (`dynos-work:planning`) with instruction:
 
@@ -317,7 +345,15 @@ Proceed to Step 3.
 
 **Fast-track combined spawn:** If `manifest.json` has `"fast_track": true`, skip the spawn and the spec validation. Spec is produced in Step 5 by the combined Spec + Plan planner spawn. **Do NOT advance the manifest stage here** — leave it at `SPEC_NORMALIZATION`. Walking the stage forward before `spec.md` exists breaks the artifact invariant in `hooks/lib_validate.py` (`_SPEC_REQUIRED_AFTER` requires `spec.md` once stage is `SPEC_REVIEW` or beyond), and any `/dynos-work:status` or `/dynos-work:resume` invocation in the window between Step 3 and Step 5 completing would observe `stage=PLANNING` with no spec on disk. The stage walk happens in Step 5 after `spec.md` is written. Log: `{timestamp} [SKIP] spec-normalization-spawn — fast_track combined planner (stage walk deferred to Step 5)`. Skip the rest of this step and proceed to Step 4.
 
-**Normal path:** Spawn the Planner subagent with instruction:
+**Normal path:** **Stamp role BEFORE the spawn (MANDATORY):**
+
+```bash
+python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "planning"
+```
+
+Without this stamp the planner falls to `execute-inline` and the `spec.md` write is denied by `write_policy.decide_write` (the spec.md guard at `hooks/write_policy.py:290-296` denies executor roles outright). This is the failure mode reported in the SPEC_NORMALIZATION block incident.
+
+Spawn the Planner subagent with instruction:
 
 ```text
 Phase: Spec Normalization.
@@ -401,6 +437,14 @@ Use the JSON output as authoritative:
 - `planning_mode == "standard"`: use standard planning
 
 Do NOT re-derive fast-track, risk-based escalation, or acceptance-criteria thresholds in prompt logic.
+
+**Stamp role BEFORE every planner spawn in this step (MANDATORY — applies to all three flows below):**
+
+```bash
+python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "planning"
+```
+
+For hierarchical flow, stamp once before the Master Planner spawn AND again before each Worker Planner spawn (each spawn reads the file fresh at its first tool call — successive stamps with the same role are idempotent and overwrite cleanly). Without these stamps the planner falls to `execute-inline` and `plan.md` / `execution-graph.json` writes are denied by `write_policy`.
 
 Hierarchical flow:
 1. Spawn Master Planner using the default planning model for this repo.
@@ -522,6 +566,14 @@ The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/c
 
 2. **LLM plan auditor (conditional):** Only spawn `spec-completion-auditor` when `risk_level` is `high` or `critical`. For low/medium risk, the deterministic checks (`validate_task_artifacts` for criteria coverage + gap analysis for code/plan alignment) are authoritative — skip the LLM spawn. Log: `{timestamp} [SKIP] plan-audit-llm — risk_level={risk}`.
 
+   **Stamp role BEFORE the spawn (MANDATORY — only when the conditional fires):**
+
+   ```bash
+   python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "audit-spec-completion"
+   ```
+
+   Without this stamp the auditor falls to `execute-inline` and its `audit-reports/spec-completion.json` write is denied by `write_policy.decide_write` (which restricts `audit-reports/` to `audit-*` roles). Forgery defense: `receipt_audit_done` cross-checks the orchestrator-claimed spawn against `spawn-log.jsonl`, so stamping without a real Agent spawn produces an unforgeable mismatch at receipt time.
+
    Additionally, surface any segment where `len(segment.files_expected) >= 10` (computed budget ≥ 35, the `TOOL_BUDGET_ADVISORY` threshold from `hooks/lib_tool_budget.py`) as a non-blocking advisory finding `near-budget-ceiling`. The advisory is informational and does NOT block plan approval; it warns the operator that the segment is approaching the 11-file overflow ceiling and may want decomposition.
 
 3. If gap analysis finds gaps, or (when invoked) the auditor finds gaps, route back to planning, repair, and rerun deterministic artifact validation.
@@ -537,7 +589,15 @@ When `tdd_required` is `false`: tests are written by `testing-executor` after pr
 
 When `tdd_required` is `true`:
 
-1. Spawn `testing-executor` with instruction:
+1. **Stamp role BEFORE the spawn (MANDATORY):**
+
+   ```bash
+   python3 "${PLUGIN_HOOKS}/ctl.py" stamp-role .dynos/task-{id} --role "testing-executor"
+   ```
+
+   Without this stamp the testing-executor falls to `execute-inline`. Repo-file writes still work because `write_policy` permits both `execute-inline` and `*-executor` for repo artifacts, but the role file is what every other dynos-work skill in this codebase stamps before an executor spawn — keeping the convention here ensures the spawn-log entry's claimed role matches the runtime role and that downstream receipts identify the spawn correctly.
+
+   Spawn `testing-executor` with instruction:
 
 ```text
 TDD-First Mode.
@@ -597,6 +657,12 @@ Write only test files and evidence to .dynos/task-{id}/evidence/tdd-tests.md.
 # Phase 6: Handoff
 
 ## Step 9 — Done
+
+**Role file cleanup (MANDATORY — BEFORE the handoff transition):** Delete `.dynos/task-{id}/active-segment-role` so `/dynos-work:execute` starts each segment with a clean slate. Deletion is permitted by `write_policy` (only the *write* path is wrapper-required); leaving the file in place is benign because every executor stamp overwrites it, but cleaning up keeps the spawn-log → role file relationship one-to-one for the next phase.
+
+```bash
+rm -f .dynos/task-{id}/active-segment-role
+```
 
 Transition the stage by running:
 

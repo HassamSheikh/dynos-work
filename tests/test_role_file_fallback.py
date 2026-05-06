@@ -465,6 +465,84 @@ class TestRoleResolutionChain:
             f"reason must be 'empty'; got: {missing_events[0]!r}"
         )
 
+    # Regression: env unset, DYNOS_TASK_DIR unset, but cwd is inside .dynos/task-XXX/
+    # → ancestor-walk discovers task_dir → role file MUST be consulted.
+    #
+    # This is the production path for harness-spawned subagents (e.g., the
+    # planning subagent invoked via the Agent tool). Subagents do not inherit
+    # DYNOS_TASK_DIR, so gating the role-file lookup on the env var alone left
+    # the active-segment-role mechanism unreachable and forced spec.md writes
+    # to fall through to execute-inline (denied).
+    def test_role_file_resolved_via_ancestor_walk_when_env_unset(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: ancestor-walked task_dir must consult the role file.
+
+        When DYNOS_TASK_DIR is not set but cwd lives inside a .dynos/task-*
+        directory containing a valid active-segment-role, the role file must
+        still be honored. Without this, harness subagents (which don't inherit
+        DYNOS_TASK_DIR) can never elevate above execute-inline.
+        """
+        _, task_dir = _make_task_dir(tmp_path, "task-RR-ancestor")
+        role_file = task_dir / "active-segment-role"
+        role_file.write_text("planning")
+
+        monkeypatch.delenv("DYNOS_ROLE", raising=False)
+        monkeypatch.delenv("DYNOS_TASK_DIR", raising=False)
+        monkeypatch.delenv("DYNOS_EVENT_SECRET", raising=False)
+
+        resolved_role = None
+        logged: list[dict] = []
+
+        def _capture_log(root: Any, event_type: str, **kw: Any) -> None:
+            logged.append({"event": event_type, **kw})
+
+        def _capture_decide(attempt: Any) -> Any:
+            nonlocal resolved_role
+            resolved_role = attempt.role
+            dec = MagicMock()
+            dec.allowed = True
+            dec.mode = "direct"
+            dec.reason = "test"
+            dec.wrapper_command = None
+            return dec
+
+        import io
+        # cwd is inside the task dir so _find_task_dir_from_ancestors discovers it.
+        fake_stdin = json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi > /tmp/role-fallback-probe.txt"},
+            "cwd": str(task_dir),
+        })
+        old_stdin = sys.stdin
+        old_argv = sys.argv[:]
+        sys.stdin = io.StringIO(fake_stdin)
+        sys.argv = ["pre_tool_use.py"]
+        try:
+            with (
+                patch("pre_tool_use.decide_write", side_effect=_capture_decide),
+                patch("pre_tool_use.log_event", side_effect=_capture_log),
+            ):
+                try:
+                    _pre_tool_use.main()
+                except SystemExit:
+                    pass
+        finally:
+            sys.stdin = old_stdin
+            sys.argv = old_argv
+
+        assert resolved_role == "planning", (
+            f"Role file must be consulted via ancestor-walked task_dir even when "
+            f"DYNOS_TASK_DIR is unset; got {resolved_role!r}"
+        )
+        role_missing_events = [
+            e for e in logged if e.get("event") == "pre_tool_use_role_missing"
+        ]
+        assert not role_missing_events, (
+            f"pre_tool_use_role_missing must NOT be emitted when role resolved from file: "
+            f"{role_missing_events}"
+        )
+
     # AC 7(ii) — when file resolves role, event 'pre_tool_use_role_missing' must NOT fire
     def test_no_role_missing_event_when_file_resolves_role(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
