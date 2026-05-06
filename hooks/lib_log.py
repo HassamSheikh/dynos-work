@@ -106,6 +106,14 @@ DIAGNOSTIC_ONLY_EVENTS: frozenset[str] = frozenset({
     # writer. Emitted when an auditor's spawn-log.jsonl is missing during
     # receipt write; observability only, no gate blocks on it.
     "audit_receipt_spawn_log_missing",
+    # Envelope cross-check failure (task-20260506-002). Emitted by
+    # _validate_final_envelope when the auditor's final-message envelope
+    # JSON does not match the on-disk report (path/findings_count/
+    # blocking_count) or fails parse/missing-keys/non-int validation.
+    # The receipt write also raises ValueError, so the gate path is the
+    # ValueError; this event is the forensic counterpart for diagnosing
+    # which of the 9 envelope fields diverged. Observability only.
+    "audit_envelope_mismatch",
     # Defense-in-depth content pairing (task-20260430-021). Emitted when
     # both spawn-log post entry AND on-disk audit-report file are present
     # at receipt time, recording the report file's sha256 alongside the

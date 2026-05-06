@@ -550,6 +550,237 @@ def _assert_sidecar_match(
         )
 
 
+def _validate_final_envelope(
+    task_dir: Path,
+    auditor_name: str,
+    route_mode: str,
+    report_path: str | None,
+    final_envelope: str | None,
+) -> None:
+    """Validate the auditor's final-message JSON envelope.
+
+    Implements AC 5 sub-rules a–i:
+      a. generic + None  -> silent skip.
+      b. non-generic + None -> emit ``audit_envelope_mismatch`` event,
+         raise ValueError naming auditor + non-generic route_mode.
+      c. final_envelope not None -> ``json.loads`` with NO preprocessing.
+         JSONDecodeError -> emit + raise.
+      d. Result must be a dict containing keys ``report_path``,
+         ``findings_count``, ``blocking_count``.
+      e. ``findings_count`` and ``blocking_count`` must be int (booleans
+         excluded via ``isinstance(v, int) and not isinstance(v, bool)``).
+      f. STRICT string equality between envelope.report_path and the
+         caller-supplied ``report_path`` arg (no Path.resolve()).
+      g. Read on-disk report; assert envelope.findings_count ==
+         len(findings).
+      h. Assert envelope.blocking_count == count of findings whose
+         ``blocking is True`` (mirrors ``_build_audit_receipt_payload``).
+      i. Every emitted ``audit_envelope_mismatch`` event carries exactly
+         9 fields: task, auditor_name, route_mode,
+         expected_report_path, envelope_report_path,
+         expected_findings_count, envelope_findings_count,
+         expected_blocking_count, envelope_blocking_count. Each
+         ``log_event`` call wrapped in ``try/except Exception: pass``.
+    """
+    # Sub-rule (a): generic + None — silent skip.
+    if route_mode == "generic" and final_envelope is None:
+        return
+
+    def _emit(
+        envelope_report_path: Any,
+        expected_findings_count: int | None,
+        envelope_findings_count: Any,
+        expected_blocking_count: int | None,
+        envelope_blocking_count: Any,
+    ) -> None:
+        try:
+            log_event(
+                task_dir.parent.parent,
+                "audit_envelope_mismatch",
+                task=task_dir.name,
+                auditor_name=auditor_name,
+                route_mode=route_mode,
+                expected_report_path=report_path,
+                envelope_report_path=envelope_report_path,
+                expected_findings_count=expected_findings_count,
+                envelope_findings_count=envelope_findings_count,
+                expected_blocking_count=expected_blocking_count,
+                envelope_blocking_count=envelope_blocking_count,
+            )
+        except Exception:
+            pass
+
+    # Sub-rule (b): non-generic + None — required.
+    if final_envelope is None:
+        _emit(None, None, None, None, None)
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope is required for "
+            f"non-generic route_mode (got route_mode={route_mode!r}); "
+            f"the auditor's final message must be the bare JSON envelope."
+        )
+
+    # Sub-rule (c): json.loads with NO preprocessing.
+    try:
+        envelope = json.loads(final_envelope)
+    except json.JSONDecodeError as exc:
+        _emit(None, None, None, None, None)
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope is not valid JSON "
+            f"(route_mode={route_mode!r}): {exc}. The envelope must be a "
+            f"single bare JSON line — no markdown fences, no preprocessing."
+        ) from exc
+
+    # Sub-rule (d): must be dict with required keys.
+    if not isinstance(envelope, dict):
+        _emit(None, None, None, None, None)
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope must decode to a JSON "
+            f"object (got {type(envelope).__name__})."
+        )
+
+    required_keys = ("report_path", "findings_count", "blocking_count")
+    missing = [k for k in required_keys if k not in envelope]
+    if missing:
+        _emit(
+            envelope.get("report_path"),
+            None,
+            envelope.get("findings_count"),
+            None,
+            envelope.get("blocking_count"),
+        )
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope missing required "
+            f"key(s) {missing!r}; envelope must contain "
+            f"report_path, findings_count, blocking_count."
+        )
+
+    env_report_path = envelope.get("report_path")
+    env_findings_count = envelope.get("findings_count")
+    env_blocking_count = envelope.get("blocking_count")
+
+    # Sub-rule (e): integer (not bool) check on counts.
+    if not (isinstance(env_findings_count, int) and not isinstance(env_findings_count, bool)):
+        _emit(
+            env_report_path,
+            None,
+            env_findings_count,
+            None,
+            env_blocking_count,
+        )
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope.findings_count must "
+            f"be int, got {type(env_findings_count).__name__} "
+            f"({env_findings_count!r})."
+        )
+    if not (isinstance(env_blocking_count, int) and not isinstance(env_blocking_count, bool)):
+        _emit(
+            env_report_path,
+            None,
+            env_findings_count,
+            None,
+            env_blocking_count,
+        )
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope.blocking_count must "
+            f"be int, got {type(env_blocking_count).__name__} "
+            f"({env_blocking_count!r})."
+        )
+
+    # Sub-rule (f): STRICT string equality on report_path.
+    if env_report_path != report_path:
+        _emit(
+            env_report_path,
+            None,
+            env_findings_count,
+            None,
+            env_blocking_count,
+        )
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope.report_path mismatch "
+            f"(envelope={env_report_path!r}, expected={report_path!r}). "
+            f"Strict string equality required — no path normalization."
+        )
+
+    # Sub-rules (g)/(h): cross-check counts against on-disk report.
+    # SEC-001 (task-20260506-002): mirror the SEC-004 path-traversal guard
+    # used by _build_audit_receipt_payload. The validator must not open a
+    # path that escapes task_dir even when env_report_path == report_path
+    # (a compromised orchestrator could pass a traversal path that matches
+    # itself in both fields).
+    # IR 13 (task-20260506-002): missing/unreadable report file is a hard
+    # failure for any non-generic auditor or any caller that supplied a
+    # report_path. Silent skip on OSError/JSONDecodeError would let an
+    # auditor claim arbitrary counts for a report that was never written —
+    # exactly the upstream forgery vector this defense closes.
+    # SEC-002 (task-20260506-002): error messages must NOT echo
+    # ``actual_finding_count`` / ``actual_blocking_count``; the
+    # ``audit_envelope_mismatch`` event already records both values in
+    # structured form for forensic review. Exception text is propagated to
+    # stderr where a hostile orchestrator could read it back to discover
+    # the true counts and reconstruct a passing forged envelope.
+    actual_finding_count: int | None = None
+    actual_blocking_count: int | None = None
+    if isinstance(report_path, str) and report_path:
+        report_file = Path(report_path)
+        try:
+            resolved_report = report_file.resolve()
+            resolved_task = Path(task_dir).resolve()
+            resolved_report.relative_to(resolved_task)
+        except (ValueError, OSError) as exc:
+            _emit(env_report_path, None, env_findings_count, None, env_blocking_count)
+            raise ValueError(
+                f"audit-{auditor_name}: final_envelope.report_path must be "
+                f"inside task_dir ({resolved_task}); got {report_path!r}"
+            ) from exc
+        try:
+            with report_file.open("r", encoding="utf-8") as fh:
+                report_payload = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            _emit(env_report_path, None, env_findings_count, None, env_blocking_count)
+            raise ValueError(
+                f"audit-{auditor_name}: report file at {report_path!r} is "
+                f"missing or unreadable; the report must exist on disk "
+                f"before the envelope can be validated. Cause: "
+                f"{type(exc).__name__}."
+            ) from exc
+        findings = report_payload.get("findings", []) if isinstance(report_payload, dict) else []
+        if not isinstance(findings, list):
+            findings = []
+        actual_finding_count = len(findings)
+        actual_blocking_count = sum(
+            1 for f in findings
+            if isinstance(f, dict) and f.get("blocking") is True
+        )
+
+    if actual_finding_count is not None and env_findings_count != actual_finding_count:
+        _emit(
+            env_report_path,
+            actual_finding_count,
+            env_findings_count,
+            actual_blocking_count,
+            env_blocking_count,
+        )
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope.findings_count does "
+            f"not match the on-disk report. See audit_envelope_mismatch "
+            f"event for the structured field comparison."
+        )
+
+    if actual_blocking_count is not None and env_blocking_count != actual_blocking_count:
+        _emit(
+            env_report_path,
+            actual_finding_count,
+            env_findings_count,
+            actual_blocking_count,
+            env_blocking_count,
+        )
+        raise ValueError(
+            f"audit-{auditor_name}: final_envelope.blocking_count does "
+            f"not match the on-disk report. See audit_envelope_mismatch "
+            f"event for the structured field comparison."
+        )
+
+
 def _build_audit_receipt_payload(
     task_dir: Path,
     auditor_name: str,
@@ -849,6 +1080,7 @@ def receipt_audit_done(
     agent_path: str | None,
     injected_agent_sha256: str | None,
     ensemble_context: bool = False,
+    final_envelope: str | None = None,
 ) -> Path:
     """Write receipt proving an auditor completed.
 
@@ -883,6 +1115,15 @@ def receipt_audit_done(
     if injected_agent_sha256 is not None:
         _assert_sidecar_match(task_dir, auditor_name, model_used, injected_agent_sha256)
     _assert_spawn_log_evidence(task_dir, auditor_name)
+    _validate_final_envelope(
+        task_dir, auditor_name, route_mode, report_path, final_envelope,
+    )
+    if final_envelope is not None:
+        envelope_sha256: str | None = hashlib.sha256(
+            final_envelope.encode("utf-8")
+        ).hexdigest()
+    else:
+        envelope_sha256 = None
     _emit_content_pairing_event(task_dir, auditor_name, report_path)
     if tokens_used and tokens_used > 0:
         _record_tokens(task_dir, auditor_name, model_used or "default", tokens_used)
@@ -914,6 +1155,7 @@ def receipt_audit_done(
         route_mode=route_mode,
         agent_path=agent_path,
         injected_agent_sha256=injected_agent_sha256,
+        envelope_sha256=envelope_sha256,
     )
 
 

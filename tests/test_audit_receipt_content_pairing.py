@@ -100,10 +100,12 @@ def test_content_pairing_event_emitted_when_report_and_post_both_present(tmp_pat
     report_path.write_text(report_content)
     expected_report_sha = hashlib.sha256(report_content.encode("utf-8")).hexdigest()
 
+    envelope = json.dumps({"report_path": str(report_path), "findings_count": 0, "blocking_count": 0})
     receipt_audit_done(
         td, "security-auditor", "haiku", 0, 0, str(report_path), 100,
         route_mode="replace", agent_path="learned/x.md",
         injected_agent_sha256=digest,
+        final_envelope=envelope,
     )
 
     events = _read_events(td)
@@ -117,10 +119,14 @@ def test_content_pairing_event_emitted_when_report_and_post_both_present(tmp_pat
 
 def test_no_pairing_event_when_report_file_missing(tmp_path: Path):
     """When report_path is None (no on-disk file the receipt is binding to),
-    the pairing event is not emitted — there's nothing to pair against."""
+    the pairing event is not emitted — there's nothing to pair against.
+
+    Uses route_mode='generic' because task-20260506-002's final-envelope
+    contract makes 'replace' + report_path=None unreachable: the validator
+    requires either an envelope (which would also need a report file to
+    cross-check counts) or generic mode. The pairing-event semantics
+    (no report → no pairing) are independent of route_mode."""
     td = _task_dir(tmp_path)
-    digest = "a" * 64
-    _write_sidecar(td, "security-auditor", "haiku", digest)
     _write_spawn_log(td, [
         {"phase": "post", "tool": "Agent", "subagent_type": "security-auditor",
          "result_sha256": "r" * 64, "stop_reason": "end_turn", "timestamp": _ts()},
@@ -128,8 +134,8 @@ def test_no_pairing_event_when_report_file_missing(tmp_path: Path):
 
     receipt_audit_done(
         td, "security-auditor", "haiku", 0, 0, None, 100,
-        route_mode="replace", agent_path="learned/x.md",
-        injected_agent_sha256=digest,
+        route_mode="generic", agent_path=None,
+        injected_agent_sha256=None,
     )
 
     events = _read_events(td)
