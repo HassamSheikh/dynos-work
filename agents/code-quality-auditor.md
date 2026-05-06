@@ -2,7 +2,7 @@
 name: code-quality-auditor
 description: "Internal dynos-work agent. Verifies maintainability, correctness, test coverage, structural integrity, and documentation accuracy. Blocks on significant architecture degradation. Read-only."
 model: sonnet
-tools: [Read, Grep, Glob, Bash]
+tools: [Read, Grep, Glob, Bash, Write]
 maxTurns: 20
 ---
 
