@@ -1053,6 +1053,75 @@ def cmd_amend_artifact(args: argparse.Namespace) -> int:
                 )
                 return 1
 
+    # Refresh the plan-validated receipt's artifact_hashes dict.
+    # plan-validated captures hashes for ALL three planning artifacts
+    # (spec.md, plan.md, execution-graph.json) in a separate dict from
+    # the canonical artifact_sha256. The PRE_EXECUTION_SNAPSHOT ->
+    # EXECUTION gate consults plan_validated_receipt_matches which
+    # walks artifact_hashes; leaving the dict stale forces transitions
+    # to refuse with `plan-validated: <name>.md hash drift` even though
+    # the amended artifact is in fact valid.
+    #
+    # Update the dict in place (preserving artifact_sha256, the
+    # amendments audit trail, and any other receipt fields) by hashing
+    # whichever of the three artifacts currently exist on disk and
+    # writing back to the same canonical receipt file.
+    plan_validated_path = receipts_dir / "plan-validated.json"
+    if plan_validated_path.is_file():
+        try:
+            pv_data = json.loads(plan_validated_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pv_data = None
+        if isinstance(pv_data, dict):
+            try:
+                require_write_allowed(
+                    WriteAttempt(
+                        role="receipt-writer",
+                        task_dir=task_dir,
+                        path=plan_validated_path,
+                        operation="modify",
+                        source="amend-artifact",
+                    ),
+                    capability_key=_get_capability_key("receipt-writer"),
+                )
+            except Exception as exc:
+                print(f"amend-artifact: write denied for plan-validated refresh: {exc}", file=sys.stderr)
+                return 1
+            from lib_receipts import hash_file as _hash_file  # noqa: PLC0415
+            fresh_hashes: dict[str, str] = {}
+            for name in ("spec.md", "plan.md", "execution-graph.json"):
+                p = task_dir / name
+                if p.is_file():
+                    try:
+                        fresh_hashes[name] = _hash_file(p)
+                    except OSError:
+                        # Treat as drift; existing hash (if any) stays.
+                        pass
+            existing_hashes = pv_data.get("artifact_hashes")
+            if not isinstance(existing_hashes, dict):
+                existing_hashes = {}
+            existing_hashes.update(fresh_hashes)
+            pv_data["artifact_hashes"] = existing_hashes
+            try:
+                fd3, tmp3 = tempfile.mkstemp(
+                    prefix=f".{plan_validated_path.name}.",
+                    suffix=".tmp",
+                    dir=str(receipts_dir),
+                )
+                try:
+                    with os.fdopen(fd3, "w") as fh:
+                        fh.write(json.dumps(pv_data, indent=2))
+                    os.replace(tmp3, plan_validated_path)
+                except Exception:
+                    try:
+                        os.unlink(tmp3)
+                    except OSError:
+                        pass
+                    raise
+            except Exception as exc:
+                print(f"amend-artifact: failed to refresh plan-validated.artifact_hashes: {exc}", file=sys.stderr)
+                return 1
+
     print(f"amended {artifact_name}: sha256={sha256_after}")
     print(f"amendment receipt: {amend_receipt_path}")
     return 0
