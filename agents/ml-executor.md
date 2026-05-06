@@ -3,7 +3,7 @@ name: ml-executor
 description: "Internal dynos-work agent. Implements ML models, training pipelines, inference code, and data processing. Spawned by /dynos-work:execute for ML execution segments."
 model: sonnet
 tools: [Read, Write, Edit, Grep, Glob, Bash]
-maxTurns: 30
+maxTurns: 40
 ---
 
 # dynos-work ML Executor
@@ -38,6 +38,10 @@ Token cost dominates this pipeline. Respect this scope strictly:
 - If the plan is missing a reference you genuinely need, note it in your evidence file's "Open Questions" — do not hunt for it.
 
 Violating this budget can waste 1M+ tokens per spawn.
+
+## Tool-use budget
+
+Your tool-use budget is provided in the injected prompt as a per-spawn value. Stop and emit evidence within 3 tool uses of that budget. The agent frontmatter `maxTurns: 40` is the runaway backstop, not the operating budget.
 
 ## You must
 

@@ -46,6 +46,7 @@ from lib_receipts import (
     INJECTED_PLANNER_PROMPTS_DIR,
     INJECTED_PROMPTS_DIR,
 )
+from lib_tool_budget import compute_segment_budget
 from lib_registry import ensure_learned_registry
 from write_policy import WriteAttempt, _get_capability_key, require_write_allowed
 
@@ -1107,6 +1108,12 @@ def build_executor_plan(
 
         executor_rules = [r["rule"] for r in kept]
 
+        # AC-4: per-segment tool-call budget. Computed from files_expected
+        # length and the resolved model so executors get a deterministic,
+        # spec-derived ceiling instead of an unbounded tool quota.
+        files_expected = seg.get("files_expected") or []
+        tool_budget = compute_segment_budget(len(files_expected), model_decision["model"])
+
         plan["segments"].append({
             "segment_id": seg_id,
             "executor": executor,
@@ -1119,6 +1126,7 @@ def build_executor_plan(
             "composite_score": route_decision["composite_score"],
             "prevention_rules": executor_rules,
             "prevention_rules_omitted": prevention_rules_omitted,
+            "tool_budget": tool_budget,
         })
 
     log_event(root, "router_executor_plan", task_type=task_type, segment_count=len(plan["segments"]), include_enforced=include_enforced, segments=[{"segment_id": s["segment_id"], "executor": s["executor"], "model": s.get("model"), "model_source": s.get("model_source"), "prevention_rules_omitted": s.get("prevention_rules_omitted", 0)} for s in plan["segments"]])
@@ -1212,6 +1220,17 @@ def build_executor_prompt(
             f"If you violate one without an explicit, spec-backed reason, assume you are shipping a regression:\n{rules_text}"
         )
 
+    # AC-7: append the tool-use budget block. Read the value straight from
+    # plan_entry — never recompute here, so the spawned executor sees the
+    # exact same budget that the executor-plan record committed to.
+    tool_budget = plan_entry.get("tool_budget")
+    if tool_budget is not None:
+        parts.append(
+            f"\n\n## Tool-Use Budget\n"
+            f"Your tool-use budget for this spawn is **{tool_budget}** tool calls. "
+            f"Stop and emit evidence within 3 calls of that budget."
+        )
+
     return "\n".join(parts)
 
 
@@ -1294,6 +1313,9 @@ def _router_inputs_fingerprint(root: Path, task_type: str, graph_path: Path) -> 
         persistent / "prevention-rules.json",
         persistent / "learned-agents" / "registry.json",
         persistent / "benchmarks" / "history.json",
+        # AC-5: include lib_tool_budget.py content hash so adoption (and any
+        # subsequent constant change) invalidates pre-existing routing caches.
+        Path(__file__).resolve().parent / "lib_tool_budget.py",
     ]
     for p in inputs:
         _hash_path(h, p)
@@ -1620,6 +1642,17 @@ def cmd_inject_prompt(args: argparse.Namespace) -> int:
                         break
                 if plan_entry is None:
                     cache_status = "stale_segment"
+                else:
+                    # AC-6: legacy cached plan entries (written before
+                    # tool_budget existed) lack the field. Recompute from
+                    # the segment's files_expected and attach without
+                    # discarding any other plan_entry data.
+                    if "tool_budget" not in plan_entry:
+                        files_expected = target_seg.get("files_expected") or []
+                        plan_entry["tool_budget"] = compute_segment_budget(
+                            len(files_expected),
+                            plan_entry.get("model", ""),
+                        )
             else:
                 cache_status = "fingerprint_drift"
 

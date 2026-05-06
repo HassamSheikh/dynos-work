@@ -20,7 +20,13 @@ from lib_core import (
     write_ctl_json,
     write_json,
 )
+from lib_tool_budget import would_overflow
 from write_policy import find_write_violations
+
+# Stages at which the plan-time tool-budget overflow guard fires. After
+# PRE_EXECUTION_SNAPSHOT (or any later stage), in-flight tasks that already
+# passed plan validation are grandfathered through unaffected.
+_OVERFLOW_GUARD_STAGES: set[str] = {"PLANNING", "PLAN_REVIEW", "EXECUTION_GRAPH_BUILD"}
 
 def require_nonblank(value: str, *, field_name: str) -> str:
     """Validate that *value* is a non-empty string and return its stripped form.
@@ -585,6 +591,16 @@ def validate_task_artifacts(
                             errors.append(f"file {file_path} appears in multiple segments: {owner}, {segment_id}")
                         else:
                             seen_files[file_path] = segment_id
+                    # AC-9 / AC-10: plan-time overflow guard. Fires only at
+                    # plan-creation/review stages so that in-flight tasks at
+                    # PRE_EXECUTION_SNAPSHOT or later are grandfathered.
+                    if stage in _OVERFLOW_GUARD_STAGES:
+                        files_count = len(files_expected)
+                        if would_overflow(files_count):
+                            errors.append(
+                                f"segment {segment_id} would overflow tool budget: "
+                                f"{files_count} files exceeds 11-file ceiling, decompose"
+                            )
                 depends_on = segment.get("depends_on", [])
                 if not isinstance(depends_on, list):
                     errors.append(f"{segment_id}: depends_on must be an array")
