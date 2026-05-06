@@ -46,8 +46,21 @@ def _setup(tmp_path: Path, *, quality: float | None = None) -> Path:
 
 
 def _write_postmortem_fixture(td: Path, anomaly_count: int, pattern_count: int) -> Path:
-    """v4 self-compute contract: counts come from the on-disk postmortem JSON."""
-    pm_json = td / "postmortem.json"
+    """v4 self-compute contract: counts come from the on-disk postmortem JSON.
+
+    task-20260506-003 (SEC-001): postmortem JSON must live under
+    ``_persistent_project_dir(root) / "postmortems"`` to satisfy the
+    bounds-check in ``receipt_postmortem_generated``. Constructing the
+    fixture under ``td/postmortem.json`` (inside task_dir) trips the
+    ValueError. ``td`` is ``.dynos/task-{id}`` whose parent.parent is the
+    project root; ``_persistent_project_dir`` derives the persistent dir
+    from that root.
+    """
+    from lib_core import _persistent_project_dir  # noqa: PLC0415
+    root = td.parent.parent
+    postmortems_dir = _persistent_project_dir(root) / "postmortems"
+    postmortems_dir.mkdir(parents=True, exist_ok=True)
+    pm_json = postmortems_dir / f"{td.name}.json"
     pm_json.write_text(json.dumps({
         "anomalies": [{"idx": i} for i in range(anomaly_count)],
         "recurring_patterns": [{"idx": i} for i in range(pattern_count)],

@@ -149,6 +149,21 @@ def receipt_postmortem_generated(
             "postmortem_json_path"
         )
     json_path = Path(postmortem_json_path)
+    # SEC-001 (task-20260506-003): bounds-check the postmortem JSON path.
+    # The postmortem JSON canonically lives at _persistent_project_dir(root)
+    # / "postmortems" / <task-id>.json (OUTSIDE task_dir). A compromised
+    # caller could otherwise point postmortem_json_path at arbitrary files.
+    # Mirrors the SEC-004 defense in stage.py::_build_audit_receipt_payload.
+    safe_postmortems_dir = _persistent_project_dir(task_dir.parent.parent) / "postmortems"
+    try:
+        resolved_json = Path(json_path).resolve()
+        resolved_safe = safe_postmortems_dir.resolve()
+        resolved_json.relative_to(resolved_safe)
+    except ValueError as exc:
+        raise ValueError(
+            f"receipt_postmortem_generated: postmortem_json_path must be "
+            f"inside {resolved_safe}; got {resolved_json}"
+        ) from exc
     if not json_path.exists():
         raise ValueError(
             f"postmortem JSON missing at {json_path}"
