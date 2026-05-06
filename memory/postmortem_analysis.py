@@ -97,12 +97,31 @@ def _validate_rule_schema(rule: object) -> tuple[bool, str]:
 
     Returns (ok, reason). When ok is False, *reason* names the exact
     check that failed so the REJECT stderr line is actionable.
+
+    Default-template fallback: when the LLM emits a rule without a
+    `template` field but with `rule`/`rationale`/`executor`/`category`
+    fields (the common shape across the PRO-001/005/007 postmortems),
+    treat it as `template: "advisory"`. The advisory template has no
+    required params and is always permitted; this stops the schema from
+    silently dropping every untemplated rule. Rules that lack BOTH a
+    template AND any rule/rationale text are still rejected.
     """
     if not isinstance(rule, dict):
         return False, "rule is not a dict"
     template = rule.get("template")
     if template is None:
-        return False, "missing template field"
+        # Default to advisory when the rule otherwise has the expected
+        # shape (non-empty rule text). This matches the natural output
+        # the postmortem LLM produces when not explicitly asked for the
+        # template field. The rule is mutated so the persisted form
+        # carries the explicit template, satisfying downstream readers
+        # that branch on `template`.
+        has_rule_text = isinstance(rule.get("rule"), str) and rule.get("rule", "").strip()
+        if has_rule_text:
+            rule["template"] = "advisory"
+            template = "advisory"
+        else:
+            return False, "missing template field"
     if template not in TEMPLATE_SCHEMAS:
         return False, f"unknown template: {template}"
     schema = TEMPLATE_SCHEMAS[template]

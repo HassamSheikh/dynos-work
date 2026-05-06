@@ -10,8 +10,13 @@ Usage:
   python3 hooks/build_prompt_context.py file1 file2 ...
   python3 hooks/build_prompt_context.py --root /path/to/repo file1 file2 ...
   python3 hooks/build_prompt_context.py --diff <snapshot_sha> [--root .]
+  python3 hooks/build_prompt_context.py --task-dir .dynos/task-{id} [--root .]
 
-Output is printed to stdout for inclusion in a base prompt.
+Output is printed to stdout for inclusion in a base prompt. The
+``--task-dir`` form reads ``manifest.snapshot.head_sha`` and is
+preferred over ``--diff`` because it eliminates the SHA-handling
+failure mode (an abbreviated/wrong SHA passed to ``--diff`` produced
+a 1-byte sidecar silently).
 """
 
 from __future__ import annotations
@@ -153,11 +158,55 @@ def build_diff_context(snapshot_sha: str, root: Path) -> str:
     return header + "\n".join(blocks)
 
 
+def _resolve_task_dir_snapshot(task_dir: Path) -> str:
+    """Read manifest.snapshot.head_sha from a task dir and return it.
+
+    Raises ValueError when the manifest is absent / unreadable / lacks a
+    snapshot. The error message names the exact path so the operator can
+    fix the inputs without spelunking. Eliminates the abbreviated-SHA
+    failure mode of --diff because the SHA is read directly from the
+    state-machine's authoritative record rather than typed by hand.
+    """
+    import json as _json
+    manifest_path = task_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"manifest.json not found at {manifest_path}")
+    try:
+        manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"failed to read {manifest_path}: {exc}") from exc
+    snapshot = manifest.get("snapshot") if isinstance(manifest, dict) else None
+    if not isinstance(snapshot, dict):
+        raise ValueError(
+            f"{manifest_path} has no `snapshot` field — run "
+            "`ctl record-snapshot` before invoking --task-dir"
+        )
+    head_sha = snapshot.get("head_sha")
+    if not isinstance(head_sha, str) or not head_sha.strip():
+        raise ValueError(
+            f"{manifest_path}.snapshot.head_sha is empty or missing"
+        )
+    return head_sha.strip()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build pre-loaded file context for agent prompts")
     parser.add_argument("files", nargs="*", help="File paths to pre-load")
     parser.add_argument("--root", default=".", help="Repo root (default: cwd)")
     parser.add_argument("--diff", metavar="SHA", help="Pre-load files changed since this git SHA")
+    parser.add_argument(
+        "--task-dir",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Pre-load files changed since the snapshot recorded in "
+            "PATH/manifest.json. Reads `snapshot.head_sha` from the "
+            "manifest — preferred over --diff for residual-drain "
+            "workflows because it removes the SHA-handling failure "
+            "mode (abbreviated/wrong SHAs passed to --diff produced "
+            "a 1-byte sidecar silently)."
+        ),
+    )
     parser.add_argument(
         "--sidecar",
         metavar="PATH",
@@ -177,7 +226,20 @@ def main() -> None:
 
     root = Path(args.root).resolve()
 
-    if args.diff:
+    # --task-dir and --diff are mutually exclusive. If both are passed,
+    # --task-dir wins (it's the authoritative source of the snapshot
+    # SHA) and --diff is silently ignored.
+    if args.task_dir:
+        task_dir_path = Path(args.task_dir)
+        if not task_dir_path.is_absolute():
+            task_dir_path = (root / task_dir_path).resolve()
+        try:
+            sha_from_manifest = _resolve_task_dir_snapshot(task_dir_path)
+        except ValueError as exc:
+            print(f"build_prompt_context: {exc}", file=sys.stderr)
+            sys.exit(1)
+        content = build_diff_context(sha_from_manifest, root)
+    elif args.diff:
         content = build_diff_context(args.diff, root)
     elif args.files:
         content = build_file_context(args.files, root)
