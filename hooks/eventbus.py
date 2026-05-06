@@ -130,8 +130,45 @@ def run_dashboard(root: Path, _payload: dict) -> bool:
     )
 
 
+# Skip the registry set-active update if the project was marked active
+# within the last _REGISTER_DEBOUNCE_SECONDS. /dynos-work:start runs
+# `registry.py register` at task init (which itself sets last_active_at),
+# so a task-completed handler firing seconds-to-minutes later just
+# overwrites a recent-enough timestamp. Same pattern as
+# _DASHBOARD_DEBOUNCE_SECONDS above. Skipping saves ~one registry-file
+# read+write per completed task.
+_REGISTER_DEBOUNCE_SECONDS = 60
+
+
 def run_register(root: Path, _payload: dict) -> bool:
-    """Mark project active in global registry."""
+    """Mark project active in global registry. Debounced: skip if the
+    registry entry's last_active_at is within _REGISTER_DEBOUNCE_SECONDS
+    of now."""
+    try:
+        from datetime import datetime, timezone  # noqa: PLC0415
+        import json  # noqa: PLC0415
+        registry_path = Path.home() / ".dynos" / "registry.json"
+        if registry_path.is_file():
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+            target = str(root.resolve())
+            for proj in data.get("projects", []) or []:
+                if proj.get("path") != target:
+                    continue
+                last = proj.get("last_active_at", "")
+                if not isinstance(last, str) or not last:
+                    break
+                try:
+                    last_dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+                    age = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                except (ValueError, TypeError):
+                    break
+                if 0 <= age < _REGISTER_DEBOUNCE_SECONDS:
+                    return True  # Skip — registry is fresh enough
+                break
+    except (OSError, ValueError):
+        # Registry missing/unreadable — fall through to the subprocess
+        # call which will create it (or surface the underlying error).
+        pass
     return _run(
         [_PYTHON3, str(SCRIPT_DIR / "registry.py"), "set-active", str(root)],
         root,
