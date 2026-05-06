@@ -108,7 +108,7 @@ def build_diff_context(snapshot_sha: str, root: Path) -> str:
     # an empty diff silently, leading to a 1-byte sidecar. Surface the bad
     # SHA via stderr + non-empty return so the caller notices.
     verify = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{snapshot_sha}^{{commit}}"],
+        [_GIT or "git", "-C", str(root), "rev-parse", "--verify", "--quiet", f"{snapshot_sha}^{{commit}}"],
         capture_output=True, text=True,
     )
     if verify.returncode != 0:
