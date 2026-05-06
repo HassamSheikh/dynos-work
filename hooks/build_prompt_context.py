@@ -17,9 +17,16 @@ Output is printed to stdout for inclusion in a base prompt.
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# PRO-007: pin python3/git binaries to absolute paths resolved at import time
+# so PATH-shadowing cannot substitute a malicious binary. Mirrors hooks/worktree.py
+# and hooks/daemon.py.
+_PYTHON3: str = shutil.which("python3") or sys.executable
+_GIT: str | None = shutil.which("git")
 
 # Hard caps to prevent the pre-load itself from blowing up context
 _MAX_FILE_CHARS = 40_000
@@ -93,7 +100,7 @@ def build_file_context(files: list[str], root: Path) -> str:
 def build_diff_context(snapshot_sha: str, root: Path) -> str:
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "diff", "--name-only", "--diff-filter=AMRD", snapshot_sha],
+            [_GIT or "git", "-C", str(root), "diff", "--name-only", "--diff-filter=AMRD", snapshot_sha],
             capture_output=True, text=True, check=True,
         )
         changed = [f.strip() for f in result.stdout.splitlines() if f.strip()]
@@ -105,7 +112,7 @@ def build_diff_context(snapshot_sha: str, root: Path) -> str:
 
     try:
         diff_result = subprocess.run(
-            ["git", "-C", str(root), "diff", snapshot_sha, "--", *changed],
+            [_GIT or "git", "-C", str(root), "diff", snapshot_sha, "--", *changed],
             capture_output=True, text=True, check=True,
         )
         diff_text = diff_result.stdout

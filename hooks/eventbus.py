@@ -10,6 +10,7 @@ previous || true behavior).
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -27,6 +28,10 @@ from lib_events import (
 from lib_log import log_event
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+
+# PRO-007: pin python3 to absolute path resolved at import time so
+# PATH-shadowing cannot substitute a malicious binary.
+_PYTHON3: str = shutil.which("python3") or sys.executable
 
 # ---------------------------------------------------------------------------
 # Handler functions
@@ -83,7 +88,7 @@ def _run(cmd: list[str], root: Path, timeout: int = _DEFAULT_HANDLER_TIMEOUT) ->
 def run_policy_engine(root: Path, _payload: dict) -> bool:
     """Compute EMA scores and write routing policies from retrospectives."""
     return _run(
-        ["python3", str(SCRIPT_DIR / "patterns.py"), "--root", str(root)],
+        [_PYTHON3, str(SCRIPT_DIR / "patterns.py"), "--root", str(root)],
         root,
         timeout=_HANDLER_TIMEOUTS["policy_engine"],
     )
@@ -92,7 +97,7 @@ def run_policy_engine(root: Path, _payload: dict) -> bool:
 def run_postmortem(root: Path, _payload: dict) -> bool:
     """Generate human-readable postmortem report."""
     return _run(
-        ["python3", str(SCRIPT_DIR / "postmortem.py"), "generate", "--root", str(root)],
+        [_PYTHON3, str(SCRIPT_DIR / "postmortem.py"), "generate", "--root", str(root)],
         root,
         timeout=_HANDLER_TIMEOUTS["postmortem"],
     )
@@ -119,7 +124,7 @@ def run_dashboard(root: Path, _payload: dict) -> bool:
         except OSError:
             pass
     return _run(
-        ["python3", str(SCRIPT_DIR / "dashboard.py"), "generate", "--root", str(root)],
+        [_PYTHON3, str(SCRIPT_DIR / "dashboard.py"), "generate", "--root", str(root)],
         root,
         timeout=_HANDLER_TIMEOUTS["dashboard"],
     )
@@ -128,7 +133,7 @@ def run_dashboard(root: Path, _payload: dict) -> bool:
 def run_register(root: Path, _payload: dict) -> bool:
     """Mark project active in global registry."""
     return _run(
-        ["python3", str(SCRIPT_DIR / "registry.py"), "set-active", str(root)],
+        [_PYTHON3, str(SCRIPT_DIR / "registry.py"), "set-active", str(root)],
         root,
         timeout=_HANDLER_TIMEOUTS["register"],
     )
@@ -156,7 +161,7 @@ def run_improve(root: Path, payload: dict) -> bool:
             # spend the 300ms than silently skip improvement.
             pass
     return _run(
-        ["python3", str(SCRIPT_DIR / "postmortem_improve.py"), "improve", "--root", str(root)],
+        [_PYTHON3, str(SCRIPT_DIR / "postmortem_improve.py"), "improve", "--root", str(root)],
         root,
         timeout=_HANDLER_TIMEOUTS["improve"],
     )
@@ -165,7 +170,7 @@ def run_improve(root: Path, payload: dict) -> bool:
 def run_agent_generator(root: Path, _payload: dict) -> bool:
     """Discover uncovered (role, task_type) slots and generate shadow agents."""
     return _run(
-        ["python3", str(SCRIPT_DIR / "agent_generator.py"), "auto", "--root", str(root)],
+        [_PYTHON3, str(SCRIPT_DIR / "agent_generator.py"), "auto", "--root", str(root)],
         root,
         timeout=_HANDLER_TIMEOUTS["agent_generator"],
     )

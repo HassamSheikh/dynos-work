@@ -50,6 +50,9 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+# PRO-007: pin git binary to absolute path resolved at import time.
+_GIT: str | None = shutil.which("git")
+
 # ---------------------------------------------------------------------------
 # Worktree management
 # ---------------------------------------------------------------------------
@@ -65,7 +68,7 @@ def create_worktree(repo: Path, ref: str, dest: Path) -> None:
     keeps full control of branches and HEAD.
     """
     r = subprocess.run(
-        ["git", "worktree", "add", "--detach", str(dest), ref],
+        [_GIT or "git", "worktree", "add", "--detach", str(dest), ref],
         cwd=repo, capture_output=True, text=True,
     )
     if r.returncode != 0:
@@ -79,7 +82,7 @@ def remove_worktree(repo: Path, dest: Path) -> None:
     if not dest.exists():
         return
     r = subprocess.run(
-        ["git", "worktree", "remove", "--force", str(dest)],
+        [_GIT or "git", "worktree", "remove", "--force", str(dest)],
         cwd=repo, capture_output=True, text=True,
     )
     if r.returncode != 0:
@@ -325,7 +328,7 @@ def main() -> int:
     # Validate refs exist before doing expensive worktree work
     for ref in (args.before, args.after):
         r = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", ref],
+            [_GIT or "git", "rev-parse", "--verify", "--quiet", ref],
             cwd=repo, capture_output=True, text=True,
         )
         if r.returncode != 0:

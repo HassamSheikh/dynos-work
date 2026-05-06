@@ -36,6 +36,7 @@ import inspect
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -50,6 +51,9 @@ if str(_HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(_HOOKS_DIR))
 
 from lib_core import _persistent_project_dir  # noqa: E402
+
+# PRO-007: pin git binary to absolute path resolved at import time.
+_GIT: str | None = shutil.which("git")
 
 
 __all__ = [
@@ -283,7 +287,7 @@ def _staged_files(root: Path) -> list[Path]:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "diff", "--cached", "--name-only"],
+            [_GIT or "git", "-C", str(root), "diff", "--cached", "--name-only"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -311,7 +315,7 @@ def _all_tracked_files(root: Path) -> list[Path]:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "ls-files"],
+            [_GIT or "git", "-C", str(root), "ls-files"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -1126,7 +1130,7 @@ def _cmd_describe(args: argparse.Namespace) -> int:
 def _repo_toplevel(root: Path) -> Optional[Path]:
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            [_GIT or "git", "-C", str(root), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             timeout=5,
