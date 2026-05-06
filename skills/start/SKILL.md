@@ -522,6 +522,8 @@ The deterministic gap analysis ALWAYS runs. The LLM auditor only runs for high/c
 
 2. **LLM plan auditor (conditional):** Only spawn `spec-completion-auditor` when `risk_level` is `high` or `critical`. For low/medium risk, the deterministic checks (`validate_task_artifacts` for criteria coverage + gap analysis for code/plan alignment) are authoritative — skip the LLM spawn. Log: `{timestamp} [SKIP] plan-audit-llm — risk_level={risk}`.
 
+   Additionally, surface any segment where `len(segment.files_expected) >= 10` (computed budget ≥ 35, the `TOOL_BUDGET_ADVISORY` threshold from `hooks/lib_tool_budget.py`) as a non-blocking advisory finding `near-budget-ceiling`. The advisory is informational and does NOT block plan approval; it warns the operator that the segment is approaching the 11-file overflow ceiling and may want decomposition.
+
 3. If gap analysis finds gaps, or (when invoked) the auditor finds gaps, route back to planning, repair, and rerun deterministic artifact validation.
 4. Create a git branch safety net: `dynos/task-{id}-snapshot`.
 

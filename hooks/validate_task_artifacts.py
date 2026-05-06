@@ -21,6 +21,12 @@ from pathlib import Path
 
 from lib_validate import validate_task_artifacts
 
+# task-20260506-001 (AC-9, AC-10): the per-segment tool-budget overflow guard
+# fires inside lib_validate.validate_task_artifacts when manifest.stage is in
+# {PLANNING, PLAN_REVIEW, EXECUTION_GRAPH_BUILD}. The stage is read from
+# manifest.json by lib_validate; this entry point passes through unchanged.
+# See hooks/lib_tool_budget.py::would_overflow.
+
 
 def main() -> int:
     args = sys.argv[1:]

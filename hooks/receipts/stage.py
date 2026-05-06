@@ -278,7 +278,16 @@ def receipt_executor_routing(
     task_dir: Path,
     segments: list[dict],
 ) -> Path:
-    """Write receipt proving all executor routing decisions were made."""
+    """Write receipt proving all executor routing decisions were made.
+
+    task-20260506-001 (AC-8): each segment dict may carry a ``tool_budget`` int
+    field computed by ``hooks/router.py::build_executor_plan`` via
+    ``hooks/lib_tool_budget.py::compute_segment_budget``. This writer accepts
+    the segments list verbatim, so ``tool_budget`` flows through transparently;
+    no schema change is required at this writer's signature. Older receipts
+    written before the field existed simply lack it — the inject-prompt cache
+    miss path in router.py recomputes on load to support in-flight migration.
+    """
     return write_receipt(
         task_dir,
         "executor-routing",
@@ -882,6 +891,12 @@ def _normalize_auditor_key(s: str) -> str:
     a canonical key like "spec-completion" that matches across forms.
     """
     s = s.strip()
+    # Plugin-namespaced subagent_types (e.g. "dynos-work:spec-completion-auditor")
+    # appear in spawn-log.jsonl when the harness routes through a plugin. Strip
+    # the "dynos-work:" prefix so the normalized key matches receipt callers
+    # passing the bare auditor name.
+    if s.startswith("dynos-work:"):
+        s = s[len("dynos-work:"):]
     if s.startswith("audit-"):
         s = s[len("audit-"):]
     if s.endswith("-auditor"):
