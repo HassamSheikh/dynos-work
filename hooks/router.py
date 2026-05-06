@@ -13,9 +13,13 @@ import json
 import hashlib
 import math
 import os
+import shutil
 import tempfile
 import zlib
 from pathlib import Path
+
+# PRO-007: pin git binary to absolute path resolved at import time.
+_GIT: str | None = shutil.which("git")
 
 from lib_core import (
     _persistent_project_dir,
@@ -1378,7 +1382,7 @@ def _resolve_diff_files(root: Path, args: argparse.Namespace) -> list[str] | Non
     import subprocess
     try:
         proc = subprocess.run(
-            ["git", "diff", "--name-only", base],
+            [_GIT or "git", "diff", "--name-only", base],
             cwd=str(root),
             capture_output=True,
             text=True,

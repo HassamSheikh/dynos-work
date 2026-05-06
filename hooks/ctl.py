@@ -8,11 +8,15 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+# PRO-007: pin git binary to absolute path resolved at import time.
+_GIT: str | None = shutil.which("git")
 
 from lib_core import (
     VALID_CLASSIFICATION_TYPES,
@@ -1956,7 +1960,7 @@ def _git_dirty_files(root: Path, files_expected: list[str]) -> set[str]:
         return set()
     import subprocess as _subprocess
 
-    cmd = ["git", "status", "--porcelain", "--", *files_expected]
+    cmd = [_GIT or "git", "status", "--porcelain", "--", *files_expected]
     result = _subprocess.run(
         cmd,
         cwd=root,
@@ -1997,7 +2001,7 @@ def _verify_git_diff_covers_files(
     if not snapshot_sha or not isinstance(snapshot_sha, str) or not snapshot_sha.strip():
         raise ValueError("snapshot_sha required")
 
-    diff_cmd = ["git", "-C", str(root), "diff", "--name-only", "--diff-filter=AMRD", snapshot_sha]
+    diff_cmd = [_GIT or "git", "-C", str(root), "diff", "--name-only", "--diff-filter=AMRD", snapshot_sha]
     try:
         diff_result = _subprocess.run(
             diff_cmd,
@@ -2014,7 +2018,7 @@ def _verify_git_diff_covers_files(
     if diff_result.returncode != 0:
         raise ValueError(f"git command failed: {diff_result.returncode} (cmd: {diff_cmd!r})")
 
-    untracked_cmd = ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"]
+    untracked_cmd = [_GIT or "git", "-C", str(root), "ls-files", "--others", "--exclude-standard"]
     try:
         untracked_result = _subprocess.run(
             untracked_cmd,
@@ -2735,7 +2739,7 @@ def cmd_record_snapshot(args: argparse.Namespace) -> int:
     if head_sha is None:
         try:
             r = _sub.run(
-                ["git", "-C", str(root), "rev-parse", "HEAD"],
+                [_GIT or "git", "-C", str(root), "rev-parse", "HEAD"],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             if r.returncode != 0:
@@ -2760,7 +2764,7 @@ def cmd_record_snapshot(args: argparse.Namespace) -> int:
     if branch is None:
         try:
             r = _sub.run(
-                ["git", "-C", str(root), "symbolic-ref", "--short", "HEAD"],
+                [_GIT or "git", "-C", str(root), "symbolic-ref", "--short", "HEAD"],
                 capture_output=True, text=True, timeout=10, check=False,
             )
             branch = r.stdout.strip() if r.returncode == 0 else ""
@@ -3035,7 +3039,7 @@ def cmd_run_audit_setup(args: argparse.Namespace) -> int:
             import subprocess as _subprocess
 
             result = _subprocess.run(
-                ["git", "diff", "--name-only", diff_base],
+                [_GIT or "git", "diff", "--name-only", diff_base],
                 cwd=root,
                 text=True,
                 capture_output=True,
@@ -3640,7 +3644,7 @@ def cmd_run_audit_reaudit_plan(args: argparse.Namespace) -> int:
         import subprocess as _subprocess
 
         result = _subprocess.run(
-            ["git", "diff", "--name-only", diff_base],
+            [_GIT or "git", "diff", "--name-only", diff_base],
             cwd=root,
             text=True,
             capture_output=True,

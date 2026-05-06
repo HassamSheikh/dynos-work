@@ -4,13 +4,18 @@ Runs at most one benchmark per task-completed event. The scheduler's
 windowing logic (shadow_rebenchmark_task_window) prevents over-firing.
 """
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 EVENT_TYPE = "task-completed"
 
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 AUTO_PY = SCRIPT_DIR.parent / "sandbox" / "calibration" / "auto.py"
+
+# PRO-007: pin python3 to absolute path resolved at import time.
+_PYTHON3: str = shutil.which("python3") or sys.executable
 
 
 def run(root, payload):
@@ -19,7 +24,7 @@ def run(root, payload):
     env = {**os.environ, "PYTHONPATH": f"{SCRIPT_DIR}:{os.environ.get('PYTHONPATH', '')}"}
     try:
         result = subprocess.run(
-            ["python3", str(AUTO_PY), "run", "--root", str(root), "--limit", "1"],
+            [_PYTHON3, str(AUTO_PY), "run", "--root", str(root), "--limit", "1"],
             cwd=str(root),
             env=env,
             capture_output=True,

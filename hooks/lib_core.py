@@ -7,7 +7,9 @@ import fcntl
 import functools
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,11 @@ from write_policy import WriteAttempt, _get_capability_key, require_write_allowe
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# PRO-007: pin python3/git binaries to absolute paths resolved at import time
+# so PATH-shadowing cannot substitute a malicious binary.
+_PYTHON3: str = shutil.which("python3") or sys.executable
+_GIT: str | None = shutil.which("git")
 
 def _discover_executors() -> set[str]:
     """Auto-discover executor types from agents/*-executor.md files."""
@@ -214,7 +221,7 @@ def _resolve_git_toplevel(root_str: str) -> Optional[str]:
     """
     try:
         result = subprocess.run(
-            ["git", "-C", root_str, "rev-parse", "--git-common-dir"],
+            [_GIT or "git", "-C", root_str, "rev-parse", "--git-common-dir"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -3233,7 +3240,7 @@ def _fire_task_completed(task_dir: Path) -> None:
     payload = json.dumps({"task_id": task_id, "task_dir": str(task_dir)})
     try:
         subprocess.run(
-            ["python3", str(hooks_dir / "lib_events.py"), "emit",
+            [_PYTHON3, str(hooks_dir / "lib_events.py"), "emit",
              "--root", str(root), "--type", "task-completed", "--source", "task",
              "--payload", payload],
             env={**__import__("os").environ, "PYTHONPATH": env_path},
@@ -3255,7 +3262,7 @@ def _fire_task_completed(task_dir: Path) -> None:
             log_fh.write(f"\n=== drain dispatched for {task_id} at {now_iso()} ===\n".encode())
             log_fh.flush()
             subprocess.Popen(
-                ["python3", str(hooks_dir / "eventbus.py"), "drain",
+                [_PYTHON3, str(hooks_dir / "eventbus.py"), "drain",
                  "--root", str(root)],
                 env={**__import__("os").environ, "PYTHONPATH": env_path},
                 stdin=subprocess.DEVNULL,
